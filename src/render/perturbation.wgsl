@@ -40,15 +40,15 @@ struct Uniforms {
     slopeLighting: u32,
     supersample: u32,
     invGamma: f32,
-    /// 0 direct f32, 1 plain-f32 perturbation, 2 HDR perturbation.
+    /// 0 direct compensated, 1 compensated perturbation, 2 permits BLA.
     method: u32,
     /// View centre as plain f32, used only by the direct method.
     centre: vec2<f32>,
     /// First screen row this dispatch covers, for tiled rendering.
     rowOffset: u32,
     reuseField: u32,
-    _pad1: u32,
-    _pad2: u32,
+    columnOffset: u32,
+    columnLimit: u32,
     offsetLow: vec2<f32>,
     scaleLow: f32,
     family: u32,
@@ -566,10 +566,11 @@ fn fieldIndex(col: u32, rowIdx: u32) -> u32 {
 fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
     let row = gid.y + u.rowOffset;
-    if (gid.x >= size.x || row >= size.y) { return; }
+    let col = gid.x + u.columnOffset;
+    if (col >= min(size.x, u.columnLimit) || row >= size.y) { return; }
     // The remap pass retained this exact sample, including its escape value.
     // Reuse is enabled only for the single-sample iteration field.
-    if (u.reuseField != 0u && field[fieldIndex(gid.x, row)].y >= 0.0) {
+    if (u.reuseField != 0u && field[fieldIndex(col, row)].y >= 0.0) {
         atomicAdd(&stats[6], 1u);
         return;
     }
@@ -588,7 +589,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var sy: u32 = 0u; sy < grid; sy = sy + 1u) {
         for (var sx: u32 = 0u; sx < grid; sx = sx + 1u) {
             let jitter = vec2<f32>((f32(sx) + 0.5) * step, (f32(sy) + 0.5) * step);
-            let pixel = vec2<f32>(f32(gid.x), u.resolution.y - 1.0 - f32(row)) + jitter;
+            let pixel = vec2<f32>(f32(col), u.resolution.y - 1.0 - f32(row)) + jitter;
 
             let s = iterateAny(pixel, distanceMode);
             skipped = skipped + s.skipped;
@@ -602,7 +603,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
             // escaped, blue = log2 of the final delta, alpha = rebases. It
             // wants more than the field carries, so it writes straight out.
             if (u.mode == 2u) {
-                textureStore(output, vec2<i32>(i32(gid.x), i32(row)), vec4<f32>(
+                textureStore(output, vec2<i32>(i32(col), i32(row)), vec4<f32>(
                     f32(s.n) / f32(max(u.maxIterations, 1u)),
                     select(0.0, 1.0, s.escaped),
                     clamp((s.dzLog2 + 300.0) / 344.0, 0.0, 1.0),
@@ -617,7 +618,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else {
                 entry = vec2<f32>(select(-1.0, f32(s.n), s.escaped), s.z2);
             }
-            field[fieldIndex(gid.x * grid + sx, row * grid + sy)] = entry;
+            field[fieldIndex(col * grid + sx, row * grid + sy)] = entry;
         }
     }
 
@@ -633,7 +634,8 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(8, 8)
 fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
-    if (gid.x >= size.x || gid.y >= size.y) { return; }
+    let pixel = gid.xy + vec2<u32>(u.columnOffset, u.rowOffset);
+    if (pixel.x >= min(size.x, u.columnLimit) || pixel.y >= size.y) { return; }
 
     let distanceMode = u.mode == 1u;
     let grid = max(u.supersample, 1u);
@@ -645,9 +647,15 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var sy: u32 = 0u; sy < grid; sy = sy + 1u) {
         for (var sx: u32 = 0u; sx < grid; sx = sx + 1u) {
-            let col = gid.x * grid + sx;
-            let rowIdx = gid.y * grid + sy;
+            let col = pixel.x * grid + sx;
+            let rowIdx = pixel.y * grid + sy;
             let entry = field[fieldIndex(col, rowIdx)];
+            // Unknown is distinct from a determined interior sample. Alpha is
+            // coverage metadata, never a request to blend colours.
+            if (entry.y < 0.0) {
+                textureStore(output, vec2<i32>(pixel), vec4<f32>(0.0));
+                return;
+            }
 
             if (!distanceMode) {
                 if (entry.x < 0.0) {
@@ -686,6 +694,6 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let linearColour = accumulated / f32(grid * grid);
     // Encode out of linear light at the very end.
     let encoded = pow(max(linearColour, vec3<f32>(0.0)), vec3<f32>(u.invGamma));
-    textureStore(output, vec2<i32>(i32(gid.x), i32(gid.y)),
+    textureStore(output, vec2<i32>(pixel),
                  vec4<f32>(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
 }

@@ -20,15 +20,15 @@
     <label>Location name<input id="location-name" maxlength="80" placeholder="Untitled location"></label>
     <div class="row"><button id="save">Save location</button><button id="share">Copy link</button></div>
     <label>Saved locations<select id="saved"><option value="">No saved locations</option></select></label>
-    <details><summary>Exact coordinates</summary><form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label>Vertical span<input id="span" spellcheck="false"></label><button>Go to coordinates</button></form></details>
+    <details><summary>Exact coordinates & diagnostics</summary><form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label>Vertical span<input id="span" spellcheck="false"></label><button>Go to coordinates</button></form><label class="profiling-switch"><input id="profiling" type="checkbox"> Measure GPU timings</label><p id="profiling-data">GPU timings are off.</p></details>
     <p class="help">Hold left / right to zoom in / out.<br>Steer with the pointer. Shift-drag to pan.<br>Wheel zooms. + / − and arrows also work.<br>J toggles Julia preview; left-drag selects c.<br>M opens Julia / returns. Esc stops motion.</p>
   </aside>
   <section id="julia-preview" hidden aria-label="Julia preview" aria-busy="false">
     <div class="preview-heading"><strong>Julia preview</strong><button id="julia-preview-close" aria-label="Close Julia preview">×</button></div>
-    <canvas id="julia-preview-canvas" width="240" height="160" aria-label="Julia set for the selected Mandelbrot point"></canvas>
+    <div id="julia-preview-viewport"><canvas id="julia-preview-canvas" width="240" height="160" aria-label="Julia set for the selected Mandelbrot point"></canvas></div>
     <p id="julia-preview-constant"></p>
     <p id="julia-preview-status" role="status">Select a point on the Mandelbrot set.</p>
-    <p class="preview-help">Left-click or drag on Mandelbrot to select c.</p>
+    <p class="preview-help">Left-drag on Mandelbrot to select c. Drag this panel’s bottom-right corner to resize.</p>
     <button id="julia-promote" disabled aria-keyshortcuts="M">Open Julia · M</button>
   </section>
   <footer><span id="cadence">Starting WebGPU…</span><span id="freshness">Preparing first field</span><span id="depth"></span></footer>

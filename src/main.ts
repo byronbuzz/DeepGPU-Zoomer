@@ -15,9 +15,11 @@ let fields=0, recolours=0, lastFresh=0, stats:RenderStats|undefined, completedQu
 let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, dragging=false, speed=1, previousTime=0, statusTime=0, wasMoving=false;
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
+let profilingEnabled=false;
 let previewEnabled=false, selecting=false, previewBusy=false, previewPending=false, previewEpoch=0, previewRenderedEpoch=-1;
 let selectedJulia:{x:string;y:string}|null=null;
 const previewCanvas=el<HTMLCanvasElement>('julia-preview-canvas');
+let previewSize={width:previewCanvas.width,height:previewCanvas.height};
 const keys=new Set<string>(), timeline:SavedView[]=[];let timelineIndex=-1;
 let saved: {name:string;view:SavedView}[]=[];
 let frameTimes:number[]=[], frameCount=0, sessionStart=performance.now();
@@ -65,6 +67,24 @@ function queuePreview(){
   el('julia-preview').setAttribute('aria-busy','true');
   el('julia-preview-status').textContent='Updating preview…';
 }
+function measurePreview(){
+  if(!previewEnabled)return;
+  const rect=el('julia-preview-viewport').getBoundingClientRect();
+  if(rect.width<=0||rect.height<=0)return;
+  const dpr=devicePixelRatio||1;
+  const limit=gpuContext?.device.limits.maxTextureDimension2D??Infinity;
+  const limits=gpuContext?.device.limits;
+  const pixelLimit=limits?Math.floor(Math.min(limits.maxStorageBufferBindingSize,limits.maxBufferSize)/8):Infinity;
+  const scale=Math.min(dpr,limit/rect.width,limit/rect.height,Math.sqrt(pixelLimit/(rect.width*rect.height)));
+  const round=scale<dpr?Math.floor:Math.round;
+  const width=Math.max(1,round(rect.width*scale)),height=Math.max(1,round(rect.height*scale));
+  if(width===previewSize.width&&height===previewSize.height)return;
+  previewSize={width,height};
+  // Invalidate the in-flight size immediately; the scheduler coalesces updates.
+  if(selectedJulia)queuePreview();
+}
+const previewObserver=new ResizeObserver(measurePreview);
+previewObserver.observe(el('julia-preview-viewport'));
 function selectJuliaAtPointer(){
   if(view.family!=='mandelbrot')return;
   const rect=canvas.getBoundingClientRect();
@@ -79,6 +99,7 @@ function setPreview(enabled:boolean){
   previewEnabled=enabled && view.family==='mandelbrot';selecting=false;
   if(!previewEnabled){previewEpoch++;previewPending=false;previewEngine?.abort();}
   syncJuliaPreview();
+  if(previewEnabled)measurePreview();
 }
 function toggleJuliaPreview(){
   if(view.family!=='mandelbrot')return;
@@ -89,13 +110,18 @@ function toggleJuliaPreview(){
 async function computeJuliaPreview(){
   if(previewBusy||!previewPending||!previewEnabled||!selectedJulia||!gpuContext)return;
   previewBusy=true;previewPending=false;
-  const epoch=previewEpoch,selected={...selectedJulia};
+  const epoch=previewEpoch,selected={...selectedJulia},size={...previewSize};
   const current=()=>previewEnabled && view.family==='mandelbrot' && previewEpoch===epoch;
   try{
     // One persistent small renderer, with its own fields/history/uniforms.
     if(!previewEngine){previewEngine=new WebGpuRenderer(gpuContext,previewCanvas);await previewEngine.init();}
     if(!current())return;
-    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(previewCanvas.height),width:previewCanvas.width,height:previewCanvas.height,maxIterations:Math.min(512,view.iterations),colors:{...colors,mode:0,supersample:1},family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,tileRows:8,isCurrent:current};
+    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(size.height),width:size.width,height:size.height,maxIterations:Math.min(512,view.iterations),colors:{...colors,mode:0,supersample:1},family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,tileRows:8,isCurrent:current};
+    // Establish the new pixel geometry before any partial region is published.
+    // Compatible completed samples are reprojected immediately while refinement runs.
+    if(previewCanvas.width!==size.width)previewCanvas.width=size.width;
+    if(previewCanvas.height!==size.height)previewCanvas.height=size.height;
+    previewEngine.reproject(req);
     const result=await previewEngine.render(req);
     if(current()&&result.completed){
       previewEngine.reproject(req);previewRenderedEpoch=epoch;
@@ -131,7 +157,7 @@ async function compute(){
   }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
   finally{busy=false;if(camera.revision!==revision||g!==generation)dirty=true;}
 }
-function resize(){const dpr=devicePixelRatio||1;const width=Math.round(innerWidth*dpr),height=Math.round(innerHeight*dpr);if(canvas.width===width&&canvas.height===height)return;canvas.width=width;canvas.height=height;quality=1;dirty=true;}
+function resize(){measurePreview();const dpr=devicePixelRatio||1;const width=Math.round(innerWidth*dpr),height=Math.round(innerHeight*dpr);if(canvas.width===width&&canvas.height===height)return;canvas.width=width;canvas.height=height;quality=1;dirty=true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -143,12 +169,24 @@ function tick(time:number){
     const nowMoving=moving();
     if(wasMoving && !nowMoving){quality=1;dirty=true;}
     wasMoving=nowMoving;
-    if(engine){engine.reproject(request(1));if(dirty&&!busy)void compute();}
-    if(!busy&&!dirty&&!previewBusy&&previewPending)void computeJuliaPreview();
+    if(engine){
+      engine.reproject(request(1));
+      // Give the latest preview one turn between main jobs, without awaiting it.
+      // Both renderers keep at most one bounded numerical band in the queue.
+      if(!busy&&!previewBusy&&previewPending)void computeJuliaPreview();
+      if(dirty&&!busy)void compute();
+    }
     if(time-statusTime>250){statusTime=time;const mean=frameTimes.reduce((a,b)=>a+b,0)/Math.max(1,frameTimes.length);cadence.textContent=`Presentation ${Math.round(1000/mean)||0} Hz`;
       const fresh=!busy && !dirty && !moving() && lastRevision===camera.revision && completedQuality===1;
-      freshness.textContent=error?'Rendering stopped':`${fresh?'Refined':busy?'Computing':'Preview'} · ${Math.round(completedQuality*100)}% spatial · ${lastFresh?((time-lastFresh)/1000).toFixed(1)+'s since field':'first field pending'}`;
+      const progress=engine?.debugProgress();
+      const state=fresh?'Refined':progress?.active&&progress.regions?`Refining · ${progress.regions} regions`:busy?'Computing':'Preview';
+      freshness.textContent=error?'Rendering stopped':`${state} · ${Math.round(completedQuality*100)}% spatial · ${lastFresh?((time-lastFresh)/1000).toFixed(1)+'s since field':'first field pending'}`;
       depth.textContent=`${new Decimal(2.8).div(camera.span).toExponential(2)}× · ${view.iterations.toLocaleString()} iterations`;
+      if(profilingEnabled&&engine){
+        const profile=engine.performance();
+        const phases=Object.entries(profile.phases).filter(([,p])=>p.count).map(([name,p])=>`${name==='calculate'?'Calculation':'Shading'}: ${p.meanMs.toFixed(2)} ms mean, ${p.p95Ms.toFixed(2)} ms p95 (${p.count} samples)`);
+        el('profiling-data').textContent=!profile.supported?'GPU timings are unavailable on this device.':phases.join(' · ')||'Waiting for the next render.';
+      }
     }
   }
   requestAnimationFrame(tick);
@@ -181,6 +219,7 @@ el('back').onclick=()=>{if(timelineIndex>0){load(timeline[--timelineIndex],false
 el('forward').onclick=()=>{if(timelineIndex<timeline.length-1){load(timeline[++timelineIndex],false);historyButtons();persist();}};
 PLACES.forEach((p,i)=>el<HTMLSelectElement>('places').add(new Option(p.name,String(i))));el<HTMLSelectElement>('places').onchange=e=>{const v=(e.target as HTMLSelectElement).value;if(v!=='')load(PLACES[Number(v)]);};
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
+el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
 el<HTMLInputElement>('iterations').onchange=e=>{try{load({...snapshot(),iterations:Number((e.target as HTMLInputElement).value)});}catch(err){message(String(err));}};
 el<HTMLSelectElement>('palette').onchange=e=>{colors.palette=Number((e.target as HTMLSelectElement).value);dirty=true;if(previewEnabled)queuePreview();};
 el<HTMLInputElement>('cycle').oninput=e=>{colors.cycle=Number((e.target as HTMLInputElement).value);dirty=true;if(previewEnabled)queuePreview();};
@@ -194,13 +233,13 @@ export const ready=(async()=>{
   try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}savedOptions();
   try{const restored=location.hash?decodeView(location.hash.slice(1)):JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null');load(restored||HOME,false);}catch{load(HOME,false);message('The saved view could not be read; showing the whole set.');}
   checkpoint();resize();requestAnimationFrame(tick);
-  try{const ctx=await acquireGpu();gpuContext=ctx;const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
+  try{const ctx=await acquireGpu();gpuContext=ctx;measurePreview();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
   catch(e){error=String(e);message(error);throw e;}
 })();
 // Development-only access exercises the displayed app and its real field.
 export const testing = import.meta.env.DEV ? {
   load, snapshot, camera, get engine(){return engine;},
-  juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,selected:selectedJulia?{...selectedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null}),
+  juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,size:{...previewSize},selected:selectedJulia?{...selectedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null}),
   status:()=>({busy,dirty,error,fields,recolours,lastRevision,revision:camera.revision,quality:completedQuality,stats,frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
   resetTiming(){frameTimes=[];frameCount=0;sessionStart=performance.now();},
 } : undefined;

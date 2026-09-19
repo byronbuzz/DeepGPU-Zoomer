@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { direct } from './direct.mjs';
 import { presentationChecks } from './presentation.mjs';
+import { streamingChecks } from './streaming.mjs';
 
 const output=process.env.GPU_ZOOMER_TEST_DIR || 'F:/Coding/Temp/GPU-Zoomer-3-qualification/app-verification';
 fs.mkdirSync(output,{recursive:true});
@@ -14,12 +15,12 @@ const report={browser:null,adapter:null,checks:[],numerical:[],gpuChecks:[],erro
 page.on('pageerror',e=>report.errors.push(String(e)));
 page.on('console',m=>{if(m.type()==='error'&&!m.text().includes('404'))report.errors.push(m.text());});
 const app=async fn=>page.evaluate(fn);
-const status=()=>app(async()=>{const a=await import('/src/main.ts');return a.testing.status();});
+const status=()=>app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.status();});
 const check=(name,pass,detail)=>{report.checks.push({name,pass,detail});console.log(`${pass?'PASS':'FAIL'} ${name}${detail?' '+JSON.stringify(detail):''}`);};
 const settle=async()=>{const started=Date.now();for(;;){const s=await status();if(s.error)throw Error(s.error);if(!s.busy&&!s.dirty&&s.quality===1)return s;if(Date.now()-started>120000)throw Error('Refinement timeout');await page.waitForTimeout(100);}};
 async function compare(name){
   const s=await settle();
-  const data=await app(async()=>{const a=await import('/src/main.ts');return {view:a.testing.snapshot(),field:Array.from(await a.testing.engine.debugReadField()),width:document.querySelector('canvas').width,height:document.querySelector('canvas').height};});
+  const data=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return {view:a.testing.snapshot(),field:Array.from(await a.testing.engine.debugReadField()),width:document.querySelector('canvas').width,height:document.querySelector('canvas').height};});
   const rows=[];
   for(let j=0;j<7;j++)for(let i=0;i<7;i++){
     const x=Math.floor((i+.5)*data.width/7),y=Math.floor((j+.5)*data.height/7);
@@ -34,54 +35,55 @@ async function compare(name){
 }
 try{
   for(const result of await presentationChecks(context,process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183')) check(result.name,result.pass,result.detail);
+  for(const result of await streamingChecks(context,process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183')) check(result.name,result.pass,result.detail);
   await page.goto(process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183');
-  report.adapter=await app(async()=>{const a=await import('/src/main.ts');await a.ready;const gpu=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});return {vendor:gpu.info.vendor,architecture:gpu.info.architecture,fallback:gpu.info.isFallbackAdapter};});
+  report.adapter=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;const gpu=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});return {vendor:gpu.info.vendor,architecture:gpu.info.architecture,fallback:gpu.info.isFallbackAdapter};});
   report.browser=context.browser().version();
   check('physical AMD adapter',report.adapter.vendor==='amd'&&report.adapter.fallback===false,report.adapter);
   for(const [place,name] of [[0,'mandelbrot-home'],[1,'mandelbrot-seahorse'],[2,'mandelbrot-6e-42'],[3,'mandelbrot-1e50'],[4,'julia-1e50']]){
     await page.selectOption('#places',String(place));await compare(name);
   }
-  await app(async()=>{const a=await import('/src/main.ts');const {HOME}=await import('/src/state.ts');a.testing.load({...HOME,family:'julia',x:'0'});});await compare('julia-home');
+  await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);const {HOME}=await import('/src/state.ts');a.testing.load({...HOME,family:'julia',x:'0'});});await compare('julia-home');
   // An already-escaped Julia point must be reported at iteration zero.
-  await app(async()=>{const a=await import('/src/main.ts');a.testing.load({...a.testing.snapshot(),x:'15',y:'15',span:'1e-30'});});await compare('julia-initial-bailout');
+  await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);a.testing.load({...a.testing.snapshot(),x:'15',y:'15',span:'1e-30'});});await compare('julia-initial-bailout');
   await page.selectOption('#places','2');await settle();
   const before=await status();await page.selectOption('#palette','2');await settle();const after=await status();
   check('palette reuses numeric field',after.fields===before.fields&&after.recolours>before.recolours,{before:before.fields,after:after.fields,beforeStats:before.stats,afterStats:after.stats});
-  await page.selectOption('#places','4');await settle();const exact=await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();});
+  await page.selectOption('#places','4');await settle();const exact=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
   await page.locator('#location-name').fill('Deep Julia test');await page.locator('#save').click();await page.locator('#share').click();
-  await page.reload();await app(async()=>{const a=await import('/src/main.ts');await a.ready;});await settle();
-  const restored=await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();});check('exact share reload',JSON.stringify(exact)===JSON.stringify(restored));
+  await page.reload();await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;});await settle();
+  const restored=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});check('exact share reload',JSON.stringify(exact)===JSON.stringify(restored));
   await page.selectOption('#places','0');await settle();await page.locator('#toggle').click();
   await page.mouse.move(220,240);await page.mouse.wheel(0,-30);await settle();
   check('short wheel settles without more input',(await status()).quality===1);
   await page.mouse.down();await page.waitForTimeout(35);await page.mouse.up();await settle();check('short hold release refines',(await status()).quality===1);
-  const m=await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();});
+  const m=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
   await page.locator('#fractal').press('j');
-  await page.waitForFunction(async()=>{const a=await import('/src/main.ts');const p=a.testing.juliaPreview();return p.enabled&&!p.busy&&!p.pending&&p.renderedEpoch===p.epoch;});
-  check('J previews Julia without changing the Mandelbrot camera',JSON.stringify(m)===JSON.stringify(await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();}))&&await page.locator('#julia-preview').isVisible());
-  const selected=await app(async()=>{const a=await import('/src/main.ts');const p=a.testing.camera.point(360,280,innerWidth,innerHeight);return{x:p.x.toString(),y:p.y.toString()};});
+  await page.waitForFunction(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);const p=a.testing.juliaPreview();return p.enabled&&!p.busy&&!p.pending&&p.renderedEpoch===p.epoch;});
+  check('J previews Julia without changing the Mandelbrot camera',JSON.stringify(m)===JSON.stringify(await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();}))&&await page.locator('#julia-preview').isVisible());
+  const selected=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);const p=a.testing.camera.point(360,280,innerWidth,innerHeight);return{x:p.x.toString(),y:p.y.toString()};});
   await page.mouse.move(330,260);await page.mouse.down();await page.mouse.move(360,280);await page.mouse.up();
-  await page.waitForFunction(async()=>{const a=await import('/src/main.ts');const p=a.testing.juliaPreview();return !p.busy&&!p.pending&&p.renderedEpoch===p.epoch;});
-  const preview=await app(async()=>{const a=await import('/src/main.ts');return a.testing.juliaPreview();});
-  check('Julia selection drag changes c without moving the main view',JSON.stringify(selected)===JSON.stringify(preview.selected)&&JSON.stringify(m)===JSON.stringify(await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();})));
+  await page.waitForFunction(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);const p=a.testing.juliaPreview();return !p.busy&&!p.pending&&p.renderedEpoch===p.epoch;});
+  const preview=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.juliaPreview();});
+  check('Julia selection drag changes c without moving the main view',JSON.stringify(selected)===JSON.stringify(preview.selected)&&JSON.stringify(m)===JSON.stringify(await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();})));
   await page.locator('#fractal').press('m');await settle();
-  const promoted=await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();});
+  const promoted=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
   check('M promotes the exact selected Julia constant',promoted.family==='julia'&&promoted.jx===selected.x&&promoted.jy===selected.y);
   await page.locator('#fractal').press('m');await settle();
-  check('M restores the exact Mandelbrot camera',JSON.stringify(m)===JSON.stringify(await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();})));
+  check('M restores the exact Mandelbrot camera',JSON.stringify(m)===JSON.stringify(await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();})));
   await page.locator('#toggle').click();
   // Stale family results must never become the final field after a rapid switch.
-  await page.selectOption('#places','2');await page.selectOption('#places','4');await settle();check('rapid switch completes latest family',(await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot();})).family==='julia');
+  await page.selectOption('#places','2');await page.selectOption('#places','4');await settle();check('rapid switch completes latest family',(await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();})).family==='julia');
   await page.setViewportSize({width:390,height:844});await settle();
   check('narrow layout has no horizontal overflow',await app(()=>document.documentElement.scrollWidth===innerWidth));await page.screenshot({path:path.join(output,'narrow.png')});
   await page.setViewportSize({width:2560,height:1440});await page.selectOption('#places','2');await settle();
   await page.locator('#toggle').click();await page.mouse.move(1190,720);await page.locator('#fractal').focus();
-  await app(async()=>{const a=await import('/src/main.ts');a.testing.resetTiming();});
-  const span0=await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot().span;});const fields0=(await status()).fields;
+  await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);a.testing.resetTiming();});
+  const span0=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot().span;});const fields0=(await status()).fields;
   const started=performance.now();await page.mouse.down();await page.waitForTimeout(2500);await page.mouse.up();
-  const inward=await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot().span;});
+  const inward=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot().span;});
   await page.mouse.down({button:'right'});await page.waitForTimeout(2500);await page.mouse.up({button:'right'});const ended=performance.now();
-  const timing=await status();const span1=await app(async()=>{const a=await import('/src/main.ts');return a.testing.snapshot().span;});
+  const timing=await status();const span1=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot().span;});
   const frames=timing.frameTimes.filter(x=>x>0).sort((a,b)=>a-b),sum=frames.reduce((a,b)=>a+b,0);
   report.performance={viewport:[2560,1440],durationMs:ended-started,presentationHz:1000*frames.length/sum,p50Ms:frames[Math.floor(frames.length*.5)],p95Ms:frames[Math.floor(frames.length*.95)],maxMs:frames.at(-1),frames:timing.frameCount,freshFieldsDuringMotion:timing.fields-fields0,span0,inward,span1};
   console.log('PERFORMANCE',JSON.stringify(report.performance));await settle();check('deep motion refines after reversal',(await status()).quality===1);await page.screenshot({path:path.join(output,'1440p.png')});

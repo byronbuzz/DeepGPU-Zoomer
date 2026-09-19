@@ -24,9 +24,11 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
 - J toggles a small Julia preview. While it is open, left-click/drag selects
   the exact Mandelbrot point as c without zooming the main view. M opens the
   selected Julia; M again restores the preserved Mandelbrot view.
-- The preview has independent resources and latest-selection cancellation.
-  Its 240×160 image uses up to 512 iterations; promotion uses the main view's
-  unchanged iteration limit and full numerical renderer.
+- Drag the Julia panel's bottom-right corner to resize both dimensions. Its
+  backing image follows the available space and device pixel ratio, with
+  square complex-plane pixels and a stable vertical span. Selection and resize
+  changes cancel obsolete preview work. The preview uses up to 512 iterations;
+  promotion retains the main view's iteration limit and full numerical renderer.
 - Places includes whole-set, Seahorse Valley, period-1215 and structured
   Mandelbrot/Julia 1e50 views. Moving away clears the preset label.
 - Save browser-local locations, use Back/Forward, or copy a share link.
@@ -39,6 +41,13 @@ publish together before any asynchronous yield. Presentation samples the
 stored image with nearest filtering: enlarged determined pixels have hard
 boundaries. Smooth escape-time colouring remains available; there is no
 spatial blend or temporal crossfade in presentation.
+
+Single-sample escape-colour rendering publishes completed GPU regions while
+the rest of the field is still calculating. The incoming image has explicit
+sample validity and fixed geometry; unknown samples cannot replace determined
+history pixels. Each batch shades its own region, with one initial validity
+pass and one completed-image copy, rather than repeating full-image shading
+or copying for every update. Partial progress is not a completed field.
 
 During motion, a rolling grid retains fixed complex sample coordinates.
 Panning copies matching samples and calculates exposed positions. Zooming
@@ -59,11 +68,20 @@ reuse scalar numerical data. Stable grid reuse currently applies to the
 single-sample escape-colour mode; the other numerical modes retain their
 ordinary calculation path.
 
-The GPU queue receives bounded numerical bands. Orbit pipelines compile
+The GPU queue receives adaptively sized numerical regions, with visible areas
+ahead of overscan and fully retained rectangles omitted from numerical dispatch.
+The default batch floor is approximately 64K samples, aligned to workgroups:
+measurements found smaller batches sacrificed substantial throughput for little
+first-detail benefit. A batch is not guaranteed to fit one display frame.
+Compatible interrupted fields retain their determined scalar samples.
+Orbit pipelines compile
 asynchronously. Expanded views rebuild the BLA table's conservative offset
 bound while retaining the reference orbit. Statistics distinguish reference work, pipeline wait,
 BLA-table preparation, completed-field wall time and copied/computed samples.
-Those wall times include waits and are not GPU timestamp measurements.
+Those wall times include waits and are not GPU timestamp measurements. Optional
+GPU profiling reports pass durations using a bounded asynchronous timestamp
+readback pool when supported. It is off by default; these timings are neither
+hardware cycles nor physical display latency.
 
 ## Verification and limits
 
@@ -78,10 +96,13 @@ It uses an isolated sandboxed profile and checks for physical AMD hardware.
 Set `GPU_ZOOMER_URL` and `GPU_ZOOMER_TEST_DIR` to override the server and
 external evidence directory. No browser profiles or recordings belong here.
 
-Current checks include 64 CPU tests, 20 GPU arithmetic/orbit checks, atomic
+Current checks include 67 CPU tests, 20 GPU arithmetic/orbit checks, atomic
 publication across GPU fences, exact copied sample identity, nearest
 magnification/minification, palette reuse, Julia preview/promotion/return,
-rapid family changes, responsive layout and 1440p motion/refinement.
+rapid family changes, responsive layout and 1440p motion/refinement. Streaming
+checks read actual GPU presentation pixels before field completion, including
+unknown-sample fallback, incompatible Julia constants and partial-field reuse.
+Native preview resizing is checked at normal and high DPI.
 Seven numerical views compare 49 raw escape counts each with independently
 structured 512/768-bit direct evaluation, including the difficult 6e-42
 view and both original 1e50 fixtures.
@@ -91,6 +112,13 @@ uses compensated perturbation and bounded BLA; Julia uses QD-derived
 four-f32 mantissas with BLA disabled. Neither WGSL nor these tests establish
 universal error-free arithmetic. Precision grows through profiles up to
 256 u32 limbs; views beyond that range are rejected.
+
+Additional qualification at the reported 10,000-iteration view near
+(-0.730641524956718, 0.161803892923925), span 5.34548e-18, found three of 49
+sampled raw counts disagreeing with mutually agreeing 512/768-bit direct
+oracles in the preceding committed version. Its forced-BLA alternative also
+disagreed and provided no material measured speedup. This change preserves
+the existing numerical method and does not claim to repair that limitation.
 
 A roughly 60 Hz presentation callback rate does not imply 60 newly calculated
 or correctly delivered display frames. Expensive views magnify known samples
