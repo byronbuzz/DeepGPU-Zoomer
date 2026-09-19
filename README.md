@@ -32,7 +32,8 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   visible until a coherent replacement is ready. Selection updates coalesce;
   bounded images finish even during continuous dragging. Displayed c labels the
   displayed image; M always promotes the latest selection with main precision
-  and iteration limit. The preview uses at most 192×160 pixels and 256 iterations.
+  and iteration limit. The preview uses at most 192×160 pixels and its own
+  1,000-iteration limit, independent of the main viewport's limit.
 - The iteration slider is logarithmic from 32 to 1,000,000. Its value previews
   during dragging and applies on release; exact numeric entry applies on Enter.
   Old locations retain their limits. Depth uses `10^50.37×` notation without

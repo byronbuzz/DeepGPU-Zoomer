@@ -121,7 +121,7 @@ async function computeJuliaPreview(){
     // One persistent small renderer, with its own fields/history/uniforms.
     if(!previewEngine){previewEngine=new WebGpuRenderer(gpuContext,previewCanvas);await previewEngine.init();}
     if(!current())return;
-    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(size.height),width:size.width,height:size.height,maxIterations:Math.min(256,view.iterations),colors:{...colors,mode:0,supersample:1},family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,publishPartial:false,isCurrent:current};
+    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(size.height),width:size.width,height:size.height,maxIterations:1000,colors:{...colors,mode:0,supersample:1},family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,publishPartial:false,isCurrent:current};
     // Preserve the previous canvas until the complete replacement is ready.
     const result=await previewEngine.render(req);
     if(current()&&result.completed){

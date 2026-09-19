@@ -24,6 +24,9 @@ document.querySelector('#run').onclick=async()=>{
   await settle();const before=a.testing.status();el('random-colors').click();await settle();check('palette-only edits recolour without recurrence',a.testing.status().fields===before.fields&&a.testing.status().recolours>before.recolours);
   const header=el('controls').querySelector('[data-handle]'),old=el('controls').getBoundingClientRect(),child=el('family').getBoundingClientRect();header.dispatchEvent(new w.KeyboardEvent('keydown',{key:'ArrowLeft',bubbles:true}));
   const moved=el('controls').getBoundingClientRect(),movedChild=el('family').getBoundingClientRect();check('panel handle moves the whole unit',Math.abs(moved.x-old.x+10)<1&&Math.abs((child.x-old.x)-(movedChild.x-moved.x))<1);
+  a.testing.load({...a.testing.snapshot(),iterations:128});await settle();
+  const previewJobs=[],proto=Object.getPrototypeOf(a.testing.engine),render=proto.render;
+  proto.render=function(req){if(this===a.testing.engine)return render.call(this,req);const started=performance.now();return render.call(this,req).then(result=>{previewJobs.push({limit:req.maxIterations,partial:req.publishPartial,completed:result.completed,ms:performance.now()-started});return result;});};
   el('fractal').dispatchEvent(new w.KeyboardEvent('keydown',{key:'j',bubbles:true}));
   const previewSettled=async()=>{for(let i=0;i<400;i++){const p=a.testing.juliaPreview();if(p.enabled&&!p.busy&&!p.pending&&p.epoch===p.renderedEpoch)return p;await delay(25);}throw Error('Preview settle timeout');};
   await previewSettled();const previewView=a.testing.snapshot();
@@ -35,7 +38,8 @@ document.querySelector('#run').onclick=async()=>{
   el('toggle').click();check('hide includes panels and badge but leaves Julia independent',w.getComputedStyle(el('controls')).display==='none'&&w.getComputedStyle(el('palette-panel')).display==='none'&&w.getComputedStyle(el('title-badge')).display==='none'&&!el('julia-preview').hidden);
   let rendered=new Set(),lag=false;
   for(let i=0;i<35;i++){a.testing.selectPreview(200+i*8,340+Math.sin(i)*30);await delay(30);const p=a.testing.juliaPreview();if(p.renderedEpoch>=0)rendered.add(p.renderedEpoch);if(p.displayed&&JSON.stringify(p.displayed)!==JSON.stringify(p.selected))lag=true;}
-  check('rapid selection continues publishing coherent preview images',rendered.size>=2,{images:rendered.size,displayLagObserved:lag});
+  check('rapid selection continues publishing coherent preview images',rendered.size>=2,{images:rendered.size,displayLagObserved:lag,completedPreviewJobs:previewJobs.filter(p=>p.completed).length,jobMs:previewJobs.map(p=>p.ms)});
+  check('preview renders at 1000 independently of the main limit',a.testing.snapshot().iterations===128&&previewJobs.length>0&&previewJobs.every(p=>p.limit===1000&&p.partial===false&&p.completed),{mainLimit:a.testing.snapshot().iterations,previewLimits:[...new Set(previewJobs.map(p=>p.limit))]});
   a.testing.selectPreview(630,400);const latest=a.testing.juliaPreview().selected,prior=a.testing.snapshot();el('fractal').dispatchEvent(new w.KeyboardEvent('keydown',{key:'m',bubbles:true}));await settle();
   check('M promotes latest selected c and main iteration limit',a.testing.snapshot().jx===latest.x&&a.testing.snapshot().jy===latest.y&&a.testing.snapshot().iterations===prior.iterations);
   el('fractal').dispatchEvent(new w.KeyboardEvent('keydown',{key:'m',bubbles:true}));await settle();check('M restores exact prior Mandelbrot and appearance',JSON.stringify(a.testing.snapshot())===JSON.stringify(prior));
@@ -46,5 +50,6 @@ document.querySelector('#run').onclick=async()=>{
   const visible=Array.from(d.querySelectorAll('[data-panel]')).filter(p=>!p.hidden&&w.getComputedStyle(p).display!=='none').map(p=>({id:p.id,rect:p.getBoundingClientRect()}));
   check('all visible panels clamp inside a narrow viewport',visible.every(p=>p.rect.x>=0&&p.rect.y>=0&&p.rect.right<=w.innerWidth+1&&p.rect.bottom<=w.innerHeight+1),visible.map(p=>({id:p.id,x:p.rect.x,y:p.rect.y,width:p.rect.width,height:p.rect.height})));
   status.textContent=report.some(c=>!c.pass)?'FAILED':'PASSED';
+  proto.render=render;
  }catch(e){check('controls execution',false,String(e));status.textContent='FAILED';}
 };
