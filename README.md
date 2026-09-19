@@ -49,31 +49,46 @@ history pixels. Each batch shades its own region, with one initial validity
 pass and one completed-image copy, rather than repeating full-image shading
 or copying for every update. Partial progress is not a completed field.
 
-During motion, a rolling grid retains fixed complex sample coordinates.
-Panning copies matching samples and calculates exposed positions. Zooming
-changes the grid spacing by powers of two and retains exact matches on the
-nested grids. A small overscan margin preserves coverage. This follows the
-coordinate-preserving reuse principle inspected in XaoS/XaoSjs; attribution
-is in NOTICE.md. It is not a full XaoS port or an image atlas.
-One additional completed image retains broader coverage. Presentation chooses
-the finer valid source at each pixel, so a smaller new field cannot erase
-already calculated surrounding pixels. Both sources retain their own geometry
-and palette identity; neither is resampled into the numerical field.
+One renderer-owned queue serves motion and rest at the exact requested pixel
+spacing. It recursively splits pending rectangles at their midpoint. Zoom-in
+prioritises the pointer; outward zoom and pan prioritise exposed or poorly
+resolved coverage. Sparse actual target samples compete with dense work by
+visible density deficit and calculation cost. Adequate existing coverage
+suppresses sparse work; there is no mandatory whole-view preview stage.
+Sparse samples fill hard-edged display blocks only: the scalar slots between
+them remain unknown until calculated. The compositor prefers finer available
+source coverage, with exact current-view pixels authoritative at completion.
+Priorities follow the live camera between GPU batches, with regular oldest-work
+turns so other visible gaps finish. This adapts XaoS's documented dynamic
+resolution priority principles without its line-reallocation engine.
 
-Calculation resolution follows measured field cost, rather than dropping to
-quarter resolution on every input. Existing finer samples remain useful
-until further detail or coverage is needed. Once motion stops, the renderer
-calculates the exact regular full-resolution camera field. Palette changes
-reuse scalar numerical data. Stable grid reuse currently applies to the
-single-sample escape-colour mode; the other numerical modes retain their
-ordinary calculation path.
+Camera changes retarget the same calculation process after bounded useful work.
+Releasing the mouse changes demand, without cancelling compatible pending work,
+changing the grid resolution or starting a separate quality stage. Matching
+complex coordinates retain their scalar samples through the existing GPU remap;
+off-grid retained imagery is presentation-only. Once the camera is unchanged,
+the same queue finishes every exact target pixel. Palette changes reuse scalars.
 
-The GPU queue receives adaptively sized numerical regions, with visible areas
-ahead of overscan and fully retained rectangles omitted from numerical dispatch.
-The default batch floor is approximately 64K samples, aligned to workgroups:
-measurements found smaller batches sacrificed substantial throughput for little
-first-detail benefit. A batch is not guaranteed to fit one display frame.
-Compatible interrupted fields retain their determined scalar samples.
+Before retargeting a partial image, the hard-edge composite is retained as a
+display proxy, including its validity and sample density. One original completed source
+also remains available for broader coverage, including highly magnified coarse
+fallback where partial detail has holes. Proxies never populate numerical
+storage or establish exact completion. Priority uses a conservative known
+rectangle and its spacing, not a proxy's whole extent; smaller disjoint determined
+patches can therefore receive redundant priority. Proxies use an anchored presentation lattice: fractional pans do not repeatedly
+round already retained pixels into a different phase. They remain approximate
+display samples until the exact numerical queue covers the current view.
+Retained proxies use half-float colour/density storage so broad valid samples
+do not disappear through byte-alpha rounding. This doubles proxy texture bytes;
+the scalar field and normal output textures retain their existing formats.
+
+Measured expensive 64K-sample batches stalled presentation, so the queue starts
+at 16K samples and grows cheap batches using measured cost. Changes of numerical
+method, precision or iteration budget reset that estimate. Rectangle
+splitting can make an individual dispatch smaller. This trades some numerical
+throughput for responsiveness; eight milliseconds is a sizing target, not a
+GPU latency guarantee. Input state never selects a different batch policy.
+The Julia preview can run between main-stream batches.
 Orbit pipelines compile
 asynchronously. Expanded views rebuild the BLA table's conservative offset
 bound while retaining the reference orbit. Statistics distinguish reference work, pipeline wait,
@@ -96,12 +111,18 @@ It uses an isolated sandboxed profile and checks for physical AMD hardware.
 Set `GPU_ZOOMER_URL` and `GPU_ZOOMER_TEST_DIR` to override the server and
 external evidence directory. No browser profiles or recordings belong here.
 
-Current checks include 68 CPU tests, 20 GPU arithmetic/orbit checks, atomic
+Current checks include 76 CPU tests, 20 GPU arithmetic/orbit checks, atomic
 publication across GPU fences, exact copied sample identity, nearest
 magnification/minification, palette reuse, Julia preview/promotion/return,
 rapid family changes, responsive layout and 1440p motion/refinement. Streaming
 checks read actual GPU presentation pixels before field completion, including
 unknown-sample fallback, incompatible Julia constants and partial-field reuse.
+Continuous-stream checks cover same-promise release, exact partial reuse, full-field
+convergence after a pan, sparse anchors versus display-filled unknown slots,
+and camera/palette demand arriving during final readback.
+Proxy checks compare 40 fractional pans with original-source reprojection and
+verify that unmappable history stays transparent, 1024x broad sources survive
+repeated retention, and coarser incoming samples preserve finer available pixels.
 Native preview resizing is checked at normal and high DPI.
 Seven original numerical views compare 49 raw escape counts each with independently
 structured 512/768-bit direct evaluation, including the difficult 6e-42

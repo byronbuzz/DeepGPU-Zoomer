@@ -177,7 +177,7 @@ export async function presentationChecks(context, baseUrl) {
       const deep = PLACES[2]; renderer.invalidateHistory();
       active = { ...request(deep.x), centerY: new Decimal(deep.y), unitsPerPixel: new Decimal(deep.span).div(24), maxIterations: deep.iterations };
       await renderer.render(active); const firstBound = renderer.tableMaxDelta;
-      active = { ...active, centerX: active.centerX.plus(new Decimal(deep.span).times('.4')), interacting: true };
+      active = { ...active, centerX: active.centerX.plus(new Decimal(deep.span).times('.2')), interacting: true };
       const expanded = await renderer.render(active), expandedView = renderer.fieldView, expandedField = await renderer.debugReadField();
       const exactView = { ...deep, x: expandedView.centerX.toString(), y: expandedView.centerY.toString(),
         span: expandedView.unitsPerPixel.times(expandedView.height).toString() };
@@ -192,6 +192,18 @@ export async function presentationChecks(context, baseUrl) {
         pass: renderer.tableMaxDelta>firstBound&&renderer.tableMaxDelta<firstBound*4&&expanded.orbitMs===0&&expanded.skippedIterations>0&&expanded.computedSamples>0&&numerical.length===0,
         detail: { firstBound, expandedBound: renderer.tableMaxDelta, orbitMs: expanded.orbitMs,
           skippedIterations: expanded.skippedIterations, computedSamples: expanded.computedSamples, numerical } });
+      // Crossing the existing geometric drift threshold refreshes the
+      // reference even with the pointer held. Check the moved field directly.
+      active = {...active,centerX:active.centerX.plus(new Decimal(deep.span).times('.4')),interacting:true};
+      const moved=await renderer.render(active),movedField=await renderer.debugReadField();
+      const movedView={...deep,x:active.centerX.toString(),y:active.centerY.toString(),span:deep.span};
+      const movedErrors=[];
+      for(let y=0;y<3;y++)for(let x=0;x<3;x++){
+        const px=Math.floor((x+.5)*active.width/3),py=Math.floor((y+.5)*active.height/3);
+        const a=direct(movedView,px,py,active.width,active.height,512),b=direct(movedView,px,py,active.width,active.height,768);
+        if(a!==b||movedField[2*(py*active.width+px)]!==b)movedErrors.push({px,py,a,b,gpu:movedField[2*(py*active.width+px)]});
+      }
+      checks.push({name:'geometric reference refresh remains active during motion',pass:moved.orbitMs>0&&movedErrors.length===0,detail:{orbitMs:moved.orbitMs,movedErrors}});
       checks[0].pass = observations >= 3 && disagreements.length === 0;
       checks[0].detail.observations = observations;
       active = null;

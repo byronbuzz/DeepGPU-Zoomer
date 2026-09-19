@@ -1,41 +1,36 @@
 import Decimal from "decimal.js";
 import { describe, expect, it } from "vitest";
-import { createSampleGridAnchor, planSampleGrid, sampleGridRemap } from "../../src/render/sample-grid";
+import { createSampleGridAnchor, planRetainedView, sampleGridRemap } from "../../src/render/sample-grid";
 import type { FrameView } from "../../src/render/reprojection";
 
-const frame = (spacing = "1", x = "0", y = "0", width = 64, height = 48): FrameView => ({
+const frame = (spacing = "1", x = "0", y = "0", width = 65, height = 49): FrameView => ({
   centerX: new Decimal(x), centerY: new Decimal(y), unitsPerPixel: new Decimal(spacing), width, height,
 });
 
 describe("stable sample grids", () => {
-  it("keeps sample coordinates fixed during sub-sample camera movement", () => {
-    const view = frame(), anchor = createSampleGridAnchor(view);
-    const a = planSampleGrid(view, anchor);
-    const b = planSampleGrid(frame("1", ".1", "-.1"), anchor);
-    expect(b.firstX.eq(a.firstX)).toBe(true);
-    expect(b.firstY.eq(a.firstY)).toBe(true);
-    expect(sampleGridRemap(a, b)).toEqual({ offsetX: 0, offsetY: 0, step: 1, denominator: 1 });
+  it("nests presentation pixel edges when magnifying retained colour blocks",()=>{
+    const source=frame("1","0","0",64,48),anchor=createSampleGridAnchor(source);
+    const grid=planRetainedView({...source,unitsPerPixel:new Decimal(1).div(1024)},anchor);
+    const first=createSampleGridAnchor(grid);
+    const sourceEdge=anchor.originX.minus(source.unitsPerPixel.div(2));
+    const retainedEdge=first.originX.minus(grid.unitsPerPixel.div(2));
+    expect(retainedEdge.minus(sourceEdge).div(grid.unitsPerPixel).isInteger()).toBe(true);
   });
-
-  it("plans spacing no coarser than requested, with complete overscan coverage", () => {
-    const anchor = createSampleGridAnchor(frame());
-    for (const spacing of [".49", ".5", ".99", "1", "1.99", "2"]) {
-      const view = frame(spacing, "-2.3", "4.7"), grid = planSampleGrid(view, anchor);
-      expect(grid.unitsPerPixel.lte(view.unitsPerPixel)).toBe(true);
-      expect(grid.unitsPerPixel.times(2).gt(view.unitsPerPixel)).toBe(true);
-      expect(grid.width % 8).toBe(0); expect(grid.height % 8).toBe(0);
-      expect(grid.centerX.minus(view.centerX).abs().plus(view.unitsPerPixel.times(view.width / 2))
-        .lte(grid.unitsPerPixel.times(grid.width / 2))).toBe(true);
-      expect(grid.centerY.minus(view.centerY).abs().plus(view.unitsPerPixel.times(view.height / 2))
-        .lte(grid.unitsPerPixel.times(grid.height / 2))).toBe(true);
+  it("keeps presentation proxies on exact lattice phases across fractional pans", () => {
+    const anchor=createSampleGridAnchor(frame()); let previous=planRetainedView(frame(),anchor);
+    for(let i=1;i<=80;i++){
+      const next=planRetainedView(frame("1",String(i*.4)),anchor);
+      const map=sampleGridRemap(previous,next);
+      expect(map).not.toBeNull(); expect(map!.denominator).toBe(1);
+      expect(sampleGridRemap(planRetainedView(frame(),anchor),next)).not.toBeNull();
+      previous=next;
     }
   });
 
   it("maps only identical world samples during pan, refinement and coarsening", () => {
-    const original = frame(), anchor = createSampleGridAnchor(original);
-    const old = planSampleGrid(original, anchor);
+    const old = frame(), oldAnchor = createSampleGridAnchor(old);
     for (const desired of [frame("1", "3", "-2"), frame(".5"), frame("2")]) {
-      const next = planSampleGrid(desired, anchor), map = sampleGridRemap(old, next)!;
+      const next = desired, anchor = createSampleGridAnchor(next), map = sampleGridRemap(old, next)!;
       expect(map).not.toBeNull();
       let reused = 0, missing = 0;
       for (let y = 0; y < next.height; y++) for (let x = 0; x < next.width; x++) {
@@ -43,8 +38,8 @@ describe("stable sample grids", () => {
         const oy = (map.offsetY + y * map.step) / map.denominator;
         if (!Number.isInteger(ox) || !Number.isInteger(oy) || ox < 0 || oy < 0 || ox >= old.width || oy >= old.height) { missing++; continue; }
         reused++;
-        expect(old.firstX.plus(old.unitsPerPixel.times(ox)).eq(next.firstX.plus(next.unitsPerPixel.times(x)))).toBe(true);
-        expect(old.firstY.minus(old.unitsPerPixel.times(oy)).eq(next.firstY.minus(next.unitsPerPixel.times(y)))).toBe(true);
+        expect(oldAnchor.originX.plus(old.unitsPerPixel.times(ox)).eq(anchor.originX.plus(next.unitsPerPixel.times(x)))).toBe(true);
+        expect(oldAnchor.originY.minus(old.unitsPerPixel.times(oy)).eq(anchor.originY.minus(next.unitsPerPixel.times(y)))).toBe(true);
       }
       expect(reused).toBeGreaterThan(0); expect(missing).toBeGreaterThan(0);
     }
@@ -52,12 +47,12 @@ describe("stable sample grids", () => {
 
   it("retains exact deep-coordinate identity without a Number centre conversion", () => {
     const view = frame("1e-52", "-0.527503118643534610789746402444915337566745947811707285339875197003203011", "0.075912178352287867071814194826348046366422194847978022539732593449186891");
-    const anchor = createSampleGridAnchor(view), grid = planSampleGrid(view, anchor);
+    const anchor = createSampleGridAnchor(view), grid = {...view,width:view.width+2,height:view.height+2}, target = createSampleGridAnchor(grid);
     const map = sampleGridRemap(view, grid);
     expect(map).not.toBeNull();
     expect(map!.denominator).toBe(1);
-    expect(anchor.originX.plus(view.unitsPerPixel.times(map!.offsetX)).eq(grid.firstX)).toBe(true);
-    expect(anchor.originY.minus(view.unitsPerPixel.times(map!.offsetY)).eq(grid.firstY)).toBe(true);
+    expect(anchor.originX.plus(view.unitsPerPixel.times(map!.offsetX)).eq(target.originX)).toBe(true);
+    expect(anchor.originY.minus(view.unitsPerPixel.times(map!.offsetY)).eq(target.originY)).toBe(true);
   });
 
   it("rejects fractional lattice phases and unsafe remap arithmetic", () => {

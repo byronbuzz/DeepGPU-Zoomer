@@ -7,8 +7,11 @@ movement and selective calculation inspected in
 [XaoSjs](https://github.com/xaos-project/XaoSjs/blob/c82013cbf428948d01f5345d82471632a1cb6ac4/js/xaos.js)
 (GPL-3.0-or-later) and
 [XaoS](https://github.com/xaos-project/XaoS/blob/51fd5e2ba052246c6ef44c556e906aac9c822378/src/engine/zoom.cpp)
-(GPL-2.0-or-later). This implementation uses a regular nested sample grid
-and GPU field copying; it does not include their full line-reallocation engine.
+(GPL-2.0-or-later). The pending-region policy also follows the midpoint gap subdivision and
+motion weighting described in the
+[XaoS Developer Guide, Dynamic Resolution](https://github.com/xaos-project/XaoS/wiki/Developer%27s-Guide#dynamic-resolution).
+This implementation uses exact-coordinate GPU field copying and a rectangular
+pending queue; it does not include their full line-reallocation engine.
 
 The arithmetic, GPU reference orbit, perturbation renderer, BLA, reprojection,
 colour settings and associated original tests are adapted from

@@ -4,6 +4,8 @@ import path from 'node:path';
 import { direct } from './direct.mjs';
 import { presentationChecks } from './presentation.mjs';
 import { streamingChecks } from './streaming.mjs';
+import { retargetChecks } from './retarget.mjs';
+import { proxyRetentionChecks } from './proxy-retention.mjs';
 
 const output=process.env.GPU_ZOOMER_TEST_DIR || 'F:/Coding/Temp/GPU-Zoomer-3-qualification/app-verification';
 fs.mkdirSync(output,{recursive:true});
@@ -39,6 +41,8 @@ async function compare(name, extraPoints=[]){
 try{
   for(const result of await presentationChecks(context,process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183')) check(result.name,result.pass,result.detail);
   for(const result of await streamingChecks(context,process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183')) check(result.name,result.pass,result.detail);
+  for(const result of await retargetChecks(context,process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183')) check(result.name,result.pass,result.detail);
+  for(const result of await proxyRetentionChecks(context,process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183')) check(result.name,result.pass,result.detail);
   await page.goto(process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183');
   report.adapter=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;const gpu=await navigator.gpu.requestAdapter({powerPreference:'high-performance'});return {vendor:gpu.info.vendor,architecture:gpu.info.architecture,fallback:gpu.info.isFallbackAdapter};});
   report.browser=context.browser().version();

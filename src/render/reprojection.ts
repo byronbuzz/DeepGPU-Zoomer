@@ -52,7 +52,9 @@ const MAX_PAN_SCREENS = 4;
  */
 export function reprojectionFor(
   last: FrameView,
-  next: FrameView
+  next: FrameView,
+  /** A broader completed source may still fill holes after heavy magnification. */
+  coarseFallback = false,
 ): Reprojection | null {
   if (last.width <= 0 || last.height <= 0 || next.width <= 0 || next.height <= 0) {
     return null;
@@ -65,7 +67,8 @@ export function reprojectionFor(
 
   const scaleY = nextSpanY.div(lastSpanY).toNumber();
   const scaleX = next.unitsPerPixel.times(next.width).div(lastSpanX).toNumber();
-  if (![scaleX, scaleY].every(scale => Number.isFinite(scale) && scale >= MAX_SHRINK && scale <= MAX_MAGNIFY)) return null;
+  if (![scaleX, scaleY].every(scale => Number.isFinite(scale) && scale > 0 &&
+      (coarseFallback || scale >= MAX_SHRINK) && scale <= MAX_MAGNIFY)) return null;
 
   // Centre travel as a fraction of the old frame. Screen y runs downwards and
   // the imaginary axis upwards, hence the negation.

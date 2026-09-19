@@ -33,6 +33,7 @@ struct Uniforms {
     colorDensity: f32,
     colorPhase: f32,
     slopeDepth: f32,
+    rowLimit: u32,
     lightDir: vec3<f32>,    // normalised, z is elevation out of the screen
     ambientLight: f32,
     diffuseStrength: f32,
@@ -55,6 +56,8 @@ struct Uniforms {
     constant: vec2<f32>,
     constantLow: vec2<f32>,
     centreLow: vec2<f32>,
+    sampleStep: u32,
+    previewStep: u32,
     wideScale: vec4<f32>,
     wideOffsetX: vec4<f32>,
     wideOffsetY: vec4<f32>,
@@ -470,9 +473,9 @@ fn fieldIndex(col: u32, rowIdx: u32) -> u32 {
 @compute @workgroup_size(8, 8)
 fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
-    let row = gid.y + u.rowOffset;
-    let col = gid.x + u.columnOffset;
-    if (col >= min(size.x, u.columnLimit) || row >= size.y) { return; }
+    let row = gid.y * max(u.sampleStep, 1u) + u.rowOffset;
+    let col = gid.x * max(u.sampleStep, 1u) + u.columnOffset;
+    if (col >= min(size.x, u.columnLimit) || row >= min(size.y, u.rowLimit)) { return; }
     // The remap pass retained this exact sample, including its escape value.
     // Reuse is enabled only for the single-sample iteration field.
     if (u.reuseField != 0u && field[fieldIndex(col, row)].y >= 0.0) {
@@ -540,7 +543,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
     let pixel = gid.xy + vec2<u32>(u.columnOffset, u.rowOffset);
-    if (pixel.x >= min(size.x, u.columnLimit) || pixel.y >= size.y) { return; }
+    if (pixel.x >= min(size.x, u.columnLimit) || pixel.y >= min(size.y, u.rowLimit)) { return; }
 
     let distanceMode = u.mode == 1u;
     let grid = max(u.supersample, 1u);
@@ -549,12 +552,19 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lastRow = size.y * grid - 1u;
 
     var accumulated = vec3<f32>(0.0);
+    var density = 1.0;
 
     for (var sy: u32 = 0u; sy < grid; sy = sy + 1u) {
         for (var sx: u32 = 0u; sx < grid; sx = sx + 1u) {
             let col = pixel.x * grid + sx;
             let rowIdx = pixel.y * grid + sy;
-            let entry = field[fieldIndex(col, rowIdx)];
+            var entry = field[fieldIndex(col, rowIdx)];
+            if (entry.y < 0.0 && grid == 1u && !distanceMode && u.previewStep > 1u) {
+                // Fill colour only. The unknown scalar entry remains unknown.
+                entry = field[fieldIndex(col / u.previewStep * u.previewStep,
+                    rowIdx / u.previewStep * u.previewStep)];
+                density = 1.0 / f32(u.previewStep);
+            }
             // Unknown is distinct from a determined interior sample. Alpha is
             // coverage metadata, never a request to blend colours.
             if (entry.y < 0.0) {
@@ -600,5 +610,5 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Encode out of linear light at the very end.
     let encoded = pow(max(linearColour, vec3<f32>(0.0)), vec3<f32>(u.invGamma));
     textureStore(output, vec2<i32>(pixel),
-                 vec4<f32>(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
+                 vec4<f32>(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)), density));
 }

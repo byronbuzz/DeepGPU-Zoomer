@@ -10,9 +10,9 @@ const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as 
 const canvas=el<HTMLCanvasElement>('fractal');
 const camera=new Camera();
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
-let generation=0, busy=false, dirty=true, error='', lastInteraction=0, quality=1, lastRevision=-1;
+let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let fields=0, recolours=0, lastFresh=0, stats:RenderStats|undefined, completedQuality=0;
-let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, dragging=false, speed=1, previousTime=0, statusTime=0, wasMoving=false;
+let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=1, previousTime=0, statusTime=0;
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
 let profilingEnabled=false;
@@ -28,7 +28,7 @@ function message(text:string){el('message').textContent=text;}
 function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString()};}
 function checkpoint(){const s=snapshot();if(timelineIndex>=0 && encodeView(timeline[timelineIndex])===encodeView(s))return;timeline.splice(timelineIndex+1);timeline.push(s);timelineIndex=timeline.length-1;historyButtons();}
 function historyButtons(){el<HTMLButtonElement>('back').disabled=timelineIndex<=0;el<HTMLButtonElement>('forward').disabled=timelineIndex>=timeline.length-1;}
-function stop(){direction=0;dragging=false;selecting=false;keys.clear();}
+function stop(){direction=0;wheelDirection=0;dragging=false;selecting=false;keys.clear();}
 function syncPlace(){
   const index=PLACES.findIndex(p=>p.family===view.family && p.iterations===view.iterations && camera.x.eq(p.x) && camera.y.eq(p.y) && camera.span.eq(p.span) && (view.family==='mandelbrot'||new Decimal(view.jx).eq(p.jx)&&new Decimal(view.jy).eq(p.jy)));
   el<HTMLSelectElement>('places').value=index<0?'':String(index);
@@ -45,7 +45,7 @@ function syncControls(){
 function load(next:SavedView,record=true){
   const valid=validateView(next);if(record && engine)checkpoint();stop();view=valid;camera.load(valid);generation++;
   if(view.family==='julia')setPreview(false);
-  engine?.invalidateHistory();quality=1;completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';message('');syncControls();
+  engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';message('');syncControls();
   if(record){checkpoint();persist();}
 }
 function persist(){
@@ -53,7 +53,7 @@ function persist(){
   syncControls();
 }
 function moving(){return direction!==0||dragging||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(){dirty=true;quality=engine?.calculationScale(canvas.width,canvas.height)??1;lastInteraction=performance.now();syncPlace();}
+function changed(){dirty=true;lastInteraction=performance.now();syncPlace();}
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
   el('julia-preview').hidden=!visible;
@@ -142,22 +142,21 @@ function switchJuliaView(){
   }else message('Press J, then select a point for the Julia preview.');
   canvas.focus();
 }
-function request(scale:number):RenderRequest{
-  const width=Math.max(8,Math.round(canvas.width*scale)),height=Math.max(8,Math.round(canvas.height*scale));const g=generation;
-  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:{...colors},family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),interacting:moving(),isCurrent:()=>generation===g};
+function request():RenderRequest{
+  const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
+  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:{...colors},family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
 }
 async function compute(){
-  if(busy||!engine||error)return;busy=true;dirty=false;const revision=camera.revision,g=generation,q=quality;
+  if(busy||!engine||error)return;busy=true;dirty=false;const g=generation;
   try{
-    const result=await engine.render(request(q));
-    if(g===generation && result.completed){stats=result;if(result.computed){fields++;lastFresh=performance.now();}else recolours++;
-      lastRevision=revision;completedQuality=q;
-      if(revision===camera.revision && !moving() && q<1){quality=1;dirty=true;}
+    const result=await engine.render(request());
+    if(g===generation && result.completed && engine.isComplete(request())){stats=result;if(result.computed){fields++;lastFresh=performance.now();}else recolours++;
+      lastRevision=camera.revision;completedQuality=1;dirty=false;
     }
   }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
-  finally{busy=false;if(camera.revision!==revision||g!==generation)dirty=true;}
+  finally{busy=false;if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
-function resize(){measurePreview();const dpr=devicePixelRatio||1;const width=Math.round(innerWidth*dpr),height=Math.round(innerHeight*dpr);if(canvas.width===width&&canvas.height===height)return;canvas.width=width;canvas.height=height;quality=1;dirty=true;}
+function resize(){measurePreview();const dpr=devicePixelRatio||1;const width=Math.round(innerWidth*dpr),height=Math.round(innerHeight*dpr);if(canvas.width===width&&canvas.height===height)return;canvas.width=width;canvas.height=height;dirty=true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -166,13 +165,10 @@ function tick(time:number){
     if(zoom && dt){camera.zoom(-zoom*speed*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);changed();}
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);changed();}
-    const nowMoving=moving();
-    if(wasMoving && !nowMoving){quality=1;dirty=true;}
-    wasMoving=nowMoving;
     if(engine){
-      engine.reproject(request(1));
+      engine.reproject(request());
       // Give the latest preview one turn between main jobs, without awaiting it.
-      // Both renderers keep at most one bounded numerical band in the queue.
+      // Both renderers keep at most one bounded numerical region in the queue.
       if(!busy&&!previewBusy&&previewPending)void computeJuliaPreview();
       if(dirty&&!busy)void compute();
     }
@@ -180,7 +176,7 @@ function tick(time:number){
       const fresh=!busy && !dirty && !moving() && lastRevision===camera.revision && completedQuality===1;
       const progress=engine?.debugProgress();
       const state=fresh?'Refined':progress?.active&&progress.regions?`Refining · ${progress.regions} regions`:busy?'Computing':'Preview';
-      freshness.textContent=error?'Rendering stopped':`${state} · ${Math.round(completedQuality*100)}% spatial · ${lastFresh?((time-lastFresh)/1000).toFixed(1)+'s since field':'first field pending'}`;
+      freshness.textContent=error?'Rendering stopped':`${state} · ${progress?.lastPublicationAt?Math.max(0,(time-progress.lastPublicationAt)/1000).toFixed(1)+'s since update':lastFresh?'Field ready':'first update pending'}`;
       depth.textContent=`${new Decimal(2.8).div(camera.span).toExponential(2)}× · ${view.iterations.toLocaleString()} iterations`;
       if(profilingEnabled&&engine){
         const profile=engine.performance();
@@ -194,14 +190,14 @@ function tick(time:number){
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 canvas.addEventListener('pointerdown',e=>{if(e.button>2)return;canvas.focus();canvas.setPointerCapture(e.pointerId);pointer={x:e.clientX,y:e.clientY};
   if(previewEnabled && view.family==='mandelbrot' && e.button===0){e.preventDefault();stop();selecting=true;selectJuliaAtPointer();return;}
-  checkpoint();dragging=e.shiftKey||e.button===1;direction=dragging?0:e.button===2?-1:1;changed();});
+  checkpoint();wheelDirection=0;dragging=e.shiftKey||e.button===1;direction=dragging?0:e.button===2?-1:1;changed();});
 canvas.addEventListener('pointermove',e=>{if(selecting){pointer={x:e.clientX,y:e.clientY};selectJuliaAtPointer();return;}if(dragging){camera.pan(e.clientX-pointer.x,e.clientY-pointer.y,innerHeight);changed();}pointer={x:e.clientX,y:e.clientY};});
-function endPointer(e:PointerEvent){if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(selecting){stop();return;}stop();changed();checkpoint();persist();}
-canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();changed();});
+function endPointer(e:PointerEvent){if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(selecting){stop();return;}stop();checkpoint();persist();}
+canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();});
 let wheelSave:ReturnType<typeof setTimeout>;
-canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);changed();clearTimeout(wheelSave);wheelSave=setTimeout(()=>{checkpoint();persist();},250);},{passive:false});
-canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();return;}if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();keys.add(e.key);changed();}});
-canvas.addEventListener('keyup',e=>{if(!keys.delete(e.key))return;changed();checkpoint();persist();});
+canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);changed();clearTimeout(wheelSave);wheelSave=setTimeout(()=>{checkpoint();persist();},250);},{passive:false});
+canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();return;}if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;keys.add(e.key);changed();}});
+canvas.addEventListener('keyup',e=>{if(!keys.delete(e.key))return;checkpoint();persist();});
 document.addEventListener('keydown',e=>{
   if(e.repeat||e.ctrlKey||e.metaKey||e.altKey||(e.target instanceof HTMLElement && (e.target.isContentEditable||e.target.closest('input,textarea,select'))))return;
   const key=e.key.toLowerCase();if(key!=='j'&&key!=='m')return;e.preventDefault();

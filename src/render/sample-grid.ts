@@ -8,12 +8,6 @@ export interface SampleGridAnchor {
   unitsPerPixel: Decimal;
 }
 
-export interface SampleGrid extends FrameView {
-  firstX: Decimal;
-  firstY: Decimal;
-  level: number;
-}
-
 export interface SampleGridRemap {
   /** Source index = (offset + destination index * step) / denominator. */
   offsetX: number;
@@ -41,12 +35,13 @@ export function createSampleGridAnchor(view: FrameView): SampleGridAnchor {
   };
 }
 
-/** A camera-independent lattice. Camera motion only changes its integer bounds. */
-export function planSampleGrid(
+/** Stable presentation coordinates prevent repeated nearest resampling from
+ * accumulating subpixel drift. This never chooses numerical sample geometry. */
+export function planRetainedView(
   view: FrameView,
   anchor: SampleGridAnchor,
   options: { overscan?: number } = {},
-): SampleGrid {
+): FrameView {
   const overscan = options.overscan ?? 1.25;
   if (!Number.isFinite(overscan) || overscan < 1 || view.width <= 0 || view.height <= 0 ||
       view.unitsPerPixel.lte(0) || anchor.unitsPerPixel.lte(0)) {
@@ -66,14 +61,19 @@ export function planSampleGrid(
   const width = Math.ceil((view.width * expansion + 2) / 8) * 8;
   const height = Math.ceil((view.height * expansion + 2) / 8) * 8;
   const halfX = new D(width - 1).div(2), halfY = new D(height - 1).div(2);
-  const column = new D(view.centerX).minus(anchor.originX).div(spacing).minus(halfX).toNearest(1);
-  const row = new D(anchor.originY).minus(view.centerY).div(spacing).minus(halfY).toNearest(1);
-  const firstX = new D(anchor.originX).plus(column.times(spacing));
-  const firstY = new D(anchor.originY).minus(row.times(spacing));
+  // Nest pixel edges, not sample centres. Subdividing centre-aligned pixels
+  // puts an old colour boundary through a new pixel centre, shifting that
+  // boundary by half a pixel when the proxy is presented again.
+  const originX=new D(anchor.originX).minus(base.div(2)).plus(spacing.div(2));
+  const originY=new D(anchor.originY).plus(base.div(2)).minus(spacing.div(2));
+  const column = new D(view.centerX).minus(originX).div(spacing).minus(halfX).toNearest(1);
+  const row = originY.minus(view.centerY).div(spacing).minus(halfY).toNearest(1);
+  const firstX = originX.plus(column.times(spacing));
+  const firstY = originY.minus(row.times(spacing));
   return {
     centerX: firstX.plus(halfX.times(spacing)),
     centerY: firstY.minus(halfY.times(spacing)),
-    unitsPerPixel: spacing, width, height, firstX, firstY, level,
+    unitsPerPixel: spacing, width, height,
   };
 }
 

@@ -17,7 +17,8 @@ import quadSource from "../arithmetic/quad.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
 import reuseSource from "./reuse.wgsl?raw";
-import { createSampleGridAnchor, planSampleGrid, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
+import { createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
+import { PendingRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
 import { fixedToQuad, splitQuad } from "../arithmetic/quad";
 import { reprojectionFor } from "./reprojection";
@@ -70,11 +71,9 @@ const DISPATCHES_PER_SUBMIT = 4;
  * and size the next piece from it.
  */
 const SUBMIT_BUDGET_MS = 8;
-// Measured on the physical GPU: tiny dispatches lost throughput without a
-// comparable first-detail benefit. Keep roughly 64K samples per region, then
-// allow the wall-time estimate to grow cheap batches. This is an occupancy
-// compromise, not a promise that a batch completes within eight milliseconds.
-const MIN_BATCH_SAMPLES = 65_536;
+// 64K expensive samples measured >120ms; 16K preserved presentation cadence.
+// Grow cheap batches from measured cost, without changing policy on release.
+const MIN_BATCH_SAMPLES = 16_384;
 
 export interface RenderRequest {
   centerX: Decimal;
@@ -95,9 +94,14 @@ export interface RenderRequest {
   forceMethod?: Method;
   /** Overrides the band height, for measuring the cost of splitting a frame. */
   tileRows?: number;
-  /** True while panning or zooming: reuse the reference orbit rather than
-   * rebuilding it, which is the main source of stutter during a gesture. */
+  /** Input status for callers and diagnostics; geometry governs calculation. */
   interacting?: boolean;
+  /** Follow live demand until its exact field is complete. Preview/one-shot
+   * callers use the same region queue without following another camera. */
+  followView?: boolean;
+  betweenBatches?: () => Promise<void>;
+  focus?: { x: number; y: number };
+  zoom?: number;
 }
 
 export interface RenderStats {
@@ -215,6 +219,8 @@ export class WebGpuRenderer {
   private approxPipeline: GPUComputePipeline | null = null;
   private juliaPipeline: GPUComputePipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
+  private retainPipeline: GPURenderPipeline | null = null;
+  private retainFloatPipeline: GPURenderPipeline | null = null;
 
   private target: GPUTexture | null = null;
   private targetSize = { width: 0, height: 0 };
@@ -224,9 +230,12 @@ export class WebGpuRenderer {
   private stopsBuffer: GPUBuffer;
   private tableMs = 0;
   private tableMaxDelta = 0;
-  /** The view `target` currently holds, or null when it holds nothing. */
+  /** Geometry and density of the retained history image. */
   private lastFrame: {
-    family?: string;
+    proxy?: boolean;
+    covered?: {x:number;y:number;width:number;height:number};
+    coveredSpacing?: Decimal;
+    family?: "mandelbrot" | "julia";
     juliaX?: Decimal;
     juliaY?: Decimal;
     centerX: Decimal;
@@ -249,18 +258,28 @@ export class WebGpuRenderer {
   private partialSerial = 0;
   private partialRegions = 0;
   private firstPartialAt = 0;
+  private lastPartialAt = 0;
   private fieldComplete = false;
   private reuseMapping: SampleGridRemap | null = null;
   private reusableView: FrameView | null = null;
   private reusableComplete = false;
   private batchMsPerSample = 0;
+  private batchCostKey = "";
+  private retainedAnchor: SampleGridAnchor | null = null;
+  private pending = new PendingRegions();
+  private retarget = false;
+  private determinedRegion: {x:number;y:number;width:number;height:number} | null = null;
+  private determinedSpacing: Decimal | undefined;
+  private streamTargets = 0;
+  private latestRegion: {x:number;y:number;width:number;height:number} | null = null;
   private timing: GpuTiming;
   setProfiling(enabled: boolean) { this.timing.setEnabled(enabled); }
   performance() { return this.timing.snapshot(); }
   debugProgress() {
     return { epoch: this.publicationEpoch, serial: this.partialSerial,
-      regions: this.partialRegions, firstPublicationAt: this.firstPartialAt,
+      regions: this.partialRegions, firstPublicationAt: this.firstPartialAt, lastPublicationAt: this.lastPartialAt,
       active: !!this.incomingFrame, complete: this.fieldComplete,
+      pending: this.pending.size, targets: this.streamTargets, latestRegion: this.latestRegion,
       width: this.fieldView?.width ?? 0, height: this.fieldView?.height ?? 0 };
   }
   private abortRequested = false;
@@ -272,19 +291,11 @@ export class WebGpuRenderer {
   private spareCapacity = 0;
   private fieldView: FrameView | null = null;
   private sampleKey = "";
-  private gridAnchor: SampleGridAnchor | null = null;
   private reusePipeline: GPUComputePipeline | null = null;
   private reuseUniform: GPUBuffer | null = null;
   private cachedStats: RenderStats | null = null;
   private cachedRequest = "";
-  private msPerSample = 0;
 
-  /** Measured field cost only; reference generation is tracked separately. */
-  calculationScale(width: number, height: number): number {
-    if (!this.msPerSample) return 1;
-    const fullMs = this.msPerSample * width * height;
-    return Math.max(.125, Math.min(1, Math.sqrt(36 / Math.max(fullMs, 1))));
-  }
   /**
    * Identifies what is in `fieldBuffer`. Everything that changes the numbers
    * belongs here; everything that only changes how they look must not, or
@@ -413,7 +424,7 @@ export class WebGpuRenderer {
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 /** uv' = uv * xform.xy + xform.zw. Identity is (1, 1, 0, 0). */
-struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32> };
+struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32>, units: vec4<f32> };
 @group(0) @binding(2) var<uniform> display: Presentation;
 @group(0) @binding(3) var coverage: texture_2d<f32>;
 @group(0) @binding(4) var incoming: texture_2d<f32>;
@@ -436,36 +447,49 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let uv = in.uv * display.front.xy + display.front.zw;
     let oldUV = in.uv * display.back.xy + display.back.zw;
-    let frontValid = display.options.z > 0.0 && all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
-    let backValid = display.options.x > 0.0 && all(oldUV >= vec2<f32>(0.0)) && all(oldUV <= vec2<f32>(1.0));
+    var frontValid = display.options.z > 0.0 && all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+    var backValid = display.options.x > 0.0 && all(oldUV >= vec2<f32>(0.0)) && all(oldUV <= vec2<f32>(1.0));
     // Select an actual determined sample. Never blend the two images, and do
     // not let a smaller new field erase already calculated coverage.
     let front = textureSample(src, smp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
     let back = textureSample(coverage, smp, clamp(oldUV, vec2<f32>(0.0), vec2<f32>(1.0)));
-    let useBack = backValid && (!frontValid || display.options.y > 0.0);
+    frontValid = frontValid && front.a > 0.0;
+    backValid = backValid && back.a > 0.0;
+    let frontSpacing=display.units.x / max(front.a, 0.00001);
+    let backSpacing=display.units.y / max(back.a, 0.00001);
+    let useBack = backValid && (!frontValid || display.options.y > 0.0 ||
+        (display.options.y < 0.0 && backSpacing < frontSpacing));
+    var spacing=select(frontSpacing,backSpacing,useBack);
     var result = select(front, back, useBack);
     let freshUV = in.uv * display.fresh.xy + display.fresh.zw;
     let fresh = textureSample(incoming, smp, clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0)));
-    let valid = display.freshOptions.x > 0.0 && fresh.a > 0.5 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
-    let prefer = select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0;
-    if (valid && (prefer || (!frontValid && !backValid))) { result = fresh; }
-    if (display.options.z == 0.0 && !backValid && !valid) { result = vec4<f32>(0.0); }
-    return vec4<f32>(result.rgb, 1.0);
+    let valid = display.freshOptions.x > 0.0 && fresh.a > 0.0 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
+    let freshSpacing=display.units.z / max(fresh.a,0.00001);
+    let prefer = (fresh.a > 0.99 && select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0) || freshSpacing < spacing;
+    if (valid && (prefer || (!frontValid && !backValid))) { result = fresh; spacing=freshSpacing; }
+    if (!frontValid && !backValid && !valid) {
+        // The canvas is opaque: even alpha-zero RGB would be visible there.
+        // Extend only an actual defined edge sample, never transparent proxy
+        // payload or an unavailable mapping. Keep the fallback's alpha zero.
+        result = vec4<f32>(0.0);
+        if (display.options.z > 0.0 && front.a > 0.0) { result = front; }
+        else if (display.options.x > 0.0 && back.a > 0.0) { result = back; }
+        else if (display.freshOptions.x > 0.0 && fresh.a > 0.0) { result = fresh; }
+    }
+    return vec4<f32>(result.rgb, select(0.0, min(1.0, 1.0 / max(spacing,0.00001)), frontValid || backValid || valid));
 }
 `,
       "blit"
     );
-    this.blitPipeline = device.createRenderPipeline({
-      label: "blit",
-      layout: "auto",
+    const blitDescriptor = (format: GPUTextureFormat): GPURenderPipelineDescriptor => ({
+      label: "blit", layout: "auto",
       vertex: { module: blitModule, entryPoint: "vs" },
-      fragment: {
-        module: blitModule,
-        entryPoint: "fs",
-        targets: [{ format: this.format }],
-      },
+      fragment: { module: blitModule, entryPoint: "fs", targets: [{ format }] },
       primitive: { topology: "triangle-strip" },
     });
+    this.blitPipeline = device.createRenderPipeline(blitDescriptor(this.format));
+    this.retainPipeline = device.createRenderPipeline(blitDescriptor("rgba8unorm"));
+    this.retainFloatPipeline = device.createRenderPipeline(blitDescriptor("rgba16float"));
   }
 
   private orbitPipeline(limbs: number, sampleWords: number): Promise<GPUComputePipeline> {
@@ -697,7 +721,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const detail = Math.max(0, Math.log2(request.unitsPerPixel.div(frame.unitsPerPixel).toNumber()));
       return (area-overlap)*1000 + area + area*Math.min(8,detail)*.1 + (area ? Math.min(64,extent)*.0001 : 0);
     };
-    const keepFront = this.historyValid && compatible(this.lastFrame) &&
+    const keepFront = this.historyValid && !this.lastFrame?.proxy && compatible(this.lastFrame) &&
       (!compatible(this.coverageFrame) || score(this.lastFrame!) > score(this.coverageFrame!));
     let available: GPUTexture | null;
     if (keepFront) {
@@ -709,7 +733,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.coverageHistory?.destroy(); this.coverageHistory=null; this.coverageFrame=null;
       }
     }
-    if (available && available.width === width && available.height === height) this.history = available;
+    if (available && (available.usage & GPUTextureUsage.COPY_DST) && available.width === width && available.height === height) this.history = available;
     else {
       available?.destroy();
       this.history = this.ctx.device.createTexture({
@@ -819,31 +843,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return !!mapping;
   }
 
-  private calculationView(request: RenderRequest): RenderRequest {
-    if (!request.interacting || request.colors.supersample !== 1 || request.colors.mode !== 0) return request;
-    this.gridAnchor ??= createSampleGridAnchor(this.fieldView ?? request);
-    const old = this.fieldView;
-    if (old) {
-      const mapping = reprojectionFor(old, request);
-      const spacing = old.unitsPerPixel.div(request.unitsPerPixel).toNumber();
-      if (mapping && spacing <= 1.4 && mapping.offsetX >= 0 && mapping.offsetY >= 0 &&
-          mapping.offsetX + mapping.scaleX <= 1 && mapping.offsetY + mapping.scaleY <= 1) {
-        return { ...request, ...old };
-      }
-    }
-    let desired = request;
-    if (old && old.unitsPerPixel.lt(request.unitsPerPixel)) {
-      const physicalSpacing = old.unitsPerPixel.div(request.unitsPerPixel.times(request.height).div(this.canvas.height)).toNumber();
-      // Do not replace still-useful fine samples merely because the cost
-      // estimate reduced the next request's budget.
-      if (physicalSpacing >= .65) {
-        const height = Math.ceil(request.unitsPerPixel.times(request.height).div(old.unitsPerPixel).toNumber());
-        desired = { ...request, height, width: Math.ceil(height * request.width / request.height), unitsPerPixel: old.unitsPerPixel };
-      }
-    }
-    return { ...request, ...planSampleGrid(desired, this.gridAnchor, { overscan: 1.2 }) };
-  }
-
   private ensureOrbitCapacity(samples: number) {
     if (this.orbitCapacity >= samples && this.orbitBuffer) return;
     this.orbitBuffer?.destroy();
@@ -864,13 +863,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private encodeBlit(
     encoder: GPUCommandEncoder,
     source: GPUTexture,
-    xform: Float32Array
+    xform: Float32Array,
+    destination?: GPUTexture
   ) {
     const { device } = this.ctx;
     if (!this.xformBuffer) {
       this.xformBuffer = device.createBuffer({
         label: "blit-xform",
-        size: 80,
+        size: 96,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
@@ -878,17 +878,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       frame.family === this.currentView.family && frame.maxIterations === this.currentView.maxIterations &&
       (frame.family !== "julia" || frame.juliaX?.eq(this.currentView.juliaX!) && frame.juliaY?.eq(this.currentView.juliaY!));
     const coverage = source === this.history && this.coverageFrame && matchesView(this.coverageFrame) && this.currentView
-      ? reprojectionFor(this.coverageFrame, this.currentView) : null;
-    const transforms = new Float32Array(20); transforms.set(xform);
+      ? reprojectionFor(this.coverageFrame, this.currentView, true) : null;
+    const transforms = new Float32Array(24); transforms.set(xform);
     transforms[10] = source !== this.history || this.historyValid && matchesView(this.lastFrame) ? 1 : 0;
+    if (xform[0] === 0 || xform[1] === 0) transforms[10] = 0;
     if (source === this.target && !this.historyValid) transforms[10] = 0;
     if (coverage && this.coverageHistory) {
       transforms.set([coverage.scaleX, coverage.scaleY, coverage.offsetX, coverage.offsetY], 4);
       transforms[8] = 1;
       const front = this.lastFrame!, view = this.currentView!;
-      const exactStationary = !view.interacting && front.width === view.width && front.height === view.height &&
+      const exactStationary = !front.proxy && front.width === view.width && front.height === view.height &&
         front.centerX.eq(view.centerX) && front.centerY.eq(view.centerY) && front.unitsPerPixel.eq(view.unitsPerPixel);
-      transforms[9] = !exactStationary && this.coverageFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
+      transforms[9] = !front.proxy && !exactStationary && this.coverageFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
     }
     const fresh = this.incomingFrame, view = this.currentView;
     if (fresh && view && this.target && fresh.family === view.family && fresh.maxIterations === view.maxIterations &&
@@ -897,16 +898,22 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if (m) {
         transforms.set([m.scaleX, m.scaleY, m.offsetX, m.offsetY], 12);
         transforms[16] = 1;
-        const exact = !view.interacting && fresh.width === view.width && fresh.height === view.height &&
+        const exact = fresh.width === view.width && fresh.height === view.height &&
           fresh.centerX.eq(view.centerX) && fresh.centerY.eq(view.centerY) && fresh.unitsPerPixel.eq(view.unitsPerPixel);
-        transforms[17] = exact || !this.lastFrame || fresh.unitsPerPixel.lte(this.lastFrame.unitsPerPixel) ? 1 : 0;
-        transforms[18] = exact || !this.coverageFrame || fresh.unitsPerPixel.lte(this.coverageFrame.unitsPerPixel) ? 1 : 0;
+        transforms[17] = exact ? 1 : 0;
+        transforms[18] = exact ? 1 : 0;
       }
     }
+    const pixelUnit=this.currentView?.unitsPerPixel;
+    transforms[20]=pixelUnit ? (source===this.history ? this.lastFrame?.unitsPerPixel : this.incomingFrame?.unitsPerPixel)?.div(pixelUnit).toNumber()??1 : 1;
+    transforms[21]=pixelUnit ? this.coverageFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
+    transforms[22]=pixelUnit ? this.incomingFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
+    if(this.lastFrame?.proxy) transforms[9]=-1;
     device.queue.writeBuffer(this.xformBuffer, 0, transforms);
 
+    const pipeline=destination ? destination.format === "rgba16float" ? this.retainFloatPipeline! : this.retainPipeline! : this.blitPipeline!;
     const bind = device.createBindGroup({
-      layout: this.blitPipeline!.getBindGroupLayout(0),
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: source.createView() },
         { binding: 1, resource: this.sampler },
@@ -918,14 +925,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.context.getCurrentTexture().createView(),
+          view: (destination ?? this.context.getCurrentTexture()).createView(),
           loadOp: "clear",
           storeOp: "store",
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
         },
       ],
     });
-    pass.setPipeline(this.blitPipeline!);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, bind);
     pass.draw(4);
     pass.end();
@@ -942,8 +949,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    * overlap and the scale has not changed.
    *
    * It is only ever a stand-in: zooming in magnifies the old pixels rather
-   * than resolving new detail, so the caller still has to draw properly once
-   * the gesture settles.
+   * than resolving new detail. The pending numerical queue supplies that detail
+   * continuously, during motion and after the camera settles.
    */
   /**
    * Asks the render in flight to stop after its current band. Cheap and
@@ -968,7 +975,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     let mapping = compatible(last) ? reprojectionFor(last, request) : null;
     if (!mapping) {
-      if (!incomingAvailable && (!compatible(this.coverageFrame) || !reprojectionFor(this.coverageFrame!, request))) return false;
+      if (!incomingAvailable && (!compatible(this.coverageFrame) || !reprojectionFor(this.coverageFrame!, request, true))) return false;
       // The narrow front may be outside its useful range while the retained
       // broader source still covers the view. Mark the front as unavailable.
       mapping = { scaleX: 0, scaleY: 0, offsetX: -1, offsetY: -1 };
@@ -990,18 +997,99 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
   invalidateHistory() {
     this.publicationEpoch++; this.historyValid=false; this.refValid=false;
-    this.incomingFrame=null; this.fieldComplete=false;
+    this.incomingFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
-    this.gridAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";
+    this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";
     this.abort();
   }
+  private sameView(a: FrameView, b: FrameView) {
+    return a.width === b.width && a.height === b.height && a.centerX.eq(b.centerX) &&
+      a.centerY.eq(b.centerY) && a.unitsPerPixel.eq(b.unitsPerPixel);
+  }
+
+  isComplete(request: RenderRequest) {
+    const frame=this.lastFrame;
+    return this.fieldComplete && this.historyValid && !!frame && !frame.proxy &&
+      this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
+      (request.family!=="julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
+      JSON.stringify(frame.colors)===JSON.stringify(request.colors);
+  }
+
+  /** Conservative rectangle with useful sample density for priority, not mere
+   * display coverage. Magnified old pixels must not suppress refinement demand. */
+  private coverageIn(frame: NonNullable<WebGpuRenderer["lastFrame"]>, view: FrameView) {
+    const spacing=Decimal.max(frame.coveredSpacing??frame.unitsPerPixel,frame.unitsPerPixel);
+    const m=reprojectionFor(frame,view,!frame.proxy);
+    if (!m) return [];
+    const known=frame.proxy ? frame.covered : {x:0,y:0,width:frame.width,height:frame.height};
+    if (!known) return [];
+    const x=Math.max(0,(known.x/frame.width-m.offsetX)/m.scaleX*view.width);
+    const y=Math.max(0,(known.y/frame.height-m.offsetY)/m.scaleY*view.height);
+    const right=Math.min(view.width,((known.x+known.width)/frame.width-m.offsetX)/m.scaleX*view.width);
+    const bottom=Math.min(view.height,((known.y+known.height)/frame.height-m.offsetY)/m.scaleY*view.height);
+    return [{x,y,width:Math.max(0,right-x),height:Math.max(0,bottom-y),spacing}];
+  }
+
+  private retainPartial() {
+    const frame = this.incomingFrame;
+    if (!frame || !this.target || !this.partialRegions) return;
+    const { device } = this.ctx;
+    this.retainedAnchor ??= createSampleGridAnchor(this.lastFrame ?? frame);
+    const retained={...frame,...planRetainedView(frame,this.retainedAnchor,{overscan:1})};
+    const snapshot = device.createTexture({ label: "retained-progress", size: [retained.width,retained.height],
+      format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
+    const candidates=[...this.coverageIn({...frame,proxy:true,covered:this.determinedRegion??undefined,coveredSpacing:this.determinedSpacing},retained),...[this.historyValid?this.lastFrame:null,this.coverageFrame].flatMap(
+      old=>old && old.family===frame.family ? this.coverageIn(old,retained) : [])].filter(r=>r!==null);
+    const covered=candidates.sort((a,b)=>b.width*b.height-a.width*a.height)[0];
+    const live = this.currentView;
+    this.currentView = { ...retained };
+    const source = this.historyValid ? this.history! : this.target;
+    const mapping = this.historyValid && this.lastFrame ? reprojectionFor(this.lastFrame,retained,!this.lastFrame.proxy) : null;
+    const encoder = device.createCommandEncoder({label:"retain-progress"});
+    this.encodeBlit(encoder,source,mapping ? new Float32Array([mapping.scaleX,mapping.scaleY,mapping.offsetX,mapping.offsetY]) : new Float32Array([0,0,-1,-1]),snapshot);
+    device.queue.submit([encoder.finish()]);
+    this.currentView = live;
+    if (this.historyValid && this.lastFrame && !this.lastFrame.proxy) {
+      this.coverageHistory?.destroy(); this.coverageHistory=this.history; this.coverageFrame=this.lastFrame;
+    } else this.history?.destroy();
+    this.history=snapshot; this.historySize={width:retained.width,height:retained.height};
+    this.lastFrame={...retained,proxy:true,covered,coveredSpacing:covered?.spacing}; this.historyValid=true; this.incomingFrame=null;
+  }
+
+  private regionDemand(request: RenderRequest): Demand {
+    const live = request.followView ? this.currentView ?? request : request;
+    const m = reprojectionFor(request,live);
+    const focus = live.focus ?? {x:.5,y:.5};
+    const covered = [this.historyValid ? this.lastFrame : null,this.coverageFrame].flatMap(frame => {
+      if (!frame || frame.family !== request.family) return [];
+      return this.coverageIn(frame,request).map(r=>({...r,spacing:r.spacing.div(request.unitsPerPixel).toNumber()}));
+    });
+    return {x:((m?.offsetX??0)+focus.x*(m?.scaleX??1))*request.width,
+      y:((m?.offsetY??0)+focus.y*(m?.scaleY??1))*request.height,zoom:live.zoom??0,covered};
+  }
+
   async render(request: RenderRequest): Promise<RenderStats> {
+    let result: RenderStats;
+    do {
+      this.retarget=false;
+      result=await this.renderTarget(request);
+      // Counter readback also yields. Demand arriving during that last fence
+      // must be serviced before reporting the stream complete.
+      if (request.followView && result.completed && this.currentView && !this.isComplete(this.currentView)) this.retarget=true;
+      if (!this.retarget || this.abortRequested || request.isCurrent && !request.isCurrent()) return result;
+      this.retainPartial();
+      request={...this.currentView!,followView:true,isCurrent:request.isCurrent};
+    } while (true);
+  }
+
+  private async renderTarget(request: RenderRequest): Promise<RenderStats> {
+
     const { device } = this.ctx;
     const epoch = this.publicationEpoch;
     const originalCurrent = request.isCurrent;
     request = { ...request, colors: { ...request.colors, stops: [...request.colors.stops] },
       isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
-    request = this.calculationView(request);
+
     const requestKey = [request.centerX, request.centerY, request.unitsPerPixel, request.width, request.height,
       request.family, request.juliaX, request.juliaY, request.maxIterations, request.forceMethod, request.useApprox,
       JSON.stringify(request.colors)].join("|");
@@ -1037,15 +1125,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       request.maxIterations > this.refIterations ||
       drift.greaterThan(halfSpan.times(0.5));
 
-    // Mid-gesture, keep whatever reference we have. Perturbation stays exact
-    // with a stale reference — it just rebases more — and rebuilding costs tens
-    // to hundreds of milliseconds, which is exactly the zoom stutter.
-    const canRebuild = !request.interacting || !this.refValid || limbs !== this.refLimbs;
+    // Geometric drift, precision, family and iteration requirements apply
+    // equally during motion and rest. Input release is not a rebuild trigger.
 
     let orbitMs = 0;
     this.pipelineWaitMs = 0;
     this.tableMs = 0;
-    if (method !== Method.Direct && stale && canRebuild) {
+    if (method !== Method.Direct && stale) {
       this.refFamily=family; this.refConstant=constant;
       this.refX = request.centerX;
       this.refY = request.centerY;
@@ -1106,6 +1192,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       request.height
     );
 
+    let previewStride=1;
+    if(request.followView && !request.tileRows && colors.mode===0 && grid===1) {
+      while(Math.ceil(request.width/previewStride)*Math.ceil(request.height/previewStride)>MIN_BATCH_SAMPLES) previewStride*=2;
+    }
+
     // Layout must match the Uniforms struct in perturbation.wgsl. vec3 members
     // align to 16 bytes, which is what the gaps below are for.
     const uniforms = new ArrayBuffer(336);
@@ -1153,6 +1244,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     f32[33] = colors.specularStrength;
     u32[34] = colors.slopeLighting ? 1 : 0;
     u32[35] = grid;
+    u32[26] = request.height; u32[54]=1; u32[55]=previewStride;
     f32[36] = 1 / Math.max(1, colors.gamma);
     u32[37] = method;
     f32[38] = request.centerX.toNumber();
@@ -1245,39 +1337,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       collectTimings();
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
-    type Region = { x: number; y: number; width: number; height: number };
-    const regions: Region[] = [];
-    const add = (x: number, y: number, width: number, height: number) => {
-      if (width > 0 && height > 0) regions.push({ x, y, width, height });
-    };
-    // Work visible on screen before the padded margins. All internal boundaries
-    // are workgroup aligned, so no invocation can overwrite a neighbouring job.
-    const visible = reprojectionFor(request, this.currentView ?? request);
-    const left = visible ? Math.max(0, Math.min(request.width, Math.floor(visible.offsetX * request.width / 8) * 8)) : 0;
-    const top = visible ? Math.max(0, Math.min(request.height, Math.floor(visible.offsetY * request.height / 8) * 8)) : 0;
-    const right = visible ? Math.max(left, Math.min(request.width, Math.ceil((visible.offsetX + visible.scaleX) * request.width / 8) * 8)) : request.width;
-    const bottom = visible ? Math.max(top, Math.min(request.height, Math.ceil((visible.offsetY + visible.scaleY) * request.height / 8) * 8)) : request.height;
-    if (fieldStale) {
-      add(left, top, right-left, bottom-top);
-      add(0, 0, request.width, top); add(0, bottom, request.width, request.height-bottom);
-      add(0, top, left, bottom-top); add(right, top, request.width-right, bottom-top);
-    }
-    while (regions.length) {
-      const region = regions.shift()!;
-      // Fence callback latency is not proportional to sample count. The floor
-      // also preserves GPU throughput on expensive fields with cheap rows.
-      const budget = this.batchMsPerSample > 0 ? Math.max(MIN_BATCH_SAMPLES, SUBMIT_BUDGET_MS / this.batchMsPerSample) : MIN_BATCH_SAMPLES;
-      const width = region.width;
-      const rows = Math.min(region.height, Math.max(8, Math.ceil((request.tileRows ?? budget / width) / 8) * 8));
-      // Finish the selected visible rectangle before its overscan siblings.
-      if (region.height > rows) regions.unshift({ ...region, y: region.y + rows, height: region.height - rows });
-      if (region.width > width) regions.unshift({ x: region.x + width, y: region.y, width: region.width - width, height: rows });
+    const batchCostKey=[family,method,request.maxIterations,limbs,colors.mode,grid].join("|");
+    if (this.batchCostKey!==batchCostKey) { this.batchCostKey=batchCostKey; this.batchMsPerSample=0; }
+    if (!fieldStale) this.pending.reset(0,0);
+    if (fieldStale) { this.pending.reset(request.width,request.height,previewStride); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
+    const targetStarted=performance.now();
+    while (this.pending.size) {
+      const budget = this.batchMsPerSample > 0 ?
+        Math.max(MIN_BATCH_SAMPLES,SUBMIT_BUDGET_MS/this.batchMsPerSample) : MIN_BATCH_SAMPLES;
+      const region = this.pending.take(budget,this.regionDemand(request),request.tileRows);
+      if(!region) break;
+      const width=region.width, rows=region.height;
+      this.latestRegion=region;
       const m = this.reuseMapping, old = this.reusableView;
       const fullyKnown = this.reusableComplete && m && old && m.denominator === 1 &&
         m.offsetX + region.x * m.step >= 0 && m.offsetY + region.y * m.step >= 0 &&
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
         m.offsetY + (region.y + rows - 1) * m.step < old.height;
-      if (fullyKnown) { cpuReused += width * rows; continue; }
+      if (fullyKnown) { if(region.stride===1) cpuReused += width * rows; continue; }
+      u32[54]=region.stride; u32[26]=region.y+rows;
       u32[40] = region.y; u32[42] = region.x; u32[43] = region.x + width;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
       const batchStarted = performance.now();
@@ -1287,26 +1365,38 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       pass.setPipeline(family === "julia" ? this.juliaPipeline! : method === Method.Direct ? this.directPipeline! :
         approximationLevels > 0 ? this.approxPipeline! : this.renderPipeline);
       pass.setBindGroup(0, bind);
-      pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(rows / 8)); pass.end();
+      pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 8)); pass.end();
       this.timing.resolve(encoder, sample); timingSamples.push(sample);
       if (progressive) shade(encoder, width, rows);
       device.queue.submit([encoder.finish()]);
       collectTimings();
       if (progressive && request.isCurrent!()) {
         this.incomingFrame = frame; this.partialSerial++; this.partialRegions++;
-        this.firstPartialAt ||= performance.now();
+        if (!this.determinedRegion || width*rows >= this.determinedRegion.width*this.determinedRegion.height) {
+          this.determinedRegion={x:region.x,y:region.y,width,height:rows};
+          this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
+        }
+        this.lastPartialAt=performance.now(); this.firstPartialAt ||= this.lastPartialAt;
         // A render can also be used outside the application's animation loop.
         // Queue order presents only finished regions, never in-flight writes.
         this.reproject(this.currentView ?? request);
       }
       await device.queue.onSubmittedWorkDone();
       const elapsed = performance.now() - batchStarted;
-      const cost = elapsed / (width * rows);
+      const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
       this.batchMsPerSample = this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
       await yieldToEvents();
-      const settledDuringMotion = request.interacting && this.currentView && !this.currentView.interacting;
-      if (!request.isCurrent!() || this.abortRequested || settledDuringMotion) {
+      await request.betweenBatches?.();
+      if (!request.isCurrent!() || this.abortRequested) {
         completed = false; this.aborted = true; break;
+      }
+      // A geometry change updates demand regardless of input state. Give each
+      // target useful bounded work, then follow the live camera. Releasing a
+      // button changes neither this condition nor the outstanding queue.
+      const live=this.currentView;
+      if (request.followView && live && (!this.sameView(request,live) || JSON.stringify(request.colors)!==JSON.stringify(live.colors)) &&
+          (performance.now()-targetStarted >= 64 || !this.pending.size)) {
+        this.retarget=true; completed=false; break;
       }
     }
     if (!request.isCurrent!()) completed = false;
@@ -1318,6 +1408,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // lighting shade once here. Unknown partial samples stay out of history.
     if (completed) {
       const encoder = device.createCommandEncoder({ label: "shade" });
+      u32[26]=request.height; u32[54]=1;
       u32[40] = 0; u32[42] = 0; u32[43] = request.width;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
       if (!fieldStale || !progressive) shade(encoder, request.width, request.height);
@@ -1380,13 +1471,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     };
     if (completed && request.isCurrent!()) {
       this.cachedStats = result; this.cachedRequest = requestKey;
-      // Small exposed strips are dominated by dispatch overhead; learn cost
-      // from substantial numerical work instead of inflating the next budget.
-      if (counters[5] > request.width * request.height * .2) {
-        const cost = renderMs / counters[5];
-        this.msPerSample = this.msPerSample ? .75 * this.msPerSample + .25 * cost : cost;
-      }
-      if (!request.interacting) this.gridAnchor = createSampleGridAnchor(request);
+
     }
     return result;
   }
