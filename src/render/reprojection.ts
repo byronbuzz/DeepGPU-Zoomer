@@ -19,14 +19,15 @@ export interface FrameView {
   height: number;
 }
 
-/** `uv' = uv * scale + offset`, in normalised texture coordinates. */
+/** Per-axis `uv' = uv * scale + offset`, in normalised texture coordinates. */
 export interface Reprojection {
-  scale: number;
+  scaleX: number;
+  scaleY: number;
   offsetX: number;
   offsetY: number;
 }
 
-export const IDENTITY: Reprojection = { scale: 1, offsetX: 0, offsetY: 0 };
+export const IDENTITY: Reprojection = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 };
 
 /**
  * Past this much magnification there is more stretched pixel than picture, and
@@ -57,19 +58,14 @@ export function reprojectionFor(
     return null;
   }
 
-  // A different aspect ratio would stretch the picture rather than move it.
-  const wasAspect = last.width / last.height;
-  const nowAspect = next.width / next.height;
-  if (Math.abs(wasAspect - nowAspect) > 0.01) return null;
-
   const lastSpanX = last.unitsPerPixel.times(last.width);
   const lastSpanY = last.unitsPerPixel.times(last.height);
   const nextSpanY = next.unitsPerPixel.times(next.height);
   if (lastSpanX.isZero() || lastSpanY.isZero()) return null;
 
-  const scale = nextSpanY.div(lastSpanY).toNumber();
-  if (!Number.isFinite(scale) || scale <= 0) return null;
-  if (scale > MAX_MAGNIFY || scale < MAX_SHRINK) return null;
+  const scaleY = nextSpanY.div(lastSpanY).toNumber();
+  const scaleX = next.unitsPerPixel.times(next.width).div(lastSpanX).toNumber();
+  if (![scaleX, scaleY].every(scale => Number.isFinite(scale) && scale >= MAX_SHRINK && scale <= MAX_MAGNIFY)) return null;
 
   // Centre travel as a fraction of the old frame. Screen y runs downwards and
   // the imaginary axis upwards, hence the negation.
@@ -79,8 +75,8 @@ export function reprojectionFor(
   if (Math.abs(dx) > MAX_PAN_SCREENS || Math.abs(dy) > MAX_PAN_SCREENS) return null;
 
   return {
-    scale,
-    offsetX: 0.5 * (1 - scale) + dx,
-    offsetY: 0.5 * (1 - scale) + dy,
+    scaleY, scaleX,
+    offsetX: 0.5 * (1 - scaleX) + dx,
+    offsetY: 0.5 * (1 - scaleY) + dy,
   };
 }

@@ -20,7 +20,7 @@ const frame = (
 describe("reprojectionFor", () => {
   it("is the identity when nothing has changed", () => {
     const r = reprojectionFor(frame("2.8"), frame("2.8"))!;
-    expect(r.scale).toBeCloseTo(1, 10);
+    expect(r.scaleY).toBeCloseTo(1, 10);
     expect(r.offsetX).toBeCloseTo(0, 10);
     expect(r.offsetY).toBeCloseTo(0, 10);
   });
@@ -33,25 +33,25 @@ describe("reprojectionFor", () => {
     const full = frame("2.8", 1200, 800);
     const quarter = frame("2.8", 300, 200);
     const r = reprojectionFor(full, quarter)!;
-    expect(r.scale).toBeCloseTo(1, 10);
+    expect(r.scaleY).toBeCloseTo(1, 10);
     expect(r.offsetX).toBeCloseTo(0, 10);
     expect(r.offsetY).toBeCloseTo(0, 10);
 
     // And back the other way, which is the end of the gesture.
     const back = reprojectionFor(quarter, full)!;
-    expect(back.scale).toBeCloseTo(1, 10);
+    expect(back.scaleY).toBeCloseTo(1, 10);
   });
 
   it("halves the scale when the view zooms in twofold", () => {
     const r = reprojectionFor(frame("2.8"), frame("1.4"))!;
-    expect(r.scale).toBeCloseTo(0.5, 10);
+    expect(r.scaleY).toBeCloseTo(0.5, 10);
     // The centre of the screen still samples the centre of the old frame.
-    expect(r.offsetX + r.scale * 0.5).toBeCloseTo(0.5, 10);
+    expect(r.offsetX + r.scaleY * 0.5).toBeCloseTo(0.5, 10);
   });
 
   it("zooming in at a different resolution still reads as one zoom", () => {
     const r = reprojectionFor(frame("2.8", 1200, 800), frame("1.4", 300, 200))!;
-    expect(r.scale).toBeCloseTo(0.5, 10);
+    expect(r.scaleY).toBeCloseTo(0.5, 10);
   });
 
   it("maps a pan of half a screen to half a frame of offset", () => {
@@ -59,7 +59,7 @@ describe("reprojectionFor", () => {
     // Width spans 2.8 * 1200/800 = 4.2, so half a screen right is 2.1.
     const after = frame("2.8", 1200, 800, "2.1", "0");
     const r = reprojectionFor(before, after)!;
-    expect(r.scale).toBeCloseTo(1, 10);
+    expect(r.scaleY).toBeCloseTo(1, 10);
     expect(r.offsetX).toBeCloseTo(0.5, 10);
   });
 
@@ -78,15 +78,26 @@ describe("reprojectionFor", () => {
     ).toBeNull();
   });
 
-  it("declines when the aspect ratio changed", () => {
-    expect(reprojectionFor(frame("2.8", 1200, 800), frame("2.8", 800, 800))).toBeNull();
+  it("preserves coordinates when viewport aspect changes", () => {
+    const r = reprojectionFor(frame("2.8", 1200, 800), frame("2.8", 800, 800))!;
+    expect(r.scaleX).toBeCloseTo(2/3); expect(r.scaleY).toBe(1);
   });
 
   it("survives depths far outside double range", () => {
     const deep = reprojectionFor(frame("1e-300"), frame("5e-301"))!;
-    expect(deep.scale).toBeCloseTo(0.5, 6);
+    expect(deep.scaleY).toBeCloseTo(0.5, 6);
     // 1e-600 underflows a double to zero; the maths runs in Decimal.
     const deeper = reprojectionFor(frame("1e-600"), frame("5e-601"))!;
-    expect(deeper.scale).toBeCloseTo(0.5, 6);
+    expect(deeper.scaleY).toBeCloseTo(0.5, 6);
+  });
+
+  it("maps padded sample grids using their actual independent extents", () => {
+    const padded = { ...frame("120", 208, 120), unitsPerPixel: new Decimal(1) };
+    const viewport = { ...frame("90", 160, 90), unitsPerPixel: new Decimal(1) };
+    const r = reprojectionFor(padded, viewport)!;
+    expect(r.scaleX).toBeCloseTo(160 / 208, 12);
+    expect(r.scaleY).toBeCloseTo(90 / 120, 12);
+    expect(r.offsetX + .5 * r.scaleX).toBeCloseTo(.5, 12);
+    expect(r.offsetY + .5 * r.scaleY).toBeCloseTo(.5, 12);
   });
 });

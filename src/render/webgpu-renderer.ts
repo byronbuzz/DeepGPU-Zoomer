@@ -15,6 +15,9 @@ import compensatedSource from "../arithmetic/compensated.wgsl?raw";
 import quadSource from "../arithmetic/quad.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import juliaSource from "./julia.wgsl?raw";
+import reuseSource from "./reuse.wgsl?raw";
+import { createSampleGridAnchor, planSampleGrid, sampleGridRemap, type SampleGridAnchor } from "./sample-grid";
+import type { FrameView } from "./reprojection";
 import { fixedToQuad, splitQuad } from "../arithmetic/quad";
 import { reprojectionFor } from "./reprojection";
 
@@ -107,11 +110,17 @@ export interface RenderRequest {
 export interface RenderStats {
   completed: boolean;
   computed: boolean;
+  computedSamples: number;
+  reusedSamples: number;
+  sampleWidth: number;
+  sampleHeight: number;
   limbs: number;
   decimalDigits: number;
   orbitLength: number;
   orbitEscaped: boolean;
   orbitMs: number;
+  /** CPU wall time awaiting an orbit pipeline, including driver compilation. */
+  pipelineWaitMs: number;
   /** Time spent building the skip table on the CPU. */
   tableMs: number;
   /** Which per-pixel iteration ran. */
@@ -221,7 +230,8 @@ export class WebGpuRenderer {
   private context: GPUCanvasContext;
   private format: GPUTextureFormat;
 
-  private orbitPipelines = new Map<string, GPUComputePipeline>();
+  private orbitPipelines = new Map<string, Promise<GPUComputePipeline>>();
+  private pipelineWaitMs = 0;
   private renderPipeline: GPUComputePipeline | null = null;
   private juliaPipeline: GPUComputePipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
@@ -244,16 +254,39 @@ export class WebGpuRenderer {
     unitsPerPixel: Decimal;
     width: number;
     height: number;
+    colors: ColorSettings;
+    maxIterations: number;
   } | null = null;
   private xformBuffer: GPUBuffer | null = null;
   private history: GPUTexture | null = null;
+  private coverageHistory: GPUTexture | null = null;
+  private coverageFrame: WebGpuRenderer["lastFrame"] = null;
+  private currentView: RenderRequest | null = null;
   private historySize = { width: 0, height: 0 };
   private historyValid = false;
+  private publicationEpoch = 0;
   private abortRequested = false;
   private shadePipeline: GPUComputePipeline | null = null;
   private bindLayout: GPUBindGroupLayout | null = null;
   private fieldBuffer: GPUBuffer | null = null;
   private fieldCapacity = 0;
+  private spareField: GPUBuffer | null = null;
+  private spareCapacity = 0;
+  private fieldView: FrameView | null = null;
+  private sampleKey = "";
+  private gridAnchor: SampleGridAnchor | null = null;
+  private reusePipeline: GPUComputePipeline | null = null;
+  private reuseUniform: GPUBuffer | null = null;
+  private cachedStats: RenderStats | null = null;
+  private cachedRequest = "";
+  private msPerSample = 0;
+
+  /** Measured field cost only; reference generation is tracked separately. */
+  calculationScale(width: number, height: number): number {
+    if (!this.msPerSample) return 1;
+    const fullMs = this.msPerSample * width * height;
+    return Math.max(.125, Math.min(1, Math.sqrt(36 / Math.max(fullMs, 1))));
+  }
   /**
    * Identifies what is in `fieldBuffer`. Everything that changes the numbers
    * belongs here; everything that only changes how they look must not, or
@@ -297,8 +330,8 @@ export class WebGpuRenderer {
     });
 
     this.sampler = ctx.device.createSampler({
-      magFilter: "linear",
-      minFilter: "linear",
+      magFilter: "nearest",
+      minFilter: "nearest",
     });
     this.uniformBuffer = ctx.device.createBuffer({
       size: 336,
@@ -315,6 +348,9 @@ export class WebGpuRenderer {
 
   async init() {
     const { device } = this.ctx;
+    const reuseModule = await compileShader(device, reuseSource, "sample-reuse");
+    this.reusePipeline = device.createComputePipeline({ layout: "auto", compute: { module: reuseModule, entryPoint: "remap" } });
+    this.reuseUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     const renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, juliaSource].join("\n"), "perturbation");
 
@@ -370,7 +406,9 @@ export class WebGpuRenderer {
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 /** uv' = uv * xform.xy + xform.zw. Identity is (1, 1, 0, 0). */
-@group(0) @binding(2) var<uniform> xform: vec4<f32>;
+struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32> };
+@group(0) @binding(2) var<uniform> display: Presentation;
+@group(0) @binding(3) var coverage: texture_2d<f32>;
 
 struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
 
@@ -388,12 +426,15 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let uv = in.uv * xform.xy + xform.zw;
-    // Off the edge of the reused frame there is nothing to show. Dimming it
-    // reads as "not computed yet" rather than as a smear of stretched pixels.
-    let outside = any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0));
-    let texel = textureSample(src, smp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
-    return select(texel, texel * 0.35, outside);
+    let uv = in.uv * display.front.xy + display.front.zw;
+    let oldUV = in.uv * display.back.xy + display.back.zw;
+    let frontValid = all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
+    let backValid = display.options.x > 0.0 && all(oldUV >= vec2<f32>(0.0)) && all(oldUV <= vec2<f32>(1.0));
+    // Select an actual determined sample. Never blend the two images, and do
+    // not let a smaller new field erase already calculated coverage.
+    let front = textureSample(src, smp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+    let back = textureSample(coverage, smp, clamp(oldUV, vec2<f32>(0.0), vec2<f32>(1.0)));
+    return select(front, back, backValid && (!frontValid || display.options.y > 0.0));
 }
 `,
       "blit"
@@ -411,7 +452,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     });
   }
 
-  private orbitPipeline(limbs: number, sampleWords: number): GPUComputePipeline {
+  private orbitPipeline(limbs: number, sampleWords: number): Promise<GPUComputePipeline> {
     const key = `${limbs}:${sampleWords}`;
     const cached = this.orbitPipelines.get(key);
     if (cached) return cached;
@@ -421,7 +462,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       label: `orbit-${limbs}`,
       code: orbitModule,
     });
-    const pipeline = this.ctx.device.createComputePipeline({
+    const pipeline = this.ctx.device.createComputePipelineAsync({
       label: `orbit-${limbs}`,
       layout: "auto",
       compute: { module, entryPoint: "advanceOrbit", constants: { LIMBS: limbs, SAMPLE_WORDS: sampleWords } },
@@ -442,7 +483,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.ensureOrbitCapacity(maxSamples);
 
     const julia = request.family === "julia";
-    const pipeline = this.orbitPipeline(limbs, julia ? 20 : 12);
+    const pipelineStarted = performance.now();
+    const pipeline = await this.orbitPipeline(limbs, julia ? 20 : 12);
+    this.pipelineWaitMs = performance.now() - pipelineStarted;
     const state = storageBuffer(device, limbs * 2, "orbit-state");
     const seed = storageBuffer(device, limbs * 4, "orbit-seed");
     const scratch = storageBuffer(device, scratchWords(limbs), "orbit-scratch");
@@ -564,6 +607,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Largest |delta| any pixel can have: the half-diagonal of the view.
     const halfDiagonal = request.unitsPerPixel
       .times(Math.hypot(request.width, request.height) / 2)
+      .plus(request.centerX.minus(this.refX).abs())
+      .plus(request.centerY.minus(this.refY).abs())
       .toNumber();
 
     const samples = await this.debugReadOrbit(this.refLength);
@@ -617,28 +662,52 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    * Keeps the history texture at its own size, independent of the render
    * target.
    *
-   * It used to live in ensureTarget, which meant the interactive resolution
-   * switch destroyed it at the start of every gesture and again at the end.
-   * Reprojection went dead exactly at those two moments, so each zoom began
-   * and ended with a visible jump -- the bounce. The transform is in
-   * normalised texture coordinates and does not care about pixel dimensions,
-   * so there is no reason to throw the frame away.
+   * Retain one useful completed source while preparing the incoming image.
+   * Neither source changes geometry without its corresponding pixel copy.
    */
-  private ensureHistory(width: number, height: number) {
-    if (
-      this.history &&
-      this.historySize.width === width &&
-      this.historySize.height === height
-    ) {
-      return;
+  private ensureHistory(request: RenderRequest) {
+    const { width, height } = request;
+    const compatible = (frame: WebGpuRenderer["lastFrame"]) => frame &&
+      frame.family === request.family && frame.maxIterations === request.maxIterations &&
+      (request.family !== "julia" || frame.juliaX?.eq(request.juliaX!) && frame.juliaY?.eq(request.juliaY!)) &&
+      JSON.stringify(frame.colors) === JSON.stringify(request.colors);
+    const view = this.currentView ?? request;
+    const bounds = (frame: FrameView) => {
+      const m = reprojectionFor(frame, view);
+      return m ? [Math.max(0, -m.offsetX / m.scaleX), Math.max(0, -m.offsetY / m.scaleY),
+        Math.min(1, (1 - m.offsetX) / m.scaleX), Math.min(1, (1 - m.offsetY) / m.scaleY)] : [0,0,0,0];
+    };
+    const incoming = bounds(request);
+    const score = (frame: FrameView) => {
+      const b = bounds(frame), area = Math.max(0,b[2]-b[0]) * Math.max(0,b[3]-b[1]);
+      const overlap = Math.max(0,Math.min(b[2],incoming[2])-Math.max(b[0],incoming[0])) *
+        Math.max(0,Math.min(b[3],incoming[3])-Math.max(b[1],incoming[1]));
+      const extent = frame.unitsPerPixel.times(frame.height).div(view.unitsPerPixel.times(view.height)).toNumber();
+      const detail = Math.max(0, Math.log2(request.unitsPerPixel.div(frame.unitsPerPixel).toNumber()));
+      return (area-overlap)*1000 + area + area*Math.min(8,detail)*.1 + (area ? Math.min(64,extent)*.0001 : 0);
+    };
+    const keepFront = this.historyValid && compatible(this.lastFrame) &&
+      (!compatible(this.coverageFrame) || score(this.lastFrame!) > score(this.coverageFrame!));
+    let available: GPUTexture | null;
+    if (keepFront) {
+      available = this.coverageHistory;
+      this.coverageHistory = this.history; this.coverageFrame = this.lastFrame;
+    } else {
+      available = this.history;
+      if (!compatible(this.coverageFrame)) {
+        this.coverageHistory?.destroy(); this.coverageHistory=null; this.coverageFrame=null;
+      }
     }
-    this.history?.destroy();
-    this.history = this.ctx.device.createTexture({
-      label: "last-complete-frame",
-      size: { width, height },
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
+    if (available && available.width === width && available.height === height) this.history = available;
+    else {
+      available?.destroy();
+      this.history = this.ctx.device.createTexture({
+        label: "last-complete-frame",
+        size: { width, height },
+        format: "rgba8unorm",
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      });
+    }
     this.historySize = { width, height };
     this.historyValid = false;
   }
@@ -714,13 +783,63 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return 1;
   }
 
-  private ensureFieldCapacity(samples: number) {
-    if (this.fieldCapacity >= samples && this.fieldBuffer) return;
-    this.fieldBuffer?.destroy();
-    // Two floats per sub-sample.
-    this.fieldBuffer = storageBuffer(this.ctx.device, samples * 2, "sample-field", GPUBufferUsage.COPY_SRC);
-    this.fieldCapacity = samples;
-    this.fieldKey = "";
+  private moveField(request: RenderRequest, samples: number, key: string, reuse: boolean): boolean {
+    const previous = this.fieldBuffer, previousCapacity = this.fieldCapacity;
+    const mapping = reuse && previous && this.fieldView && this.sampleKey === key
+      ? sampleGridRemap(this.fieldView, request) : null;
+    if (!this.spareField || this.spareCapacity < samples) {
+      this.spareField?.destroy();
+      this.spareField = storageBuffer(this.ctx.device, samples * 2, "sample-field", GPUBufferUsage.COPY_SRC);
+      this.spareCapacity = samples;
+    }
+    this.fieldBuffer = this.spareField; this.fieldCapacity = this.spareCapacity;
+    this.spareField = previous; this.spareCapacity = previousCapacity;
+    if (mapping && previous && this.fieldView) {
+      const device = this.ctx.device;
+      device.queue.writeBuffer(this.reuseUniform!, 0, new Int32Array([
+        this.fieldView.width, this.fieldView.height, request.width, request.height,
+        mapping.offsetX, mapping.offsetY, mapping.step, mapping.denominator,
+      ]));
+      const encoder = device.createCommandEncoder({ label: "retain-samples" });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.reusePipeline!);
+      pass.setBindGroup(0, device.createBindGroup({ layout: this.reusePipeline!.getBindGroupLayout(0), entries: [
+        { binding: 0, resource: { buffer: previous } },
+        { binding: 1, resource: { buffer: this.fieldBuffer } },
+        { binding: 2, resource: { buffer: this.reuseUniform! } },
+      ] }));
+      pass.dispatchWorkgroups(Math.ceil(request.width / 8), Math.ceil(request.height / 8)); pass.end();
+      device.queue.submit([encoder.finish()]);
+    }
+    this.fieldView = { centerX: request.centerX, centerY: request.centerY,
+      unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height };
+    this.sampleKey = key;
+    return !!mapping;
+  }
+
+  private calculationView(request: RenderRequest): RenderRequest {
+    if (!request.interacting || request.colors.supersample !== 1 || request.colors.mode !== 0) return request;
+    this.gridAnchor ??= createSampleGridAnchor(this.fieldView ?? request);
+    const old = this.fieldView;
+    if (old) {
+      const mapping = reprojectionFor(old, request);
+      const spacing = old.unitsPerPixel.div(request.unitsPerPixel).toNumber();
+      if (mapping && spacing <= 1.4 && mapping.offsetX >= 0 && mapping.offsetY >= 0 &&
+          mapping.offsetX + mapping.scaleX <= 1 && mapping.offsetY + mapping.scaleY <= 1) {
+        return { ...request, ...old };
+      }
+    }
+    let desired = request;
+    if (old && old.unitsPerPixel.lt(request.unitsPerPixel)) {
+      const physicalSpacing = old.unitsPerPixel.div(request.unitsPerPixel.times(request.height).div(this.canvas.height)).toNumber();
+      // Do not replace still-useful fine samples merely because the cost
+      // estimate reduced the next request's budget.
+      if (physicalSpacing >= .65) {
+        const height = Math.ceil(request.unitsPerPixel.times(request.height).div(old.unitsPerPixel).toNumber());
+        desired = { ...request, height, width: Math.ceil(height * request.width / request.height), unitsPerPixel: old.unitsPerPixel };
+      }
+    }
+    return { ...request, ...planSampleGrid(desired, this.gridAnchor, { overscan: 1.2 }) };
   }
 
   private ensureOrbitCapacity(samples: number) {
@@ -749,11 +868,22 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!this.xformBuffer) {
       this.xformBuffer = device.createBuffer({
         label: "blit-xform",
-        size: 16,
+        size: 48,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
-    device.queue.writeBuffer(this.xformBuffer, 0, xform.buffer as ArrayBuffer);
+    const coverage = source === this.history && this.coverageFrame && this.currentView
+      ? reprojectionFor(this.coverageFrame, this.currentView) : null;
+    const transforms = new Float32Array(12); transforms.set(xform);
+    if (coverage && this.coverageHistory) {
+      transforms.set([coverage.scaleX, coverage.scaleY, coverage.offsetX, coverage.offsetY], 4);
+      transforms[8] = 1;
+      const front = this.lastFrame!, view = this.currentView!;
+      const exactStationary = !view.interacting && front.width === view.width && front.height === view.height &&
+        front.centerX.eq(view.centerX) && front.centerY.eq(view.centerY) && front.unitsPerPixel.eq(view.unitsPerPixel);
+      transforms[9] = !exactStationary && this.coverageFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
+    }
+    device.queue.writeBuffer(this.xformBuffer, 0, transforms);
 
     const bind = device.createBindGroup({
       layout: this.blitPipeline!.getBindGroupLayout(0),
@@ -761,6 +891,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         { binding: 0, resource: source.createView() },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: { buffer: this.xformBuffer } },
+        { binding: 3, resource: (this.coverageHistory ?? source).createView() },
       ],
     });
     const pass = encoder.beginRenderPass({
@@ -802,6 +933,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   reproject(request: RenderRequest): boolean {
+    this.currentView = request;
     const last = this.lastFrame;
     if (!last || !this.history || !this.historyValid || !this.blitPipeline) {
       return false;
@@ -809,14 +941,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (last.family !== request.family || (request.family === "julia" &&
         (!last.juliaX?.eq(request.juliaX!) || !last.juliaY?.eq(request.juliaY!)))) return false;
 
-    const mapping = reprojectionFor(last, request);
-    if (!mapping) return false;
+    let mapping = reprojectionFor(last, request);
+    if (!mapping) {
+      if (!this.coverageFrame || !reprojectionFor(this.coverageFrame, request)) return false;
+      // The narrow front may be outside its useful range while the retained
+      // broader source still covers the view. Mark the front as unavailable.
+      mapping = { scaleX: 0, scaleY: 0, offsetX: -1, offsetY: -1 };
+    }
 
     const encoder = this.ctx.device.createCommandEncoder({ label: "reproject" });
     this.encodeBlit(
       encoder,
       this.history,
-      new Float32Array([mapping.scale, mapping.scale, mapping.offsetX, mapping.offsetY])
+      new Float32Array([mapping.scaleX, mapping.scaleY, mapping.offsetX, mapping.offsetY])
     );
     this.ctx.device.queue.submit([encoder.finish()]);
     return true;
@@ -826,9 +963,26 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!this.fieldBuffer) return new Float32Array();
     return new Float32Array(await readBuffer(this.ctx.device,this.fieldBuffer,this.targetSize.width*this.targetSize.height*8));
   }
-  invalidateHistory() { this.historyValid=false; this.refValid=false; this.abort(); }
+  invalidateHistory() {
+    this.publicationEpoch++; this.historyValid=false; this.refValid=false;
+    this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
+    this.gridAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";
+    this.abort();
+  }
   async render(request: RenderRequest): Promise<RenderStats> {
     const { device } = this.ctx;
+    const epoch = this.publicationEpoch;
+    const originalCurrent = request.isCurrent;
+    request = { ...request, colors: { ...request.colors, stops: [...request.colors.stops] },
+      isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
+    request = this.calculationView(request);
+    const requestKey = [request.centerX, request.centerY, request.unitsPerPixel, request.width, request.height,
+      request.family, request.juliaX, request.juliaY, request.maxIterations, request.forceMethod, request.useApprox,
+      JSON.stringify(request.colors)].join("|");
+    if (requestKey === this.cachedRequest && this.cachedStats && this.historyValid && request.isCurrent!()) {
+      return { ...this.cachedStats, computed: false, computedSamples: 0,
+        reusedSamples: request.width * request.height, orbitMs: 0, pipelineWaitMs: 0, tableMs: 0, renderMs: 0 };
+    }
     if (!this.renderPipeline || !this.blitPipeline) {
       throw new Error("WebGpuRenderer.init() was not awaited");
     }
@@ -843,7 +997,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const halfSpan = request.unitsPerPixel.times(
       Math.min(request.width, request.height) / 2
     );
-    const drift = request.centerX
+    let drift = request.centerX
       .minus(this.refX)
       .abs()
       .plus(request.centerY.minus(this.refY).abs());
@@ -859,9 +1013,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Mid-gesture, keep whatever reference we have. Perturbation stays exact
     // with a stale reference — it just rebases more — and rebuilding costs tens
     // to hundreds of milliseconds, which is exactly the zoom stutter.
-    const canRebuild = !request.interacting || !this.refValid;
+    const canRebuild = !request.interacting || !this.refValid || limbs !== this.refLimbs;
 
     let orbitMs = 0;
+    this.pipelineWaitMs = 0;
+    this.tableMs = 0;
     if (method !== Method.Direct && stale && canRebuild) {
       this.refFamily=family; this.refConstant=constant;
       this.refX = request.centerX;
@@ -872,10 +1028,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.refLength = orbit.length;
       this.refEscaped = orbit.escaped;
       this.refValid = true;
+      drift = new Decimal(0);
       orbitMs = orbit.ms;
       this.tableMs = 0;
       this.laLevels=0;
       if (method === Method.Hdr && family === "mandelbrot") await this.buildApproxTable(request);
+    }
+    // Reversal/overscan can need a larger delta domain without needing a new
+    // orbit. Rebuild the inexpensive table for that domain instead of silently
+    // turning acceleration off for the whole expanded field.
+    const requiredDelta = request.unitsPerPixel.times(Math.hypot(request.width, request.height) / 2).plus(drift).toNumber();
+    if (method === Method.Hdr && family === "mandelbrot" && request.useApprox !== false && request.colors.mode === 0 &&
+        requiredDelta > this.tableMaxDelta * (1 + 1e-12)) {
+      await this.buildApproxTable(request);
     }
 
     const started = performance.now();
@@ -938,7 +1103,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     f32[17] = interior[1];
     f32[18] = interior[2];
     u32[19] = Math.max(1, Math.min(MAX_STOPS, colors.stops.length));
-    const deltaBound = request.unitsPerPixel.times(Math.hypot(request.width,request.height)/2).plus(drift).toNumber();
+    const deltaBound = requiredDelta;
     u32[20] =
       request.useApprox === false || method !== Method.Hdr || family === "julia" || colors.mode === 1 || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
     u32[21] = BASE_STEP;
@@ -996,7 +1161,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       u32[20],
     ].join("|");
     const fieldStale = fieldKey !== this.fieldKey || this.aborted;
-    this.ensureFieldCapacity(request.width * request.height * grid * grid);
+    const sampleKey = [family, constant, request.maxIterations, colors.mode, grid, method,
+      limbs, this.refLimbs, !!u32[20], request.useApprox].join("|");
+    if (fieldStale) {
+      u32[41] = this.moveField(request, request.width * request.height * grid * grid, sampleKey,
+        !!request.interacting && grid === 1 && colors.mode === 0) ? 1 : 0;
+      device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
+    }
 
     const bind = device.createBindGroup({
       layout: this.bindLayout!,
@@ -1081,46 +1252,46 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       );
       pass.end();
       // Presentation belongs to the current camera, not this possibly older request.
-      this.ensureHistory(request.width, request.height);
+      this.ensureHistory(request);
       encoder.copyTextureToTexture(
         { texture: this.target! },
         { texture: this.history! },
         { width: request.width, height: request.height }
       );
       device.queue.submit([encoder.finish()]);
+      // Queue order makes subsequent blits see these pixels. Publish their
+      // description in the same JS turn, before any fence/readback can yield.
+      this.lastFrame = {
+        family: request.family, juliaX: request.juliaX, juliaY: request.juliaY,
+        centerX: request.centerX, centerY: request.centerY,
+        unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
+        colors: request.colors, maxIterations: request.maxIterations,
+      };
       this.historyValid = true;
     }
 
     await device.queue.onSubmittedWorkDone();
     const renderMs = performance.now() - started;
-    if(request.isCurrent && !request.isCurrent()){completed=false;this.historyValid=false;this.fieldKey="";}
-
-    // Only a finished frame updates this. An abandoned one leaves both the
-    // history texture and this description alone, so reprojection keeps
-    // working off the last whole frame for the rest of the gesture.
-    if (completed) {
-      this.lastFrame = {
-        family: request.family, juliaX: request.juliaX, juliaY: request.juliaY,
-        centerX: request.centerX,
-        centerY: request.centerY,
-        unitsPerPixel: request.unitsPerPixel,
-        width: request.width,
-        height: request.height,
-      };
-    }
+    // Invalidation owns visibility. An older asynchronous completion must not
+    // clear or replace a publication belonging to a newer epoch.
+    if(request.isCurrent && !request.isCurrent()) completed=false;
+    if (!completed) { this.fieldView = null; this.sampleKey = ""; this.cachedRequest = ""; }
 
     const counters = new Uint32Array(await readBuffer(device, this.statsBuffer, 32));
     const skippedIterations = counters[0];
     const plainIterations = counters[3];
     const total = skippedIterations + plainIterations;
 
-    return {
+    const result: RenderStats = {
       completed, computed: fieldStale && completed,
+      computedSamples: counters[5], reusedSamples: counters[6],
+      sampleWidth: request.width, sampleHeight: request.height,
       limbs,
       decimalDigits: Math.floor((32 * (limbs - 1)) / 3.32),
       orbitLength: this.refLength,
       orbitEscaped: this.refEscaped,
       orbitMs,
+      pipelineWaitMs: this.pipelineWaitMs,
       tableMs: this.tableMs,
       method,
       renderMs,
@@ -1131,5 +1302,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       skipRatio: total > 0 ? skippedIterations / total : 0,
       cappedRatio: counters[5] > 0 ? counters[4] / counters[5] : 0,
     };
+    if (completed && request.isCurrent!()) {
+      this.cachedStats = result; this.cachedRequest = requestKey;
+      // Small exposed strips are dominated by dispatch overhead; learn cost
+      // from substantial numerical work instead of inflating the next budget.
+      if (counters[5] > request.width * request.height * .2) {
+        const cost = renderMs / counters[5];
+        this.msPerSample = this.msPerSample ? .75 * this.msPerSample + .25 * cost : cost;
+      }
+      if (!request.interacting) this.gridAnchor = createSampleGridAnchor(request);
+    }
+    return result;
   }
 }

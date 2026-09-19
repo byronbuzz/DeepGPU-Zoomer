@@ -2,12 +2,12 @@
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>GPU Zoomer</title></head>
 <body>
-  <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Keyboard plus and minus zoom; arrows pan."></canvas>
+  <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Keyboard plus and minus zoom; arrows pan. J toggles Julia preview; while preview is open, left click or drag selects its constant. M opens the selected Julia or returns to Mandelbrot."></canvas>
   <header><div class="brand">GPU <strong>ZOOMER</strong><span id="set-label">MANDELBROT</span></div><button id="toggle" aria-expanded="true" aria-controls="controls">Hide controls</button></header>
   <aside id="controls" aria-label="Explorer controls">
     <div class="section-title">Explore</div>
     <label>Fractal<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
-    <div class="row"><button id="julia-from">Julia at pointer</button><button id="return" disabled>Return</button></div>
+    <div class="row"><button id="julia-from" aria-pressed="false" aria-controls="julia-preview" aria-keyshortcuts="J">Julia preview · J</button><button id="return" disabled aria-keyshortcuts="M">Return · M</button></div>
     <form id="julia-form" hidden><label>Julia c · real<input id="jx" value="-0.8" spellcheck="false"></label><label>Imaginary<input id="jy" value="0.156" spellcheck="false"></label><button>Apply constant</button></form>
     <label>Places<select id="places"><option value="">Choose a view…</option></select></label>
     <div class="row"><button id="back" disabled>Back</button><button id="forward" disabled>Forward</button><button id="reset">Reset</button></div>
@@ -21,8 +21,16 @@
     <div class="row"><button id="save">Save location</button><button id="share">Copy link</button></div>
     <label>Saved locations<select id="saved"><option value="">No saved locations</option></select></label>
     <details><summary>Exact coordinates</summary><form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label>Vertical span<input id="span" spellcheck="false"></label><button>Go to coordinates</button></form></details>
-    <p class="help">Hold left / right to zoom in / out.<br>Steer with the pointer. Shift-drag to pan.<br>Wheel zooms. + / − and arrows also work.<br>Press J for Julia at the pointer; Esc stops motion.</p>
+    <p class="help">Hold left / right to zoom in / out.<br>Steer with the pointer. Shift-drag to pan.<br>Wheel zooms. + / − and arrows also work.<br>J toggles Julia preview; left-drag selects c.<br>M opens Julia / returns. Esc stops motion.</p>
   </aside>
+  <section id="julia-preview" hidden aria-label="Julia preview" aria-busy="false">
+    <div class="preview-heading"><strong>Julia preview</strong><button id="julia-preview-close" aria-label="Close Julia preview">×</button></div>
+    <canvas id="julia-preview-canvas" width="240" height="160" aria-label="Julia set for the selected Mandelbrot point"></canvas>
+    <p id="julia-preview-constant"></p>
+    <p id="julia-preview-status" role="status">Select a point on the Mandelbrot set.</p>
+    <p class="preview-help">Left-click or drag on Mandelbrot to select c.</p>
+    <button id="julia-promote" disabled aria-keyshortcuts="M">Open Julia · M</button>
+  </section>
   <footer><span id="cadence">Starting WebGPU…</span><span id="freshness">Preparing first field</span><span id="depth"></span></footer>
   <div id="message" role="status" aria-live="polite"></div>
   <script type="module" src="/src/main.ts"></script>

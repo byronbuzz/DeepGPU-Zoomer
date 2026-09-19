@@ -46,7 +46,7 @@ struct Uniforms {
     centre: vec2<f32>,
     /// First screen row this dispatch covers, for tiled rendering.
     rowOffset: u32,
-    _pad0: u32,
+    reuseField: u32,
     _pad1: u32,
     _pad2: u32,
     offsetLow: vec2<f32>,
@@ -567,6 +567,12 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
     let row = gid.y + u.rowOffset;
     if (gid.x >= size.x || row >= size.y) { return; }
+    // The remap pass retained this exact sample, including its escape value.
+    // Reuse is enabled only for the single-sample iteration field.
+    if (u.reuseField != 0u && field[fieldIndex(gid.x, row)].y >= 0.0) {
+        atomicAdd(&stats[6], 1u);
+        return;
+    }
 
     let distanceMode = u.mode == 1u;
     let grid = max(u.supersample, 1u);
