@@ -13,6 +13,17 @@ motion weighting described in the
 This implementation uses exact-coordinate GPU field copying and a rectangular
 pending queue; it does not include their full line-reallocation engine.
 
+Binary decomposition, colour decomposition, biomorphs and capped final-orbit
+angle/magnitude mappings in `src/render/perturbation.wgsl` adapt
+`color_output` and `incolor_output` in XaoS
+[formulas.cpp](https://github.com/xaos-project/XaoS/blob/51fd5e2ba052246c6ef44c556e906aac9c822378/src/engine/formulas.cpp),
+Copyright Jan Hubicka and Thomas Marsh, 1996–1997, GPL-2.0-or-later.
+The angular argument order and fixed-point palette scale follow that source.
+Smooth escape retains this application's normalized log-log mapping; it does
+not claim to reproduce XaoS's previous/final bailout interpolation. The ten
+named style effects are original scalar/lighting mappings, not XaoS modes or
+new numerical methods.
+
 The arithmetic, GPU reference orbit, perturbation renderer, BLA, reprojection,
 colour settings and associated original tests are adapted from
 [Desarso/mandelbrot-webgpu](https://github.com/Desarso/mandelbrot-webgpu),

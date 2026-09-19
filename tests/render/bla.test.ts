@@ -5,6 +5,7 @@ import {
   add,
   applyStep,
   buildBla,
+  buildBlaAsync,
   compose,
   log2Magnitude,
   multiply,
@@ -13,6 +14,13 @@ import {
   stepRadiusLog2,
   type Scaled,
 } from "../../src/render/bla";
+
+it('cooperative construction preserves packed coefficients and permits cancellation',async()=>{
+  const orbit=new Float32Array(10001*6);for(let i=0;i<10001;i++){orbit[i*6]=.3;orbit[i*6+3]=.4;}
+  let checkpoints=0;const table=await buildBlaAsync(orbit,10001,1e-20,async()=>{checkpoints++;});
+  expect(table).toEqual(buildBla(orbit,10001,1e-20));expect(checkpoints).toBeGreaterThan(1);
+  await expect(buildBlaAsync(orbit,10001,1e-20,async()=>{throw Error('cancelled');})).rejects.toThrow('cancelled');
+});
 
 /** Reference orbit samples in the reduced format the GPU emits. */
 function makeOrbit(cx: number, cy: number, count: number) {

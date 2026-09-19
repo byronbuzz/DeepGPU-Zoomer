@@ -1,0 +1,54 @@
+export async function featureChecks(gpu,engine,Decimal,defaults){
+  const checks=[],add=(name,pass,detail)=>checks.push({name,pass,detail});
+  const req={centerX:new Decimal('-.6'),centerY:new Decimal(0),unitsPerPixel:new Decimal('2.8').div(128),width:192,height:128,maxIterations:1000,colors:{...defaults},family:'mandelbrot',juliaX:new Decimal('-.8'),juliaY:new Decimal('.156')};
+  engine.invalidateHistory();let stats=await engine.render(req);let field=await engine.debugReadField();
+  const {readBuffer}=await import('/src/gpu/device.ts');
+  add('sample counters agree with a fresh exact field',stats.computedSamples===192*128&&stats.cappedRatio<=1,{stats,raw:Array.from(new Uint32Array(await readBuffer(gpu.device,engine.statsBuffer,48)))});
+  const points=Array.from({length:192*128},(_,i)=>[i%192,Math.floor(i/192)]);
+  const fingerprints=[];
+  for(let formula=0;formula<5;formula++){
+    const result=await engine.render({...req,colors:{...defaults,formula}});
+    const current=await engine.debugReadField();add(`formula ${formula} preserves escape counts`,current.every((v,i)=>i%2!==0||v===field[i]));
+    const recolour=await engine.render({...req,colors:{...defaults,formula,palette:5,offset:.13}});
+    add(`formula ${formula} palette edits reuse scalars`,!recolour.computed&&recolour.computedSamples===0);
+  }
+  for(let effect=0;effect<=10;effect++){
+    await engine.render({...req,colors:{...defaults,effect}});
+    const pixels=await engine.debugReadPixels(points);let hash=2166136261;for(const p of pixels)for(const b of p.slice(0,3))hash=Math.imul(hash^b,16777619)>>>0;fingerprints.push(hash);
+  }
+  add('ten styles produce distinct real shader output',new Set(fingerprints).size===11,{fingerprints});
+  const defaultAgain=await engine.render(req);
+  const moved=await engine.render({...req,centerX:req.centerX.plus(req.unitsPerPixel)});
+  add('leaving endpoint modes restores scalar remap on movement',!defaultAgain.computed&&moved.reusedSamples>0,{reused:moved.reusedSamples});
+  await engine.render({...req,colors:{...defaults,formula:2}});
+  for(const capped of [1,2]){const result=await engine.render({...req,colors:{...defaults,capped}});add(`capped pattern ${capped} reuses available channels`,!result.computed);}
+  engine.invalidateHistory();let partialDistance=false;
+  const distance={...req,colors:{...defaults,mode:1},tileRows:8,betweenBatches:async()=>{
+    const f=await engine.debugReadField();partialDistance ||= f.some((v,i)=>i%2===1&&v<0)&&f.some((v,i)=>i%2===1&&v>=0);
+  }};
+  await engine.render(distance);const progressiveDistance=await engine.debugReadPixels(points);
+  engine.invalidateHistory();await engine.render({...distance,publishPartial:false,betweenBatches:undefined});
+  const coherentDistance=await engine.debugReadPixels(points);
+  add('distance refinement keeps unknowns and finishes with coherent neighbours',partialDistance&&progressiveDistance.every((p,i)=>p.every((v,j)=>v===coherentDistance[i][j])));
+  const deep={...req,width:8,height:8,centerX:new Decimal(0),unitsPerPixel:new Decimal('1e-50')};
+  await engine.render(deep);
+  const replaced={...deep,centerX:new Decimal('-.1')};
+  await engine.render({...replaced,useApprox:false});const deferred=engine.laLevels===0;
+  await engine.render(replaced);
+  add('deferred BLA builds for a replacement reference at the same domain',deferred&&engine.laLevels>0,{levels:engine.laLevels});
+  // Seed a low counter close to its boundary; real subsequent dispatches carry.
+  engine.invalidateHistory();let seeded=false;
+  const carry=await engine.render({...req,width:64,height:16,centerX:new Decimal(0),unitsPerPixel:new Decimal('.001'),tileRows:8,betweenBatches:async()=>{
+    if(!seeded){seeded=true;gpu.device.queue.writeBuffer(engine.statsBuffer,12,new Uint32Array([0xfffffff0]));}
+  }});
+  add('aggregate work carries above u32 without wrapping',carry.plainIterations===0xfffffff0+512000,{plainIterations:carry.plainIterations});
+  engine.invalidateHistory();const high=await engine.render({...req,width:8,height:8,centerX:new Decimal(3),centerY:new Decimal(3),unitsPerPixel:new Decimal('.001'),maxIterations:1000000});
+  add('one-million cap accepts bounded escaping GPU work',high.completed&&high.computedSamples===64,{stats:high});
+  engine.invalidateHistory();const million=await engine.render({...req,width:1,height:1,centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(1),maxIterations:1000000});
+  add('one actual million-step capped sample completes exactly',million.completed&&million.computedSamples===1&&million.plainIterations===1000000&&million.cappedRatio===1,{stats:million});
+  // High-cap reference cancellation allocates capacity, then stops cooperatively.
+  engine.invalidateHistory();let active=true;const timer=setTimeout(()=>{active=false;},30);let cancelled=false;
+  try{await engine.render({...req,width:8,height:8,centerX:new Decimal(0),unitsPerPixel:new Decimal('1e-50'),maxIterations:1000000,isCurrent:()=>active});}catch(e){cancelled=e.name==='AbortError';}finally{clearTimeout(timer);}
+  add('one-million reference allocation remains cancellable',cancelled&&!active,{orbitBytes:engine.orbitBuffer?.size});
+  return checks;
+}

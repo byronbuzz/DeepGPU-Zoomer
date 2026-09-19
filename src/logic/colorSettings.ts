@@ -29,6 +29,12 @@ export interface ColorSettings {
   mirror: boolean;
   interior: string;
   stops: string[];
+  positions?: number[];
+  locks?: boolean[];
+  repeating?: boolean;
+  formula?: number;
+  effect?: number;
+  capped?: number;
 
   // --- distance-estimation colouring ---
   /** Palette cycles per octave of the distance field. */
@@ -54,18 +60,19 @@ export interface ColorSettings {
 
 export const DEFAULT_COLORS: ColorSettings = {
   // Iteration bands by default: one evaluation per pixel, no supersampling.
-  // Distance estimation costs three evaluations per sample (centre plus two
-  // neighbours for the gradient) times the supersample grid, so it is a
-  // deliberate opt-in for stills rather than the everyday mode.
+  // Distance lighting propagates a derivative in the same orbit and reads
+  // known neighbouring field samples. It is an explicit compute-costly option.
   mode: 0,
-  palette: 1,
+  palette: PALETTE_CUSTOM,
   cycle: 64,
   offset: 0,
   smooth: true,
   mapping: 1,
   mirror: false,
   interior: "#000000",
-  stops: ["#08103a", "#2f6bcb", "#f2ffff", "#ffaa00", "#3a1400"],
+  // Editable RGB representation of the original Ultra gradient.
+  stops: ["#000764", "#206bcb", "#edffff", "#ffaa00", "#000200", "#000764"],
+  positions: [0, 0.16, 0.42, 0.6425, 0.8575, 1],
 
   colorDensity: 0.12,
   colorPhase: 0,
@@ -79,6 +86,29 @@ export const DEFAULT_COLORS: ColorSettings = {
   supersample: 1,
   gamma: 2.2,
 };
+
+export const FORMULAS=['Smooth escape','Classic iteration bands','Binary decomposition','Colour decomposition','Biomorphs'];
+export const EFFECTS=['None','Contour Ink','Terraces','Fluted Ridges','Interference','Phase Weave','Neon Filaments','Pearl Relief','Brushed Relief','Engraved Relief','Depth Mist'];
+export function stopPositions(c:ColorSettings){return c.positions??c.stops.map((_,i)=>i/(c.repeating===false?c.stops.length-1:c.stops.length));}
+export function needsEndpoints(c:ColorSettings){return (c.formula??0)>=2||c.effect===5||c.capped===1;}
+export function validateColors(value:unknown):ColorSettings {
+  const v=value as ColorSettings;
+  if(!v||!Array.isArray(v.stops)||v.stops.length<2||v.stops.length>8||v.stops.some(s=>typeof s!=='string'||!/^#[0-9a-f]{6}$/i.test(s)))throw Error('Palette needs 2–8 RGB colours');
+  const c={...DEFAULT_COLORS};
+  for(const key of Object.keys(DEFAULT_COLORS) as (keyof ColorSettings)[]){
+    if(key==='stops')continue;
+    const val=v[key];if(val===undefined)continue;
+    if(typeof val!==typeof c[key]||typeof val==='number'&&!Number.isFinite(val))throw Error(`Invalid appearance ${key}`);
+    (c as unknown as Record<string,unknown>)[key]=val;
+  }
+  c.stops=[...v.stops];
+  const positions=v.positions??stopPositions({...c,positions:undefined,repeating:v.repeating});
+  if(positions.length!==c.stops.length||positions.some((p,i)=>!Number.isFinite(p)||p<0||p>1||i>0&&p<positions[i-1]))throw Error('Invalid palette positions');
+  c.positions=[...positions];c.locks=c.stops.map((_,i)=>v.locks?.[i]===true);c.repeating=v.repeating!==false;
+  for(const [key,max] of [['formula',4],['effect',10],['capped',2]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
+  if(![0,1,2].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.gamma<1||c.gamma>4||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
+  return c;
+}
 
 const HEX = /^#[0-9a-f]{6}$/i;
 

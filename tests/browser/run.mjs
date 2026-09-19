@@ -69,7 +69,7 @@ try{
   }
   await compare('mandelbrot-actual10000',neighbours);
   await page.selectOption('#places','2');await settle();
-  const before=await status();await page.selectOption('#palette','2');await settle();const after=await status();
+  const before=await status();await page.locator('#open-palette').click();await page.selectOption('#palette','2');await page.locator('#close-palette').click();await settle();const after=await status();
   check('palette reuses numeric field',after.fields===before.fields&&after.recolours>before.recolours,{before:before.fields,after:after.fields,beforeStats:before.stats,afterStats:after.stats});
   await page.selectOption('#places','4');await settle();const exact=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
   await page.locator('#location-name').fill('Deep Julia test');await page.locator('#save').click();await page.locator('#share').click();

@@ -65,6 +65,11 @@ struct Uniforms {
     wideCentreY: vec4<f32>,
     juliaConstantX: vec4<f32>,
     juliaConstantY: vec4<f32>,
+    formula: u32,
+    effect: u32,
+    cappedPattern: u32,
+    repeating: u32,
+    retainEndpoints: u32,
 };
 
 @group(0) @binding(0) var<storage, read> orbit: array<f32>;   // four mantissa words + exponent per component
@@ -96,6 +101,8 @@ struct Uniforms {
  * gamma only re-reads it.
  */
 @group(0) @binding(7) var<storage, read_write> field: array<vec2<f32>>;
+// Allocated only when a selected mapping needs final orbit channels.
+@group(0) @binding(8) var<storage, read_write> endpoints: array<vec4<f32>>;
 
 const TAU: f32 = 6.283185307179586;
 const ESCAPE_R: f32 = 16.0;
@@ -172,10 +179,17 @@ fn ultraFractal(t: f32) -> vec3<f32> {
 fn customPalette(t: f32) -> vec3<f32> {
     let count = max(u.stopCount, 1u);
     if (count == 1u) { return stops[0].rgb; }
-    let scaled = t * f32(count);
-    let index = u32(floor(scaled)) % count;
-    let next = (index + 1u) % count;
-    return mix(stops[index].rgb, stops[next].rgb, fract(scaled));
+    for(var i=1u;i<count;i++) {
+        if(t>=stops[i-1u].a && t<=stops[i].a){
+            let f=clamp((t-stops[i-1u].a)/max(stops[i].a-stops[i-1u].a,1e-7),0.0,1.0);
+            return mix(stops[i-1u].rgb,stops[i].rgb,f*f*(3.0-2.0*f));
+        }
+    }
+    if(u.repeating==0u){return select(stops[count-1u].rgb,stops[0].rgb,t<stops[0].a);}
+    let start=stops[count-1u];let end=stops[0];
+    let at=select(t,t+1.0,t<end.a);
+    let f=clamp((at-start.a)/max(1.0+end.a-start.a,1e-7),0.0,1.0);
+    return mix(start.rgb,end.rgb,f*f*(3.0-2.0*f));
 }
 
 fn palette(tIn: f32) -> vec3<f32> {
@@ -196,6 +210,7 @@ fn palette(tIn: f32) -> vec3<f32> {
 }
 
 fn wrapCoordinate(t: f32) -> f32 {
+    if(u.repeating==0u){return clamp(t,0.0,1.0);}
     if (u.mirror == 1u) {
         let m = t - 2.0 * floor(t / 2.0);
         if (m > 1.0) { return 2.0 - m; }
@@ -409,10 +424,11 @@ fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
 
 // --------------------------------------------------------------------- shading
 
-fn iterationColour(n: f32, z2: f32) -> vec3<f32> {
+fn potential(n: f32, z2: f32) -> f32 {
+    if(u.formula==1u){return n/u.colorCycle+u.colorOffset;}
     var mu = n;
-    if (u.smoothShading == 1u) {
-        mu = mu - log2(0.5 * log(z2) / log(ESCAPE_R));
+    if (u.smoothShading == 1u && u.formula==0u) {
+        mu = mu - log2(max(0.5 * log(max(z2,1.000001)) / log(ESCAPE_R),1e-20));
     }
     var cycle = u.colorCycle;
     if (u.mapping == 1u) {
@@ -422,7 +438,43 @@ fn iterationColour(n: f32, z2: f32) -> vec3<f32> {
         mu = log2(max(mu, 1.0));
         cycle = u.colorCycle / 64.0;
     }
-    return palette(wrapCoordinate(mu / max(cycle, 0.001) + u.colorOffset));
+    return mu / max(cycle, 0.001) + u.colorOffset;
+}
+
+// Adapted from XaoS color_output/incolor_output, formulas.cpp, GPL-2.0-or-later.
+// Jan Hubicka and Thomas Marsh, 1996–1997. See NOTICE.md for pinned source.
+fn orbitCoordinate(n:f32,z:vec2<f32>)->f32 {
+    if(u.formula==2u){return select(n,f32(u.maxIterations)-n,z.y>0.0)/u.colorCycle+u.colorOffset;}
+    if(u.formula==3u){return (atan2(z.x,z.y)/TAU+.75)*78.125/u.colorCycle+u.colorOffset;}
+    if(u.formula==4u){return select(n,f32(u.maxIterations)-n,abs(z.x)<2.0||abs(z.y)<2.0)/u.colorCycle+u.colorOffset;}
+    return potential(n,dot(z,z));
+}
+fn effectColour(p:f32,angle:f32,gradient:vec2<f32>)->vec3<f32>{
+    var t=p;let phase=TAU*p;let line=pow(.5+.5*cos(phase),32.0);
+    if(u.effect==2u){t=floor(p*8.0)/8.0;}
+    if(u.effect==3u){t=.5-.5*cos(phase);}
+    if(u.effect==4u){t=p+.18*sin(phase*1.618)+.12*sin(phase*2.73);}
+    if(u.effect==5u){t=p+.22*sin(angle*6.0+phase)*cos(phase*.73-angle*3.0);}
+    var col=palette(wrapCoordinate(t));
+    if(u.effect==1u){col*=1.0-.92*line;}
+    if(u.effect==6u){col=col*.08+mix(col,vec3<f32>(1.0),.65)*line;}
+    if(u.effect>=7u&&u.effect<=9u){
+        var g=gradient;
+        if(u.effect==9u){g*= -TAU*sin(phase)*line*8.0;}
+        let normal=normalize(vec3<f32>(-g*u.slopeDepth,1.0));
+        let diffuse=max(0.0,dot(normal,u.lightDir));
+        var spec=pow(max(0.0,dot(normal,normalize(u.lightDir+vec3<f32>(0.0,0.0,1.0)))),16.0);
+        if(u.effect==7u){col=palette(wrapCoordinate(t+.24*normal.x+.16*normal.y));}
+        if(u.effect==8u){spec=pow(max(0.0,1.0-abs(dot(normal.xy,u.lightDir.xy))),24.0)*diffuse;}
+        col=col*(u.ambientLight+u.diffuseStrength*diffuse)+vec3<f32>(spec*u.specularStrength);
+    }
+    if(u.effect==10u){col=mix(col,vec3<f32>(.64,.73,.82),1.0-exp(-abs(p)*.08));}
+    return col;
+}
+fn cappedColour(z2:f32,z:vec2<f32>)->vec3<f32>{
+    if(u.cappedPattern==1u){return palette(wrapCoordinate((atan2(z.x,z.y)/TAU+.75)*78.125/u.colorCycle+u.colorOffset));}
+    if(u.cappedPattern==2u){return palette(wrapCoordinate((z2*f32(u.maxIterations/2u)+1.0)/u.colorCycle+u.colorOffset));}
+    return u.interior;
 }
 
 /// sRGB-ish decode, so palette stops are mixed and lit in linear light.
@@ -439,7 +491,7 @@ fn toLinear(c: vec3<f32>) -> vec3<f32> {
  * because the distance field itself changes, not because the palette scrolls.
  */
 fn shade(hCentre: f32, hRight: f32, hUp: f32) -> vec3<f32> {
-    let base = toLinear(palette(fract(hCentre * u.colorDensity + u.colorPhase)));
+    let base = toLinear(palette(wrapCoordinate(hCentre * u.colorDensity + u.colorPhase)));
     if (u.slopeLighting == 0u) { return base; }
 
     let dx = hRight - hCentre;
@@ -527,15 +579,22 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
                 entry = vec2<f32>(select(-1.0, f32(s.n), s.escaped), s.z2);
             }
             field[fieldIndex(col * grid + sx, row * grid + sy)] = entry;
+            if(u.retainEndpoints!=0u){endpoints[fieldIndex(col*grid+sx,row*grid+sy)]=vec4<f32>(s.z,f32(s.n),s.z2);}
         }
     }
 
-    atomicAdd(&stats[0], skipped);
-    atomicAdd(&stats[1], skips);
-    atomicAdd(&stats[2], rebases);
-    atomicAdd(&stats[3], plain);
+    let beforeSkipped=atomicAdd(&stats[0], skipped);
+    let beforeSkips=atomicAdd(&stats[1], skips);
+    let beforeRebases=atomicAdd(&stats[2], rebases);
+    let beforePlain=atomicAdd(&stats[3], plain);
     atomicAdd(&stats[4], capped);
     atomicAdd(&stats[5], total);
+    // Fixed addresses preserve the incumbent counter path. Every low-word wrap
+    // contributes one carry; host readback fences all independent atomics.
+    if(beforeSkipped>0xffffffffu-skipped){atomicAdd(&stats[8],1u);}
+    if(beforeSkips>0xffffffffu-skips){atomicAdd(&stats[9],1u);}
+    if(beforeRebases>0xffffffffu-rebases){atomicAdd(&stats[10],1u);}
+    if(beforePlain>0xffffffffu-plain){atomicAdd(&stats[11],1u);}
 }
 
 /// Turns the stored field into pixels. No iteration happens here.
@@ -559,11 +618,14 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
             let col = pixel.x * grid + sx;
             let rowIdx = pixel.y * grid + sy;
             var entry = field[fieldIndex(col, rowIdx)];
-            if (entry.y < 0.0 && grid == 1u && !distanceMode && u.previewStep > 1u) {
+            var anchor=vec2<u32>(col,rowIdx);
+            var anchorStep=1u;
+            if (entry.y < 0.0 && grid == 1u && u.previewStep > 1u) {
                 // Fill colour only. The unknown scalar entry remains unknown.
-                entry = field[fieldIndex(col / u.previewStep * u.previewStep,
-                    rowIdx / u.previewStep * u.previewStep)];
-                density = 1.0 / f32(u.previewStep);
+                for (var step = 2u; step <= u.previewStep; step *= 2u) {
+                    entry = field[fieldIndex(col / step * step, rowIdx / step * step)];
+                    if (entry.y >= 0.0) { density = 1.0 / f32(step);anchor=vec2<u32>(col/step*step,rowIdx/step*step);anchorStep=step;break; }
+                }
             }
             // Unknown is distinct from a determined interior sample. Alpha is
             // coverage metadata, never a request to blend colours.
@@ -573,16 +635,28 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             if (!distanceMode) {
+                var z=vec2<f32>(0.0);
+                if(u.retainEndpoints!=0u){z=endpoints[fieldIndex(anchor.x,anchor.y)].xy;}
                 if (entry.x < 0.0) {
-                    accumulated = accumulated + toLinear(u.interior);
+                    accumulated = accumulated + toLinear(cappedColour(entry.y,z));
                 } else {
-                    accumulated = accumulated + toLinear(iterationColour(entry.x, entry.y));
+                    var p=potential(entry.x,entry.y);
+                    if(u.formula>=2u){p=orbitCoordinate(entry.x,z);}
+                    var gradient=vec2<f32>(0.0);
+                    if(u.effect>=7u&&u.effect<=9u){
+                        let right=field[fieldIndex(min(anchor.x+anchorStep,lastCol),anchor.y)];
+                        let up=field[fieldIndex(anchor.x,anchor.y-min(anchor.y,anchorStep))];
+                        if(right.y>=0.0&&right.x>=0.0){gradient.x=(potential(right.x,right.y)-potential(entry.x,entry.y))/f32(anchorStep);}
+                        if(up.y>=0.0&&up.x>=0.0){gradient.y=(potential(up.x,up.y)-potential(entry.x,entry.y))/f32(anchorStep);}
+                    }
+                    accumulated = accumulated + toLinear(effectColour(p,atan2(z.y,z.x),gradient));
                 }
                 continue;
             }
 
             if (entry.y == 0.0) {
-                accumulated = accumulated + toLinear(u.interior);
+                let endpoint=endpoints[fieldIndex(anchor.x,anchor.y)];
+                accumulated = accumulated + toLinear(cappedColour(endpoint.w,endpoint.xy));
                 continue;
             }
 
@@ -593,16 +667,19 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
             var hRight = entry.x;
             var hUp = entry.x;
             if (u.slopeLighting == 1u) {
-                let right = field[fieldIndex(min(col + 1u, lastCol), rowIdx)];
-                let up = field[fieldIndex(col, max(rowIdx, 1u) - 1u)];
-                if (right.y != 0.0) { hRight = right.x; }
-                if (up.y != 0.0) { hUp = up.x; }
+                let right = field[fieldIndex(min(anchor.x + anchorStep, lastCol), anchor.y)];
+                let up = field[fieldIndex(anchor.x, anchor.y-min(anchor.y,anchorStep))];
+                if (right.y > 0.0) { hRight = entry.x+(right.x-entry.x)/f32(anchorStep); }
+                if (up.y > 0.0) { hUp = entry.x+(up.x-entry.x)/f32(anchorStep); }
             }
-            accumulated = accumulated + shade(
+            if(u.effect!=0u){
+                let endpoint=endpoints[fieldIndex(anchor.x,anchor.y)];
+                accumulated+=toLinear(effectColour(entry.x*u.colorDensity+u.colorPhase,atan2(endpoint.y,endpoint.x),vec2<f32>(hRight-entry.x,hUp-entry.x)*f32(grid)));
+            }else { accumulated = accumulated + shade(
                 entry.x,
                 entry.x + (hRight - entry.x) * f32(grid),
                 entry.x + (hUp - entry.x) * f32(grid)
-            );
+            ); }
         }
     }
 

@@ -132,9 +132,11 @@ export async function readBuffer(
   encoder.copyBufferToBuffer(source, 0, staging, 0, byteLength);
   device.queue.submit([encoder.finish()]);
 
-  await staging.mapAsync(GPUMapMode.READ);
-  const copy = staging.getMappedRange().slice(0);
-  staging.unmap();
-  staging.destroy();
-  return copy;
+  try {
+    await staging.mapAsync(GPUMapMode.READ);
+    return staging.getMappedRange().slice(0);
+  } finally {
+    if(staging.mapState==='mapped')staging.unmap();
+    staging.destroy();
+  }
 }

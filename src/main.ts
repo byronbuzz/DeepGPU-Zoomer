@@ -2,9 +2,11 @@ import './style.css';
 import Decimal from 'decimal.js';
 import { acquireGpu, type GpuContext } from './gpu/device';
 import { WebGpuRenderer, type RenderRequest, type RenderStats } from './render/webgpu-renderer';
-import { DEFAULT_COLORS } from './logic/colorSettings';
-import { Camera, HOME, validateView, encodeView, decodeView, type SavedView, type Family } from './state';
+import { DEFAULT_COLORS, validateColors } from './logic/colorSettings';
+import { Camera, HOME, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
+import { setupPanels } from './panels';
+import { setupPaletteEditor } from './palette-editor';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
 const canvas=el<HTMLCanvasElement>('fractal');
@@ -18,14 +20,16 @@ let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
 let profilingEnabled=false;
 let previewEnabled=false, selecting=false, previewBusy=false, previewPending=false, previewEpoch=0, previewRenderedEpoch=-1;
 let selectedJulia:{x:string;y:string}|null=null;
+let displayedJulia:{x:string;y:string}|null=null,previewLifetime=0;
 const previewCanvas=el<HTMLCanvasElement>('julia-preview-canvas');
 let previewSize={width:previewCanvas.width,height:previewCanvas.height};
 const keys=new Set<string>(), timeline:SavedView[]=[];let timelineIndex=-1;
 let saved: {name:string;view:SavedView}[]=[];
 let frameTimes:number[]=[], frameCount=0, sessionStart=performance.now();
 const cadence=el('cadence'),freshness=el('freshness'),depth=el('depth');
+let syncAppearance=()=>{};
 function message(text:string){el('message').textContent=text;}
-function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString()};}
+function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString(),appearance:validateColors(colors)};}
 function checkpoint(){const s=snapshot();if(timelineIndex>=0 && encodeView(timeline[timelineIndex])===encodeView(s))return;timeline.splice(timelineIndex+1);timeline.push(s);timelineIndex=timeline.length-1;historyButtons();}
 function historyButtons(){el<HTMLButtonElement>('back').disabled=timelineIndex<=0;el<HTMLButtonElement>('forward').disabled=timelineIndex>=timeline.length-1;}
 function stop(){direction=0;wheelDirection=0;dragging=false;selecting=false;keys.clear();}
@@ -36,14 +40,17 @@ function syncPlace(){
 function syncControls(){
   el<HTMLSelectElement>('family').value=view.family;el('set-label').textContent=view.family.toUpperCase();
   el<HTMLFormElement>('julia-form').hidden=view.family!=='julia';el<HTMLInputElement>('iterations').value=String(view.iterations);
+  el<HTMLInputElement>('iteration-slider').value=String(iterationToSlider(view.iterations));
+  el('iteration-value').textContent=view.iterations.toLocaleString();
   el<HTMLInputElement>('jx').value=view.jx;el<HTMLInputElement>('jy').value=view.jy;
   el<HTMLTextAreaElement>('cx').value=camera.x.toString();el<HTMLTextAreaElement>('cy').value=camera.y.toString();el<HTMLInputElement>('span').value=camera.span.toString();
   el<HTMLButtonElement>('return').disabled=view.family!=='julia'||!juliaReturn;
   el<HTMLButtonElement>('julia-from').disabled=view.family==='julia';
   syncPlace();syncJuliaPreview();
+  syncAppearance();
 }
 function load(next:SavedView,record=true){
-  const valid=validateView(next);if(record && engine)checkpoint();stop();view=valid;camera.load(valid);generation++;
+  const valid=validateView(next);if(record && engine)checkpoint();stop();view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
   if(view.family==='julia')setPreview(false);
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';message('');syncControls();
   if(record){checkpoint();persist();}
@@ -63,9 +70,8 @@ function syncJuliaPreview(){
   el<HTMLButtonElement>('julia-promote').disabled=!selectedJulia;
 }
 function queuePreview(){
-  previewEpoch++;previewPending=true;previewEngine?.abort();
+  previewEpoch++;previewPending=true;
   el('julia-preview').setAttribute('aria-busy','true');
-  el('julia-preview-status').textContent='Updating preview…';
 }
 function measurePreview(){
   if(!previewEnabled)return;
@@ -75,12 +81,12 @@ function measurePreview(){
   const limit=gpuContext?.device.limits.maxTextureDimension2D??Infinity;
   const limits=gpuContext?.device.limits;
   const pixelLimit=limits?Math.floor(Math.min(limits.maxStorageBufferBindingSize,limits.maxBufferSize)/8):Infinity;
-  const scale=Math.min(dpr,limit/rect.width,limit/rect.height,Math.sqrt(pixelLimit/(rect.width*rect.height)));
+  const scale=Math.min(dpr,192/rect.width,160/rect.height,limit/rect.width,limit/rect.height,Math.sqrt(pixelLimit/(rect.width*rect.height)));
   const round=scale<dpr?Math.floor:Math.round;
   const width=Math.max(1,round(rect.width*scale)),height=Math.max(1,round(rect.height*scale));
   if(width===previewSize.width&&height===previewSize.height)return;
   previewSize={width,height};
-  // Invalidate the in-flight size immediately; the scheduler coalesces updates.
+  // Queue the latest geometry while the previous bounded image finishes.
   if(selectedJulia)queuePreview();
 }
 const previewObserver=new ResizeObserver(measurePreview);
@@ -92,12 +98,11 @@ function selectJuliaAtPointer(){
   const next={x:p.x.toString(),y:p.y.toString()};
   if(selectedJulia?.x===next.x && selectedJulia.y===next.y)return;
   selectedJulia=next;
-  el('julia-preview-constant').textContent=`c = ${next.x} ${new Decimal(next.y).isNegative()?'−':'+'} ${new Decimal(next.y).abs().toString()}i`;
   queuePreview();syncJuliaPreview();
 }
 function setPreview(enabled:boolean){
   previewEnabled=enabled && view.family==='mandelbrot';selecting=false;
-  if(!previewEnabled){previewEpoch++;previewPending=false;previewEngine?.abort();}
+  if(!previewEnabled){previewLifetime++;previewEpoch++;previewPending=false;previewEngine?.abort();}
   syncJuliaPreview();
   if(previewEnabled)measurePreview();
 }
@@ -110,22 +115,22 @@ function toggleJuliaPreview(){
 async function computeJuliaPreview(){
   if(previewBusy||!previewPending||!previewEnabled||!selectedJulia||!gpuContext)return;
   previewBusy=true;previewPending=false;
-  const epoch=previewEpoch,selected={...selectedJulia},size={...previewSize};
-  const current=()=>previewEnabled && view.family==='mandelbrot' && previewEpoch===epoch;
+  const epoch=previewEpoch,lifetime=previewLifetime,selected={...selectedJulia},size={...previewSize};
+  const current=()=>previewEnabled && view.family==='mandelbrot' && previewLifetime===lifetime;
   try{
     // One persistent small renderer, with its own fields/history/uniforms.
     if(!previewEngine){previewEngine=new WebGpuRenderer(gpuContext,previewCanvas);await previewEngine.init();}
     if(!current())return;
-    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(size.height),width:size.width,height:size.height,maxIterations:Math.min(512,view.iterations),colors:{...colors,mode:0,supersample:1},family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,tileRows:8,isCurrent:current};
-    // Establish the new pixel geometry before any partial region is published.
-    // Compatible completed samples are reprojected immediately while refinement runs.
-    if(previewCanvas.width!==size.width)previewCanvas.width=size.width;
-    if(previewCanvas.height!==size.height)previewCanvas.height=size.height;
-    previewEngine.reproject(req);
+    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(size.height),width:size.width,height:size.height,maxIterations:Math.min(256,view.iterations),colors:{...colors,mode:0,supersample:1},family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,publishPartial:false,isCurrent:current};
+    // Preserve the previous canvas until the complete replacement is ready.
     const result=await previewEngine.render(req);
     if(current()&&result.completed){
+      if(previewCanvas.width!==size.width)previewCanvas.width=size.width;
+      if(previewCanvas.height!==size.height)previewCanvas.height=size.height;
       previewEngine.reproject(req);previewRenderedEpoch=epoch;
-      el('julia-preview-status').textContent=`${req.maxIterations} iterations · M opens this Julia`;
+      displayedJulia=selected;
+      el('julia-preview-constant').textContent=`Displayed c = ${selected.x} ${new Decimal(selected.y).isNegative()?'−':'+'} ${new Decimal(selected.y).abs().toString()}i`;
+      el('julia-preview-status').textContent=`${req.maxIterations} iterations · M opens latest selected c`;
       el('julia-preview').setAttribute('aria-busy','false');
     }
   }catch(e){if(current()){
@@ -137,7 +142,7 @@ function switchJuliaView(){
   if(view.family==='julia'){
     if(juliaReturn){const previous=juliaReturn;juliaReturn=null;load(previous);}
   }else if(selectedJulia){
-    const next=validateView({...HOME,family:'julia',x:'0',jx:selectedJulia.x,jy:selectedJulia.y,iterations:view.iterations});
+    const next=validateView({...HOME,family:'julia',x:'0',jx:selectedJulia.x,jy:selectedJulia.y,iterations:view.iterations,appearance:validateColors(colors)});
     juliaReturn=snapshot();load(next);
   }else message('Press J, then select a point for the Julia preview.');
   canvas.focus();
@@ -177,7 +182,7 @@ function tick(time:number){
       const progress=engine?.debugProgress();
       const state=fresh?'Refined':progress?.active&&progress.regions?`Refining · ${progress.regions} regions`:busy?'Computing':'Preview';
       freshness.textContent=error?'Rendering stopped':`${state} · ${progress?.lastPublicationAt?Math.max(0,(time-progress.lastPublicationAt)/1000).toFixed(1)+'s since update':lastFresh?'Field ready':'first update pending'}`;
-      depth.textContent=`${new Decimal(2.8).div(camera.span).toExponential(2)}× · ${view.iterations.toLocaleString()} iterations`;
+      depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
       if(profilingEnabled&&engine){
         const profile=engine.performance();
         const phases=Object.entries(profile.phases).filter(([,p])=>p.count).map(([name,p])=>`${name==='calculate'?'Calculation':'Shading'}: ${p.meanMs.toFixed(2)} ms mean, ${p.p95Ms.toFixed(2)} ms p95 (${p.count} samples)`);
@@ -204,7 +209,6 @@ document.addEventListener('keydown',e=>{
   try{if(key==='j')toggleJuliaPreview();else switchJuliaView();}catch(err){message(String(err));}
 });
 window.addEventListener('blur',stop);document.addEventListener('visibilitychange',()=>{stop();previousTime=0;});window.addEventListener('resize',resize);
-el('toggle').onclick=()=>{const panel=el('controls');panel.hidden=!panel.hidden;el('toggle').setAttribute('aria-expanded',String(!panel.hidden));el('toggle').textContent=panel.hidden?'Show controls':'Hide controls';};
 el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelectElement).value as Family;if(family===view.family)return;if(family==='mandelbrot'&&juliaReturn){switchJuliaView();return;}if(family==='julia')juliaReturn=snapshot();load({...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations});};
 el('julia-from').onclick=toggleJuliaPreview;
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
@@ -216,15 +220,18 @@ el('forward').onclick=()=>{if(timelineIndex<timeline.length-1){load(timeline[++t
 PLACES.forEach((p,i)=>el<HTMLSelectElement>('places').add(new Option(p.name,String(i))));el<HTMLSelectElement>('places').onchange=e=>{const v=(e.target as HTMLSelectElement).value;if(v!=='')load(PLACES[Number(v)]);};
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
-el<HTMLInputElement>('iterations').onchange=e=>{try{load({...snapshot(),iterations:Number((e.target as HTMLInputElement).value)});}catch(err){message(String(err));}};
-el<HTMLSelectElement>('palette').onchange=e=>{colors.palette=Number((e.target as HTMLSelectElement).value);dirty=true;if(previewEnabled)queuePreview();};
-el<HTMLInputElement>('cycle').oninput=e=>{colors.cycle=Number((e.target as HTMLInputElement).value);dirty=true;if(previewEnabled)queuePreview();};
+el<HTMLInputElement>('iterations').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();try{load({...snapshot(),iterations:Number((e.target as HTMLInputElement).value)});}catch(err){message(String(err));}}};
+el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();el<HTMLInputElement>('iterations').value=String(n);};
+el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
 el<HTMLFormElement>('coordinates').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),x:el<HTMLInputElement>('cx').value,y:el<HTMLInputElement>('cy').value,span:el<HTMLInputElement>('span').value});}catch(err){message(String(err));}};
 el<HTMLFormElement>('julia-form').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),jx:el<HTMLInputElement>('jx').value,jy:el<HTMLInputElement>('jy').value});}catch(err){message(String(err));}};
 function savedOptions(){const select=el<HTMLSelectElement>('saved');select.replaceChildren(new Option(saved.length?'Choose a saved location…':'No saved locations',''));saved.forEach((s,i)=>select.add(new Option(s.name,String(i))));}
 el('save').onclick=()=>{saved.push({name:el<HTMLInputElement>('location-name').value.trim()||`${view.family} ${saved.length+1}`,view:snapshot()});try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(saved));savedOptions();message('Location saved on this browser.');}catch{message('Local storage is unavailable. Copy a share link instead.');}};
 el<HTMLSelectElement>('saved').onchange=e=>{const v=(e.target as HTMLSelectElement).value;if(v!=='')load(saved[Number(v)].view);};
 el('share').onclick=async()=>{persist();try{await navigator.clipboard.writeText(location.href);message('Exact view link copied.');}catch{message('Copy the address bar to share this exact view.');}};
+setupPanels();
+let appearanceSave:ReturnType<typeof setTimeout>;
+syncAppearance=setupPaletteEditor(()=>colors,c=>{colors=c;dirty=true;if(previewEnabled)queuePreview();clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
 export const ready=(async()=>{
   try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}savedOptions();
   try{const restored=location.hash?decodeView(location.hash.slice(1)):JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null');load(restored||HOME,false);}catch{load(HOME,false);message('The saved view could not be read; showing the whole set.');}
@@ -235,7 +242,8 @@ export const ready=(async()=>{
 // Development-only access exercises the displayed app and its real field.
 export const testing = import.meta.env.DEV ? {
   load, snapshot, camera, get engine(){return engine;},
-  juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,size:{...previewSize},selected:selectedJulia?{...selectedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null}),
+  selectPreview(x:number,y:number){pointer={x,y};selectJuliaAtPointer();},
+  juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,size:{...previewSize},selected:selectedJulia?{...selectedJulia}:null,displayed:displayedJulia?{...displayedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null}),
   status:()=>({busy,dirty,error,fields,recolours,lastRevision,revision:camera.revision,quality:completedQuality,stats,frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
   resetTiming(){frameTimes=[];frameCount=0;sessionStart=performance.now();},
 } : undefined;

@@ -6,27 +6,70 @@ export interface Demand {
   zoom: number;
   covered: { x: number; y: number; width: number; height: number; spacing?: number }[];
 }
+/** Flatten once per selection, so every candidate uses the same weighted union. */
+function disjointCoverage(covered: Demand['covered']) {
+  const pieces=covered.filter(c=>c.width>0&&c.height>0).map(c=>({...c,right:c.x+c.width,bottom:c.y+c.height,quality:1/(c.spacing??1)}));
+  const xs=[...new Set(pieces.flatMap(c=>[c.x,c.right]))].sort((a,b)=>a-b);
+  const result:Demand['covered']=[];
+  for(let i=1;i<xs.length;i++){
+    const active=pieces.filter(c=>c.x<xs[i]&&c.right>xs[i-1]);
+    const events=active.flatMap(c=>[{y:c.y,q:c.quality,delta:1},{y:c.bottom,q:c.quality,delta:-1}]).sort((a,b)=>a.y-b.y);
+    const counts=new Map<number,number>();let quality=0,previous=events[0]?.y??0;
+    for(const e of events){
+      if(quality>0&&e.y>previous)result.push({x:xs[i-1],y:previous,width:xs[i]-xs[i-1],height:e.y-previous,spacing:1/quality});
+      previous=e.y;
+      const count=(counts.get(e.q)??0)+e.delta;
+      if(count)counts.set(e.q,count);else counts.delete(e.q);
+      if(e.delta>0)quality=Math.max(quality,e.q);
+      else if(e.q===quality&&!count)quality=Math.max(0,...counts.keys());
+    }
+  }
+  return result;
+}
+function disjointDeficit(r:Region,covered:Demand['covered']){
+  let area=0;
+  for(const c of covered){const width=Math.min(r.x+r.width,c.x+c.width)-Math.max(r.x,c.x),height=Math.min(r.y+r.height,c.y+c.height)-Math.max(r.y,c.y);
+    if(width>0&&height>0)area+=width*height*Math.min(1,r.stride/(c.spacing??1));}
+  return Math.max(0,1-area/(r.width*r.height));
+}
+/** Integrate the finest density over a rectangle union. Overlaps never add area. */
+export function coverageDeficit(r:Region,covered:Demand['covered']){
+  return disjointDeficit(r,disjointCoverage(covered));
+}
+
+/** Bounded, conservative presentation coverage; never establishes scalar validity. */
+export class CoverageRegions {
+  rectangles: Demand['covered']=[];
+  add(c: Demand['covered'][number]) {
+    const contains=(a:typeof c,b:typeof c)=>a.x<=b.x&&a.y<=b.y&&a.x+a.width>=b.x+b.width&&a.y+a.height>=b.y+b.height;
+    if(this.rectangles.some(a=>contains(a,c)&&(a.spacing??1)<=(c.spacing??1)))return;
+    this.rectangles=this.rectangles.filter(a=>!contains(c,a)||(c.spacing??1)>(a.spacing??1));
+    this.rectangles.push(c);
+    // Dropping older hints can only underestimate coverage, never invent it.
+    if(this.rectangles.length>128)this.rectangles.shift();
+  }
+}
 export class PendingRegions {
   private pending: Region[] = [];
   private turns = 0;
-  reset(width: number, height: number, previewStride=1) {
-    this.pending = width && height ? [{ x: 0, y: 0, width, height, order: 0, stride: 1 }] : []; this.turns = 0;
-    if(width && height && previewStride>1) this.pending.push({x:0,y:0,width,height,order:0,stride:previewStride});
+  private width=0;
+  private height=0;
+  private distributed=false;
+  private deficits=new Map<Region,number>();
+  private coverage:Demand['covered']=[];
+  reset(width: number, height: number, previewStride=1, compatible=false) {
+    this.width=width;this.height=height;
+    this.distributed=previewStride>1;
+    this.pending = width && height ? [{ x: 0, y: 0, width, height, order: 0, stride: 1 }] : [];
+    if(!compatible)this.turns=0;
+    for(let stride=2;width&&height&&stride<=previewStride;stride*=2)
+      this.pending.push({x:0,y:0,width,height,order:0,stride});
   }
   get size() { return this.pending.length; }
   private deficit(r: Region, d: Demand) {
-    // The renderer supplies at most two conservative source rectangles. Weight
-    // their union by useful density, counting the finer source in the overlap.
-    const intersection = (a: Demand['covered'][number], b: Demand['covered'][number]) => ({
-      x:Math.max(a.x,b.x), y:Math.max(a.y,b.y),
-      width:Math.max(0,Math.min(a.x+a.width,b.x+b.width)-Math.max(a.x,b.x)),
-      height:Math.max(0,Math.min(a.y+a.height,b.y+b.height)-Math.max(a.y,b.y)),
-    });
-    const pieces=d.covered.map(c=>({...intersection(r,c), quality:Math.min(1,r.stride/(c.spacing??1))}));
-    const overlap=pieces.length===2 ? intersection(pieces[0],pieces[1]) : {width:0,height:0};
-    const covered=pieces.reduce((area,c)=>area+c.width*c.height*c.quality,0)-
-      overlap.width*overlap.height*(pieces.length===2 ? Math.min(pieces[0].quality,pieces[1].quality) : 0);
-    return Math.max(0,1-covered/(r.width*r.height));
+    let value=this.deficits.get(r);
+    if(value===undefined){value=disjointDeficit(r,this.coverage);this.deficits.set(r,value);}
+    return value;
   }
   private score(r: Region, d: Demand) {
     const dx = Math.max(r.x - d.x, 0, d.x - r.x - r.width + 1);
@@ -34,14 +77,24 @@ export class PendingRegions {
     const deficit=this.deficit(r,d);
     // Sparse samples cover stride squared pixels per calculation, but only
     // improve linear resolution by stride. Use that conservative cost benefit.
-    if(r.stride>1) return deficit*r.stride*(d.zoom<=0 ? 4 : 1);
-    return (d.zoom <= 0 ? deficit * 4 : 0) + 1 / (1 + Math.hypot(dx,dy) / 64);
+    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + .5 / (1 + Math.hypot(dx,dy) / 64);
+    const focusWeight=this.distributed&&this.turns%2===1?4:1;
+    return deficit * 4 + focusWeight / (1 + Math.hypot(dx,dy) / 64);
   }
   take(budget: number, demand: Demand, rows?: number): Region | undefined {
+    this.deficits.clear();
+    this.coverage=disjointCoverage(demand.covered);
     this.pending=this.pending.filter(r=>r.stride===1 || this.deficit(r,demand)>0);
     if (!this.pending.length) return;
     // A regular oldest turn prevents a moving focus from starving other gaps.
     const oldest = ++this.turns % 8 === 0;
+    // Deterministic spatial service survives compatible retargets. The pointer
+    // retains alternate turns; broad refinement is never gated on a full stage.
+    if(this.distributed&&this.turns%2===0&&!rows){
+      const k=(this.turns/2-1)%16;
+      const x=((k&1)<<1)|((k>>2)&1), y=(((k>>1)&1)<<1)|((k>>3)&1);
+      demand={...demand,x:(x+.5)*this.width/4,y:(y+.5)*this.height/4};
+    }
     let index = 0;
     for (let i=1; i<this.pending.length; i++) {
       if (oldest ? this.pending[i].order < this.pending[index].order :

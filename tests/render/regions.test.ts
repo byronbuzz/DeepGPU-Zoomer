@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PendingRegions, type Demand } from '../../src/render/regions';
+import { PendingRegions, coverageDeficit, type Demand } from '../../src/render/regions';
 
 const demand: Demand = {x:180,y:80,zoom:1,covered:[]};
 describe('exact pending regions',()=>{
@@ -15,7 +15,7 @@ describe('exact pending regions',()=>{
     const coverage=inward.take(16384,demand)!;
     expect(coverage.stride).toBe(4);
     expect(Math.ceil(coverage.width/4)*Math.ceil(coverage.height/4)).toBeLessThanOrEqual(16384);
-    expect(inward.take(16384,demand)!.stride).toBe(1);
+    expect(inward.take(16384,demand)!.stride).toBe(2);
     for(const zoom of [-1,1]) {
       const covered=[{x:0,y:0,width:512,height:512,spacing:2}];
       const queue=new PendingRegions();queue.reset(512,512,4);
@@ -28,6 +28,20 @@ describe('exact pending regions',()=>{
   it('keeps focus eligible when only a small coverage gap remains',()=>{
     const queue=new PendingRegions();queue.reset(512,512,4);
     expect(queue.take(16384,{...demand,covered:[{x:0,y:0,width:510,height:512}]})!.stride).toBe(1);
+  });
+  it('integrates overlapping densities without inventing known area',()=>{
+    const r={x:0,y:0,width:100,height:100,stride:1,order:0};
+    expect(coverageDeficit(r,[{...r,width:50},{...r,width:50},{...r,width:50}])).toBe(.5);
+    expect(coverageDeficit(r,[{...r,spacing:4},{...r,width:50,spacing:2},{...r,width:25,spacing:1}])).toBe(.5);
+  });
+  it('services different spatial strata across compatible retargets',()=>{
+    const queue=new PendingRegions(),positions=new Set<string>();
+    for(let i=0;i<32;i++){
+      queue.reset(1024,1024,16,true);
+      const r=queue.take(1024,{...demand,covered:[{x:0,y:0,width:1024,height:1024,spacing:16}]})!;
+      positions.add(`${r.x},${r.y}`);
+    }
+    expect(positions.size).toBeGreaterThan(8);
   });
   it('keeps subdivided sparse work aligned to its actual shading anchors',()=>{
     const queue=new PendingRegions();queue.reset(1024,768,16);

@@ -164,12 +164,12 @@ export interface BuildOptions {
  * @param maxDelta largest |d| any pixel will use, so radii can account for the
  *   terms `d` injects without knowing the pixel
  */
-export function buildBla(
+function* buildBlaSteps(
   orbit: Float32Array,
   length: number,
   maxDelta: number,
   options: BuildOptions = {}
-): BlaTable {
+): Generator<void,BlaTable> {
   const maxLevels = options.maxLevels ?? 14;
   const quadratic = options.quadratic ?? true;
 
@@ -179,6 +179,7 @@ export function buildBla(
   const refX = new Float64Array(count + 1);
   const refY = new Float64Array(count + 1);
   for (let i = 0; i <= count; i++) {
+    if(i%8192===0)yield;
     if (options.sampleWords === 20) {
       // Let all transported chunks contribute to double rounding. Reducing to
       // the leading pair first loses bits that affect long accelerated orbits.
@@ -200,6 +201,7 @@ export function buildBla(
   const level0: Step[] = [];
 
   for (let s = 0; s < level0Count; s++) {
+    if(s%1024===0)yield;
     const start = s * BASE_STEP;
     let a = ONE;
     let b = ZERO;
@@ -280,6 +282,7 @@ export function buildBla(
 
     const merged: Step[] = [];
     for (let s = 0; s < mergedCount; s++) {
+      if(s%1024===0)yield;
       const first = previous[2 * s];
       const second = previous[2 * s + 1];
       const composed = compose(first, second);
@@ -313,7 +316,9 @@ export function buildBla(
   for (const level of levels) {
     levelOffsets.push(offset);
     levelCounts.push(level.length);
-    level.forEach((step, index) => {
+    for(let index=0;index<level.length;index++) {
+      if(index%4096===0)yield;
+      const step=level[index];
       const target = (offset + index) * ENTRY_FLOATS;
       const put = (slot: number, v: Scaled) => {
         data[target + slot * 5] = v.x;
@@ -328,7 +333,7 @@ export function buildBla(
       put(3, step.d);
       put(4, step.e);
       data[target + 25] = step.radiusLog2;
-    });
+    }
     offset += level.length;
   }
 
@@ -340,6 +345,15 @@ export function buildBla(
     entryCount,
     quadratic,
   };
+}
+
+export function buildBla(orbit:Float32Array,length:number,maxDelta:number,options:BuildOptions={}):BlaTable {
+  const steps=buildBlaSteps(orbit,length,maxDelta,options);
+  for(;;){const next=steps.next();if(next.done)return next.value;}
+}
+export async function buildBlaAsync(orbit:Float32Array,length:number,maxDelta:number,checkpoint:()=>Promise<void>,options:BuildOptions={}):Promise<BlaTable> {
+  const steps=buildBlaSteps(orbit,length,maxDelta,options);
+  for(;;){const next=steps.next();if(next.done)return next.value;await checkpoint();}
 }
 
 /** Reads a packed entry back, for tests and the CPU mirror. */

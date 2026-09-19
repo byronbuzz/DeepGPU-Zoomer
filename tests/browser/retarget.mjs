@@ -91,7 +91,7 @@ export async function retargetChecks(context,baseUrl){
     const late={...finalRequest,centerX:finalRequest.centerX.plus(finalRequest.unitsPerPixel),colors:{...finalRequest.colors,palette:2}};
     device.createBuffer=descriptor=>{
      const buffer=createBuffer(descriptor);
-     if(descriptor.size===32&&(descriptor.usage&GPUBufferUsage.MAP_READ)){
+     if(descriptor.size===48&&(descriptor.usage&GPUBufferUsage.MAP_READ)){
       const map=buffer.mapAsync.bind(buffer);
       buffer.mapAsync=async(...args)=>{await map(...args);if(!injected&&engine.fieldComplete){injected=true;engine.reproject(late);}};
      }

@@ -18,7 +18,7 @@ import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
 import reuseSource from "./reuse.wgsl?raw";
 import { createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
-import { PendingRegions, type Demand } from "./regions";
+import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
 import { fixedToQuad, splitQuad } from "../arithmetic/quad";
 import { reprojectionFor } from "./reprojection";
@@ -39,9 +39,9 @@ function yieldToEvents(): Promise<void> {
 
 /** No scaling, no offset: show the frame exactly as rendered. */
 const IDENTITY_XFORM = new Float32Array([1, 1, 0, 0]);
-import { hexToRgb, MAX_STOPS, type ColorSettings } from "../logic/colorSettings";
+import { hexToRgb, MAX_STOPS, stopPositions, needsEndpoints, type ColorSettings } from "../logic/colorSettings";
 import { parseFixed } from "../arithmetic/types";
-import { BASE_STEP, ENTRY_FLOATS, buildBla } from "./bla";
+import { BASE_STEP, ENTRY_FLOATS, buildBlaAsync } from "./bla";
 
 const orbitModule = [orbitBindings, bigfixedSource, orbitSource].join("\n");
 
@@ -100,6 +100,8 @@ export interface RenderRequest {
    * callers use the same region queue without following another camera. */
   followView?: boolean;
   betweenBatches?: () => Promise<void>;
+  /** Preview callers publish only complete images and matching metadata. */
+  publishPartial?: boolean;
   focus?: { x: number; y: number };
   zoom?: number;
 }
@@ -235,6 +237,7 @@ export class WebGpuRenderer {
     proxy?: boolean;
     covered?: {x:number;y:number;width:number;height:number};
     coveredSpacing?: Decimal;
+    coveredRegions?: {x:number;y:number;width:number;height:number;spacing:Decimal}[];
     family?: "mandelbrot" | "julia";
     juliaX?: Decimal;
     juliaY?: Decimal;
@@ -270,6 +273,7 @@ export class WebGpuRenderer {
   private retarget = false;
   private determinedRegion: {x:number;y:number;width:number;height:number} | null = null;
   private determinedSpacing: Decimal | undefined;
+  private determined = new CoverageRegions();
   private streamTargets = 0;
   private latestRegion: {x:number;y:number;width:number;height:number} | null = null;
   private timing: GpuTiming;
@@ -287,6 +291,9 @@ export class WebGpuRenderer {
   private bindLayout: GPUBindGroupLayout | null = null;
   private fieldBuffer: GPUBuffer | null = null;
   private fieldCapacity = 0;
+  private endpointBuffer:GPUBuffer|null=null;
+  private endpointCapacity=0;
+  private retainEndpoints=false;
   private spareField: GPUBuffer | null = null;
   private spareCapacity = 0;
   private fieldView: FrameView | null = null;
@@ -342,13 +349,13 @@ export class WebGpuRenderer {
       minFilter: "nearest",
     });
     this.uniformBuffer = ctx.device.createBuffer({
-      size: 336,
+      size: 368,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.stopsBuffer = storageBuffer(ctx.device, MAX_STOPS * 4, "palette-stops");
     this.statsBuffer = storageBuffer(
       ctx.device,
-      8,
+      12,
       "render-stats",
       GPUBufferUsage.COPY_SRC
     );
@@ -385,6 +392,7 @@ export class WebGpuRenderer {
         storage("read-only-storage", 5),
         storage("storage", 6),
         storage("storage", 7),
+        storage("storage", 8),
       ],
     });
     this.bindLayout = bindLayout;
@@ -647,7 +655,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       .toNumber();
 
     const samples = new Float32Array(await readBuffer(device, this.orbitBuffer!, this.refLength * 20 * 4));
-    const table = buildBla(samples, this.refLength, halfDiagonal, { sampleWords: 20 });
+    const table = await buildBlaAsync(samples, this.refLength, halfDiagonal, async()=>{
+      await yieldToEvents();
+      if(this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException("Superseded table","AbortError");
+    }, { sampleWords: 20 });
+    if(table.data.byteLength>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('The approximation table exceeds this GPU’s buffer capacity.');
     this.tableMaxDelta = halfDiagonal;
 
     this.laLevels = table.levels;
@@ -845,6 +857,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private ensureOrbitCapacity(samples: number) {
     if (this.orbitCapacity >= samples && this.orbitBuffer) return;
+    if(samples*80>Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize))throw Error('This iteration limit exceeds this GPU’s reference buffer capacity.');
     this.orbitBuffer?.destroy();
     this.orbitBuffer = storageBuffer(
       this.ctx.device,
@@ -998,6 +1011,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   invalidateHistory() {
     this.publicationEpoch++; this.historyValid=false; this.refValid=false;
     this.incomingFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
+    this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
     this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";
     this.abort();
@@ -1018,16 +1032,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   /** Conservative rectangle with useful sample density for priority, not mere
    * display coverage. Magnified old pixels must not suppress refinement demand. */
   private coverageIn(frame: NonNullable<WebGpuRenderer["lastFrame"]>, view: FrameView) {
-    const spacing=Decimal.max(frame.coveredSpacing??frame.unitsPerPixel,frame.unitsPerPixel);
     const m=reprojectionFor(frame,view,!frame.proxy);
     if (!m) return [];
-    const known=frame.proxy ? frame.covered : {x:0,y:0,width:frame.width,height:frame.height};
-    if (!known) return [];
+    const regions=frame.proxy ? frame.coveredRegions??(frame.covered?[{...frame.covered,spacing:frame.coveredSpacing??frame.unitsPerPixel}]:[]) :
+      [{x:0,y:0,width:frame.width,height:frame.height,spacing:frame.unitsPerPixel}];
+    return regions.map(known=>{
+    const spacing=Decimal.max(known.spacing,frame.unitsPerPixel);
     const x=Math.max(0,(known.x/frame.width-m.offsetX)/m.scaleX*view.width);
     const y=Math.max(0,(known.y/frame.height-m.offsetY)/m.scaleY*view.height);
     const right=Math.min(view.width,((known.x+known.width)/frame.width-m.offsetX)/m.scaleX*view.width);
     const bottom=Math.min(view.height,((known.y+known.height)/frame.height-m.offsetY)/m.scaleY*view.height);
-    return [{x,y,width:Math.max(0,right-x),height:Math.max(0,bottom-y),spacing}];
+    return {x,y,width:Math.max(0,right-x),height:Math.max(0,bottom-y),spacing};
+    }).filter(r=>r.width>0&&r.height>0);
   }
 
   private retainPartial() {
@@ -1038,9 +1054,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const retained={...frame,...planRetainedView(frame,this.retainedAnchor,{overscan:1})};
     const snapshot = device.createTexture({ label: "retained-progress", size: [retained.width,retained.height],
       format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
-    const candidates=[...this.coverageIn({...frame,proxy:true,covered:this.determinedRegion??undefined,coveredSpacing:this.determinedSpacing},retained),...[this.historyValid?this.lastFrame:null,this.coverageFrame].flatMap(
+    const candidates=[...this.coverageIn({...frame,proxy:true,coveredRegions:this.determined.rectangles.map(r=>({...r,spacing:frame.unitsPerPixel.times(r.spacing??1)}))},retained),...[this.historyValid?this.lastFrame:null,this.coverageFrame].flatMap(
       old=>old && old.family===frame.family ? this.coverageIn(old,retained) : [])].filter(r=>r!==null);
     const covered=candidates.sort((a,b)=>b.width*b.height-a.width*a.height)[0];
+    const retainedCoverage=new CoverageRegions();
+    for(const c of candidates)retainedCoverage.add({...c,spacing:c.spacing.div(retained.unitsPerPixel).toNumber()});
     const live = this.currentView;
     this.currentView = { ...retained };
     const source = this.historyValid ? this.history! : this.target;
@@ -1053,7 +1071,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.coverageHistory?.destroy(); this.coverageHistory=this.history; this.coverageFrame=this.lastFrame;
     } else this.history?.destroy();
     this.history=snapshot; this.historySize={width:retained.width,height:retained.height};
-    this.lastFrame={...retained,proxy:true,covered,coveredSpacing:covered?.spacing}; this.historyValid=true; this.incomingFrame=null;
+    this.lastFrame={...retained,proxy:true,covered,coveredSpacing:covered?.spacing,
+      coveredRegions:retainedCoverage.rectangles.map(r=>({...r,spacing:retained.unitsPerPixel.times(r.spacing??1)}))}; this.historyValid=true; this.incomingFrame=null;
   }
 
   private regionDemand(request: RenderRequest): Demand {
@@ -1064,8 +1083,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if (!frame || frame.family !== request.family) return [];
       return this.coverageIn(frame,request).map(r=>({...r,spacing:r.spacing.div(request.unitsPerPixel).toNumber()}));
     });
+    covered.push(...this.determined.rectangles.map(r=>({...r,spacing:r.spacing??1})));
+    const hints=new CoverageRegions();for(const c of covered)hints.add(c);
     return {x:((m?.offsetX??0)+focus.x*(m?.scaleX??1))*request.width,
-      y:((m?.offsetY??0)+focus.y*(m?.scaleY??1))*request.height,zoom:live.zoom??0,covered};
+      y:((m?.offsetY??0)+focus.y*(m?.scaleY??1))*request.height,zoom:live.zoom??0,covered:hints.rectangles};
   }
 
   async render(request: RenderRequest): Promise<RenderStats> {
@@ -1086,6 +1107,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     const { device } = this.ctx;
     const epoch = this.publicationEpoch;
+    this.abortRequested=false;
+    if(!Number.isInteger(request.maxIterations)||request.maxIterations<1||request.maxIterations>1_000_000)throw Error('Unsupported iteration limit (maximum 1000000).');
     const originalCurrent = request.isCurrent;
     request = { ...request, colors: { ...request.colors, stops: [...request.colors.stops] },
       isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
@@ -1095,7 +1118,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       JSON.stringify(request.colors)].join("|");
     if (requestKey === this.cachedRequest && this.cachedStats && this.historyValid && request.isCurrent!()) {
       return { ...this.cachedStats, computed: false, computedSamples: 0,
-        reusedSamples: request.width * request.height, orbitMs: 0, pipelineWaitMs: 0, tableMs: 0, renderMs: 0 };
+        reusedSamples: request.width * request.height, orbitMs: 0, pipelineWaitMs: 0, tableMs: 0, renderMs: 0,
+        skippedIterations:0,plainIterations:0,approxSteps:0,rebases:0,skipRatio:0 };
     }
     if (!this.renderPipeline || !this.blitPipeline) {
       throw new Error("WebGpuRenderer.init() was not awaited");
@@ -1146,7 +1170,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       orbitMs = orbit.ms;
       this.tableMs = 0;
       this.laLevels=0;
-      if (method === Method.Hdr && family === "mandelbrot") await this.buildApproxTable(request);
+      this.tableMaxDelta=-1;
+      if (method === Method.Hdr && family === "mandelbrot" && request.useApprox!==false && request.colors.mode===0) await this.buildApproxTable(request);
     }
     // Reversal/overscan can need a larger delta domain without needing a new
     // orbit. Rebuild the inexpensive table for that domain instead of silently
@@ -1179,7 +1204,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const stopData = new Float32Array(MAX_STOPS * 4);
     colors.stops.slice(0, MAX_STOPS).forEach((stop, i) => {
       stopData.set(hexToRgb(stop), i * 4);
-      stopData[i * 4 + 3] = 1;
+      stopData[i * 4 + 3] = stopPositions(colors)[i];
     });
     device.queue.writeBuffer(this.stopsBuffer, 0, stopData);
 
@@ -1193,13 +1218,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     );
 
     let previewStride=1;
-    if(request.followView && !request.tileRows && colors.mode===0 && grid===1) {
+    if(request.followView && !request.tileRows && colors.mode!==2 && grid===1) {
       while(Math.ceil(request.width/previewStride)*Math.ceil(request.height/previewStride)>MIN_BATCH_SAMPLES) previewStride*=2;
     }
 
     // Layout must match the Uniforms struct in perturbation.wgsl. vec3 members
     // align to 16 bytes, which is what the gaps below are for.
-    const uniforms = new ArrayBuffer(336);
+    const uniforms = new ArrayBuffer(368);
     const f32 = new Float32Array(uniforms);
     const i32 = new Int32Array(uniforms);
     const u32 = new Uint32Array(uniforms);
@@ -1211,6 +1236,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     f32[5] = offset.y;
     i32[6] = offset.exponent;
     u32[7] = request.maxIterations;
+    const wantsEndpoints=needsEndpoints(colors)||colors.mode===1;
+    if(this.retainEndpoints&&!wantsEndpoints&&this.fieldView&&!this.sameView(this.fieldView,request)){
+      this.retainEndpoints=false;this.endpointBuffer?.destroy();this.endpointBuffer=null;this.endpointCapacity=0;
+    }
+    this.retainEndpoints ||= wantsEndpoints;
+    const endpointCount=this.retainEndpoints?request.width*request.height*grid*grid:1;
+    if(endpointCount*16>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('Final-orbit channels exceed this GPU’s buffer capacity. Reduce the viewport or disable the orbit-dependent mode.');
+    if(!this.endpointBuffer||this.endpointCapacity<endpointCount){this.endpointBuffer?.destroy();this.endpointBuffer=storageBuffer(device,endpointCount*4,'final-orbits');this.endpointCapacity=endpointCount;}
+    u32[84]=colors.formula??0;u32[85]=colors.effect??0;u32[86]=colors.capped??0;u32[87]=colors.repeating===false?0:1;u32[88]=this.retainEndpoints?1:0;
     u32[8] = this.refLength;
     u32[9] = colors.palette;
     f32[10] = Math.max(1, colors.cycle);
@@ -1264,7 +1298,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         request.juliaX ?? new Decimal(0), request.juliaY ?? new Decimal(0)].forEach((value, i) => f32.set(splitQuad(value), 56 + i * 4));
     }
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-    device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(8));
+    device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(12));
 
     // What the field holds is a function of the geometry and the iteration,
     // not of the palette. Rebuilding it is the whole cost of a frame, so it is
@@ -1278,6 +1312,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       request.height,
       request.maxIterations,
       colors.mode,
+      this.retainEndpoints,
       grid,
       method,
       this.refLength,
@@ -1288,8 +1323,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       limbs, this.refLimbs, !!u32[20], request.useApprox].join("|");
     if (fieldStale) {
       this.moveField(request, request.width * request.height * grid * grid, sampleKey,
-        grid === 1 && colors.mode === 0, grid);
-      u32[41] = grid === 1 && colors.mode === 0 ? 1 : 0;
+        grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid);
+      u32[41] = grid === 1 && colors.mode !== 2 ? 1 : 0;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     }
 
@@ -1304,6 +1339,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         { binding: 5, resource: { buffer: this.laIndexBuffer! } },
         { binding: 6, resource: { buffer: this.statsBuffer } },
         { binding: 7, resource: { buffer: this.fieldBuffer! } },
+        { binding: 8, resource: { buffer: this.endpointBuffer! } },
       ],
     });
 
@@ -1313,7 +1349,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
       colors: request.colors, maxIterations: request.maxIterations,
     };
-    const progressive = colors.mode === 0 && grid === 1;
+    const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false;
     let timingSamples: (TimingSample | undefined)[] = [];
     const collectTimings = () => { timingSamples.forEach(s => this.timing.collect(s)); timingSamples = []; };
     const shade = (encoder: GPUCommandEncoder, width: number, height: number) => {
@@ -1340,11 +1376,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const batchCostKey=[family,method,request.maxIterations,limbs,colors.mode,grid].join("|");
     if (this.batchCostKey!==batchCostKey) { this.batchCostKey=batchCostKey; this.batchMsPerSample=0; }
     if (!fieldStale) this.pending.reset(0,0);
-    if (fieldStale) { this.pending.reset(request.width,request.height,previewStride); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
+    if (fieldStale) { this.pending.reset(request.width,request.height,previewStride,request.followView); this.determined=new CoverageRegions(); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
     const targetStarted=performance.now();
     while (this.pending.size) {
+      const minimum=Math.max(64,Math.floor(MIN_BATCH_SAMPLES*Math.min(1,10000/request.maxIterations)/64)*64);
       const budget = this.batchMsPerSample > 0 ?
-        Math.max(MIN_BATCH_SAMPLES,SUBMIT_BUDGET_MS/this.batchMsPerSample) : MIN_BATCH_SAMPLES;
+        Math.max(minimum,SUBMIT_BUDGET_MS/this.batchMsPerSample) : minimum;
       const region = this.pending.take(budget,this.regionDemand(request),request.tileRows);
       if(!region) break;
       const width=region.width, rows=region.height;
@@ -1372,6 +1409,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       collectTimings();
       if (progressive && request.isCurrent!()) {
         this.incomingFrame = frame; this.partialSerial++; this.partialRegions++;
+        this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:region.stride});
         if (!this.determinedRegion || width*rows >= this.determinedRegion.width*this.determinedRegion.height) {
           this.determinedRegion={x:region.x,y:region.y,width,height:rows};
           this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
@@ -1411,7 +1449,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       u32[26]=request.height; u32[54]=1;
       u32[40] = 0; u32[42] = 0; u32[43] = request.width;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-      if (!fieldStale || !progressive) shade(encoder, request.width, request.height);
+      if (!fieldStale || !progressive || colors.mode===1 || (colors.effect??0)>=7&&(colors.effect??0)<=9) shade(encoder, request.width, request.height);
       // Presentation belongs to the current camera, not this possibly older request.
       this.ensureHistory(request);
       encoder.copyTextureToTexture(
@@ -1434,7 +1472,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     // Mapping the counters also fences the final copy; no redundant queue-wide
     // completion round trip before the readback.
-    const counters = new Uint32Array(await readBuffer(device, this.statsBuffer, 32));
+    const counters = new Uint32Array(await readBuffer(device, this.statsBuffer, 48));
     const renderMs = performance.now() - started;
     // Invalidation owns visibility. An older asynchronous completion must not
     // clear or replace a publication belonging to a newer epoch.
@@ -1445,8 +1483,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       // interrupted field retains its exact samples and unknown sentinels.
       if (epoch !== this.publicationEpoch) this.incomingFrame = null;
     }
-    const skippedIterations = counters[0];
-    const plainIterations = counters[3];
+    const work = (i:number) => counters[i] + counters[i+8] * 4294967296;
+    const skippedIterations = work(0);
+    const plainIterations = work(3);
     const total = skippedIterations + plainIterations;
 
     const result: RenderStats = {
@@ -1463,8 +1502,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       method,
       renderMs,
       skippedIterations,
-      approxSteps: counters[1],
-      rebases: counters[2],
+      approxSteps: work(1),
+      rebases: work(2),
       plainIterations,
       skipRatio: total > 0 ? skippedIterations / total : 0,
       cappedRatio: counters[5] > 0 ? counters[4] / counters[5] : 0,

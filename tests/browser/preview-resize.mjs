@@ -50,18 +50,20 @@ export async function previewResizeChecks(context, url, artifactsDir) {
       await page.waitForTimeout(50);
     }
   };
-  const previewSettled = () => until(({ preview: s, backing, css, dpr }) =>
+  const previewSettled = () => until(({ preview: s, backing }) =>
     s.enabled && !s.busy && !s.pending && s.epoch === s.renderedEpoch &&
-    backing.width === Math.round(css.width * dpr) && backing.height === Math.round(css.height * dpr));
+    backing.width === s.size.width && backing.height === s.size.height);
   const check = (name, condition, detail) => {
     checks.push({ name, pass: Boolean(condition), detail });
     console.log(`${condition ? 'PASS' : 'FAIL'} ${name}`);
     assert.ok(condition, `${name}: ${JSON.stringify(detail)}`);
   };
   const checkPixels = state => {
-    check('preview backing follows DPR and displayed dimensions',
-      state.backing.width === Math.round(state.css.width * state.dpr) &&
-      state.backing.height === Math.round(state.css.height * state.dpr), state);
+    const scale=Math.min(state.dpr,192/state.css.width,160/state.css.height);
+    const round=scale<state.dpr?Math.floor:Math.round;
+    check('preview backing follows bounded DPR and displayed dimensions',
+      state.backing.width === Math.max(1,round(state.css.width * scale)) &&
+      state.backing.height === Math.max(1,round(state.css.height * scale)), state);
     // Each backing pixel gets the same complex units; CSS scaling must match on both axes.
     const xScale = state.backing.width / state.css.width;
     const yScale = state.backing.height / state.css.height;
@@ -110,7 +112,7 @@ export async function previewResizeChecks(context, url, artifactsDir) {
       proto.render = function(req) { record(this, req, 'start'); return render.call(this, req); };
       proto.reproject = function(req) {
         const result = reproject.call(this, req);
-        if (this.debugProgress().active) record(this, req, 'partial');
+        record(this, req, 'publish');
         return result;
       };
     });
@@ -142,11 +144,11 @@ export async function previewResizeChecks(context, url, artifactsDir) {
     }
     const latest = await previewSettled(); checkPixels(latest);
     const geometry = await page.evaluate(() => window.previewGeometry);
-    check('resized preview establishes backing and current view before calculation',
+    check('resized preview publishes matching backing and current view',
       new Set(geometry.filter(p => p.phase === 'start').map(p => `${p.width}x${p.height}`)).size > 1 &&
-      geometry.every(p => p.backingMatches && p.viewMatches && Math.abs(p.verticalSpan - 3.2) < 1e-12), geometry);
-    check('partial preview publications use current pixel geometry and latest c',
-      geometry.some(p => p.phase === 'partial') && geometry.every(p => p.latestC), geometry);
+      geometry.filter(p=>p.phase==='publish').every(p => p.backingMatches && p.viewMatches && Math.abs(p.verticalSpan - 3.2) < 1e-12), geometry);
+    check('preview publishes coherent completed images during resize',
+      geometry.some(p => p.phase === 'publish') && geometry.filter(p=>p.phase==='start').every(p=>Math.abs(p.verticalSpan-3.2)<1e-12), geometry);
     if (artifactsDir) await page.screenshot({ path: `${artifactsDir}/preview-resized.png` });
     const expected = await page.evaluate(async () => {
       const a = await import(document.querySelector('script[type=module][src*="/src/main.ts"]').src);
