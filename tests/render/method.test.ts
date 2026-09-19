@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import Decimal from "decimal.js";
-import { Method, methodForScale } from "../../src/render/webgpu-renderer";
+import { Method, methodForScale, limbsForScale } from "../../src/render/webgpu-renderer";
 
 const upp = (span: string, height = 1080) => new Decimal(span).div(height);
 
 describe("methodForScale", () => {
+  it("keeps enough reference bits for the selected pixel mantissa", () => {
+    const spacing = new Decimal("1e-40");
+    expect(limbsForScale(spacing)).toBe(8);
+    expect(limbsForScale(spacing, 96)).toBe(16);
+    expect(limbsForScale(new Decimal("1e-52"), 96)).toBe(16);
+  });
   it("iterates c directly when the view is wider than f32 can blur", () => {
     expect(methodForScale(upp("2.8"))).toBe(Method.Direct);
     expect(methodForScale(upp("0.02"))).toBe(Method.Direct);

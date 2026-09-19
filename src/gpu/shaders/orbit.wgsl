@@ -9,6 +9,8 @@
 // Concatenated after orbit-bindings.wgsl and bigfixed.wgsl.
 
 var<workgroup> escaped: u32;
+// Mandelbrot keeps its pair samples; Julia transports four mantissa words.
+override SAMPLE_WORDS: u32 = 12u;
 
 fn addSeedInto(dst: u32, offset: u32) {
     var carry: u32 = 0u;
@@ -47,9 +49,31 @@ fn emitSample(base: u32, out: u32) {
     }
 
     if (top < 0) {
-        samples[out + 0u] = 0.0;
-        samples[out + 1u] = 0.0;
-        samples[out + 2u] = 0.0;
+        for (var j = 0u; j < SAMPLE_WORDS / 4u; j++) { samples[out + j] = 0.0; }
+        return;
+    }
+
+    if (SAMPLE_WORDS == 20u) {
+        let msb = top * 32 + i32(firstLeadingBit(scratch[base + u32(top)]));
+        let sign = select(1.0, -1.0, negative);
+        for (var j = 0u; j < 4u; j++) {
+            // Exact adjacent 24-bit chunks, without a binary64 intermediate.
+            let start = msb - i32(24u * (j + 1u)) + 1;
+            var chunk = 0u;
+            if (start < 0) {
+                if (start > -24) { chunk = scratch[base] << u32(-start); }
+            } else {
+                let word = u32(start) / 32u;
+                let shift = u32(start) % 32u;
+                chunk = scratch[base + word] >> shift;
+                if (shift != 0u && word + 1u < LIMBS) {
+                    chunk |= scratch[base + word + 1u] << (32u - shift);
+                }
+            }
+            samples[out + j] = sign * ldexp(f32(chunk & 0xffffffu), 1 - i32(24u * (j + 1u)));
+        }
+        samples[out + 4u] = f32(msb - i32(32u * (LIMBS - 1u)));
+        if (negative) { negate(base); }
         return;
     }
 
@@ -165,16 +189,17 @@ fn advanceOrbit(@builtin(local_invocation_id) local: vec3<u32>) {
 
             let index = startIndex + iter + 1u;
             if (index < params.maxSamples) {
-                emitSample(slot(S_X), index * 12u + 0u);
-                emitSample(slot(S_Y), index * 12u + 3u);
+                let componentWords = SAMPLE_WORDS / 4u;
+                emitSample(slot(S_X), index * SAMPLE_WORDS);
+                emitSample(slot(S_Y), index * SAMPLE_WORDS + componentWords);
                 for (var j = 0u; j < LIMBS; j += 1u) {
                     scratch[slot(S_XX)+j] = scratch[slot(S_X)+j];
                     scratch[slot(S_YY)+j] = scratch[slot(S_Y)+j];
                 }
                 subtractOrigin(slot(S_XX),2u*LIMBS);
                 subtractOrigin(slot(S_YY),3u*LIMBS);
-                emitSample(slot(S_XX),index*12u+6u);
-                emitSample(slot(S_YY),index*12u+9u);
+                emitSample(slot(S_XX), index * SAMPLE_WORDS + 2u * componentWords);
+                emitSample(slot(S_YY), index * SAMPLE_WORDS + 3u * componentWords);
                 status[0] = index + 1u;
             }
 

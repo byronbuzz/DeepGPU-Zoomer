@@ -55,6 +55,13 @@ struct Uniforms {
     constant: vec2<f32>,
     constantLow: vec2<f32>,
     centreLow: vec2<f32>,
+    juliaScale: vec4<f32>,
+    juliaOffsetX: vec4<f32>,
+    juliaOffsetY: vec4<f32>,
+    juliaCentreX: vec4<f32>,
+    juliaCentreY: vec4<f32>,
+    juliaConstantX: vec4<f32>,
+    juliaConstantY: vec4<f32>,
 };
 
 @group(0) @binding(0) var<storage, read> orbit: array<f32>;   // hi, lo, exp per component
@@ -90,6 +97,8 @@ struct Uniforms {
 const TAU: f32 = 6.283185307179586;
 const ESCAPE_R: f32 = 16.0;
 const ESCAPE_R2: f32 = 256.0;
+// Specialize by set so Julia's wider live values do not burden Mandelbrot.
+override JULIA: bool = false;
 
 // ------------------------------------------------------- mantissa/exponent pair
 
@@ -142,7 +151,7 @@ fn orbitHdr(i: u32, relative: bool) -> Hdr {
 }
 fn refHdr(i: u32) -> Hdr { return orbitHdr(i,false); }
 fn refSample(i: u32) -> vec2<f32> { return hdrValue(refHdr(i)); }
-fn rebaseDelta(i: u32, dz: Hdr) -> Hdr { return hdrAdd(orbitHdr(i,u.family == 1u),dz); }
+fn rebaseDelta(i: u32, dz: Hdr) -> Hdr { return hdrAdd(refHdr(i),dz); }
 
 // -------------------------------------------------------------------- colour
 
@@ -349,11 +358,9 @@ const HDR_ONE = Hdr(vec2<f32>(1.0, 0.0), vec2<f32>(0.0), 0);
 fn iterate(delta0: Hdr, wantDerivative: bool) -> Sample {
     var dz = hdrZero();
     var injection = delta0;
-    if (u.family == 1u) { dz = delta0; injection = hdrZero(); }
     // D_{k+1} = 2*z_k*D_k + 1, the derivative of the whole orbit w.r.t. c.
     var deriv = hdrZero();
     var z = vec2<f32>(0.0);
-    if (u.family == 1u) { deriv = HDR_ONE; z = hdrValue(hdrAdd(refHdr(0u),dz)); }
     var refIter: u32 = 0u;
     let lastRef = max(u.refLength - 1u, 1u);
     var n: u32 = 0u;
@@ -400,7 +407,7 @@ fn iterate(delta0: Hdr, wantDerivative: bool) -> Sample {
         dz = hdrAdd(hdrAdd(hdrMul(dz, twoX), hdrMul(dz, dz)), injection);
         if (wantDerivative) {
             deriv = hdrMul(deriv,hdrMulPlain(currentZ,vec2<f32>(2.0,0.0)));
-            if (u.family == 0u) { deriv = hdrAdd(deriv,HDR_ONE); }
+            deriv = hdrAdd(deriv,HDR_ONE);
         }
         refIter = refIter + 1u;
 
@@ -472,12 +479,11 @@ fn emptySample() -> Sample {
 /// until the pixel spacing approaches its resolution near |c| ~ 1.
 fn iterateDirect(c0: Hdr, wantDerivative: bool) -> Sample {
     var z = hdrZero(); var c = c0; var deriv = hdrZero();
-    if (u.family == 1u) { z = c0; c = hdrNorm(Hdr(u.constant,u.constantLow,0)); deriv = HDR_ONE; }
     var n = 0u; var z2 = dot(hdrValue(z),hdrValue(z)); var escaped = z2 > ESCAPE_R2;
     while (n < u.maxIterations && !escaped) {
         if (wantDerivative) {
             deriv = hdrMul(deriv,hdrMulPlain(z,vec2<f32>(2.0,0.0)));
-            if (u.family == 0u) { deriv = hdrAdd(deriv,HDR_ONE); }
+            deriv = hdrAdd(deriv,HDR_ONE);
         }
         z = hdrAdd(hdrMul(z,z),c); n += 1u;
         z2 = dot(hdrValue(z),hdrValue(z)); escaped = z2 > ESCAPE_R2;
@@ -485,6 +491,7 @@ fn iterateDirect(c0: Hdr, wantDerivative: bool) -> Sample {
     return Sample(escaped,n,hdrValue(z),z2,hdrLog2(deriv),0u,0u,0u,hdrLog2(z),0u);
 }
 fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
+    if (JULIA) { return iterateJulia(pixel, wantDerivative); }
     if (u.method == 0u) {
         let offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
         return iterateDirect(hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset),wantDerivative);

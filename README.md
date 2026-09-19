@@ -61,29 +61,40 @@ or browser profiles belong in this repository.
 
 Observed on Edge 153.0.4234.32 / RX 9070 XT:
 
-- 55 CPU tests and 18 retained GPU arithmetic/orbit checks passed.
+- 58 CPU tests and 20 GPU arithmetic/orbit checks passed, including wide
+  Julia absolute/relative transport and compensated cancellation/products.
 - At 720×480, all 49 sampled escape counts agreed with independently
   structured direct 512/768-bit evaluation for Mandelbrot home, Seahorse
   Valley, the original difficult 6e-42 span, and the 1e50 minibrot. Julia home
   and initially escaped Julia points also agreed.
-- The structured Julia 1e50 spiral renders, but **2 of 49 sampled counts
-  disagree**: pixels (51,240) and (51,377) produce 2479/2000 instead of
-  2543/2002. Both direct precisions agree. These locations are highly sensitive
-  to tiny coordinate perturbations; that observation does not prove the GPU
-  values correct. The browser regression intentionally reports failure here.
-  Full numerical acceptance of the 1e50 Julia target remains open.
+- The original structured Julia 1e50 fixture now agrees at **all 49 sampled
+  pixels**, including (51,240) = 2543 and (51,377) = 2002, against unchanged
+  direct 512/768-bit evaluators. The accepted baseline b0376cb gave 2479/2000.
+  Diagnosis isolated reduced absolute-reference precision and accumulated
+  perturbation rounding: directly iterating the exact encoded starting
+  deltas still gave 2543/2002. Julia now uses QD-derived four-f32 mantissas
+  across inputs, GPU reference transport, iteration and rebasing. This closes
+  the demonstrated regression; it does not certify every pixel or zoom.
 - Exact share reload, palette-only recolouring, Julia selection/return,
   rapid set changes, narrow layout, and short wheel/hold-release refinement
   passed. A five-second 1440p zoom/reversal run measured 59.95 Hz rAF
-  presentation cadence, 16.8 ms p95 interval and nine fresh fields, followed
+  presentation cadence, 16.8 ms p95 interval and six fresh fields, followed
   by stationary refinement. This is headless browser scheduling evidence,
   not a physical display latency measurement or a guaranteed frame rate.
+- Wider Julia arithmetic has a measured cost. Three warm-reference repeats
+  at the original 720×480 deep fixture gave median field times of 121.3 ms
+  for b0376cb and 748.9 ms for the repair (about 6.2×). At 180×120 the medians
+  were 23.6/180.4 ms. These measure completed numerical fields, separately
+  from presentation cadence. Set-specialized compute pipelines retain the
+  existing Mandelbrot arithmetic and acceleration.
 
 The tests are sampled practical checks, not universal per-pixel certification.
 The compensated arithmetic is verified through actual GPU fields; WGSL
 reassociation rules do not justify blanket error-free-transform claims.
 Julia uses fixed high-precision c, initial reference Z0 at the view centre,
-and high-precision Zm−Z0 samples for rebasing. Mandelbrot retains BLA with
+and high-precision Zm−Z0 samples reduced to 96-bit chunks for rebasing.
+Four-component arithmetic is a practical precision choice, not a WGSL
+error-free guarantee. Mandelbrot retains BLA with
 the remaining-iteration and reference-drift bounds; Julia BLA is disabled.
 GPU loss is reported and currently requires a page reload.
 

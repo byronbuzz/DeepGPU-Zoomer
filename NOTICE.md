@@ -24,3 +24,10 @@ exact saved state and independent numerical checks.
 The compensated f32-pair helpers in src/arithmetic/compensated.wgsl reuse
 the author's prior WebGPU-Zoomer implementation at revision
 444431aaed32bd4227559931bde6c0e1e2869e8c, with the author's permission.
+
+The four-component operations in src/arithmetic/quad.wgsl adapt QD 2.3.24's
+renorm, default sloppy_add and accurate_mul algorithms from
+[BL-highprecision/QD](https://github.com/BL-highprecision/QD), revision
+b1c8ddfd2d4a0f0901a88491524df728a26cbe8e. The adaptation uses f32 components,
+splitter 4097, and normalized exponent-carrying operands. See licenses/QD-LICENSE
+(BSD-3-Clause) and licenses/QD-COPYING for the original notices.

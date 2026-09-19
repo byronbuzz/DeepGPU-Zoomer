@@ -17,6 +17,9 @@ import arithtestBindings from "./shaders/arithtest-bindings.wgsl?raw";
 import arithtestSource from "./shaders/arithtest.wgsl?raw";
 import orbitBindings from "./shaders/orbit-bindings.wgsl?raw";
 import orbitSource from "./shaders/orbit.wgsl?raw";
+import quadSource from "../arithmetic/quad.wgsl?raw";
+import Decimal from "decimal.js";
+import { fixedToQuad, splitQuad } from "../arithmetic/quad";
 import {
   fromLimbs,
   parseFixed,
@@ -24,11 +27,13 @@ import {
   wrapSigned,
   fixedToNumber,
   fromHdr,
+  scaleDecimal,
 } from "../arithmetic/types";
 import {
   addFixed,
   mulFixed,
   referenceOrbit,
+  orbitStep,
   subFixed,
 } from "../arithmetic/cpu-oracle";
 
@@ -231,36 +236,45 @@ async function checkOrbit(
   centerX: string,
   centerY: string,
   iterations: number,
-  batchSize?: number
+  batchSize?: number,
+  juliaInitial?: [string, string]
 ): Promise<CheckResult> {
   const { device } = ctx;
   const maxSamples = iterations + 1;
+  const stride = juliaInitial ? 20 : 12;
 
   const module = await compileShader(device, orbitModule, "orbit");
   const pipeline = device.createComputePipeline({
     layout: "auto",
-    compute: { module, entryPoint: "advanceOrbit", constants: { LIMBS: limbs } },
+    compute: { module, entryPoint: "advanceOrbit", constants: { LIMBS: limbs, SAMPLE_WORDS: stride } },
   });
 
   const state = storageBuffer(device, limbs * 2, "orbit-state");
   const seed = storageBuffer(device, limbs * 4, "orbit-seed");
   const scratch = storageBuffer(device, scratchWords(limbs), "orbit-scratch");
-  const samples = storageBuffer(device, maxSamples * 12, "orbit-samples", GPUBufferUsage.COPY_SRC);
+  const samples = storageBuffer(device, maxSamples * stride, "orbit-samples", GPUBufferUsage.COPY_SRC);
   const status = storageBuffer(device, 4, "orbit-status", GPUBufferUsage.COPY_SRC);
   const params = device.createBuffer({
     size: 16,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  const seedData = new Uint32Array(limbs * 2);
+  const seedData = new Uint32Array(limbs * 4);
   seedData.set(parseFixed(centerX, limbs), 0);
   seedData.set(parseFixed(centerY, limbs), limbs);
+  const initialX = parseFixed(juliaInitial?.[0] ?? "0", limbs);
+  const initialY = parseFixed(juliaInitial?.[1] ?? "0", limbs);
+  seedData.set(initialX, limbs * 2);
+  seedData.set(initialY, limbs * 3);
   device.queue.writeBuffer(seed, 0, seedData);
-  device.queue.writeBuffer(state, 0, new Uint32Array(limbs * 2));
+  const initialState = new Uint32Array(limbs * 2);
+  initialState.set(initialX); initialState.set(initialY, limbs);
+  device.queue.writeBuffer(state, 0, initialState);
   // status[0] is the resume cursor: the shader continues from the last sample
   // written, and sample 0 (z = 0) is written here.
   device.queue.writeBuffer(status, 0, new Uint32Array([1, 0, 0, 0]));
-  device.queue.writeBuffer(samples, 0, new Float32Array(6));
+  device.queue.writeBuffer(samples, 0, new Float32Array(juliaInitial ?
+    [...fixedToQuad(initialX, limbs), ...fixedToQuad(initialY, limbs), ...Array(10).fill(0)] : Array(12).fill(0)));
 
   const bind = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -300,13 +314,27 @@ async function checkOrbit(
     if (rawStatus[1] === 1) break;
   }
   const elapsed = performance.now() - started;
-  const data = new Float32Array(await readBuffer(device, samples, maxSamples * 48));
+  const data = new Float32Array(await readBuffer(device, samples, maxSamples * stride * 4));
 
   // Oracle.
   const c = {
     x: fromLimbs(parseFixed(centerX, limbs), limbs),
     y: fromLimbs(parseFixed(centerY, limbs), limbs),
   };
+  if (juliaInitial) {
+    const origin = { x: fromLimbs(initialX, limbs), y: fromLimbs(initialY, limbs) };
+    let z = origin;
+    let mismatches = 0;
+    for (let i = 0; i < sampleCount; i++) {
+      const expected = [z.x, z.y, z.x - origin.x, z.y - origin.y]
+        .flatMap(value => fixedToQuad(toLimbs(value, limbs), limbs));
+      expected.forEach((value, j) => { if (data[i * stride + j] !== value) mismatches++; });
+      z = orbitStep(z, c, limbs);
+    }
+    [state, seed, scratch, samples, status, params].forEach(b => b.destroy());
+    return { name: "Julia wide absolute/relative GPU samples", passed: sampleCount === maxSamples && mismatches === 0,
+      detail: `${sampleCount} samples, ${mismatches} component mismatches, batch=${batchSize}` };
+  }
   const expected = referenceOrbit(c, limbs, iterations);
 
   let worst = 0;
@@ -344,6 +372,57 @@ async function checkOrbit(
   };
 }
 
+async function checkQuad(ctx: GpuContext): Promise<CheckResult> {
+  const cases = [
+    ["1.000000000000000000001", "-1"],
+    ["-1.000000000000000000001", "1"],
+    ["1.2345678901234567890123456789", "-0.98765432109876543210987654321"],
+    ["-0.8", "0.156"],
+    ["0", "0"],
+  ];
+  Decimal.set({ precision: Math.max(Decimal.precision, 100) });
+  const { device } = ctx;
+  const input = storageBuffer(device, cases.length * 8, "quad-input");
+  const output = storageBuffer(device, cases.length * 8, "quad-output", GPUBufferUsage.COPY_SRC);
+  device.queue.writeBuffer(input, 0, new Float32Array(cases.flatMap(pair => pair.flatMap(v => [...splitQuad(new Decimal(v))]))));
+  const module = await compileShader(device, quadSource + `
+    @group(0) @binding(0) var<storage,read> inputs: array<vec4<f32>>;
+    @group(0) @binding(1) var<storage,read_write> outputs: array<vec4<f32>>;
+    @compute @workgroup_size(1) fn check(@builtin(global_invocation_id) id: vec3<u32>) {
+      let a=inputs[id.x*2u]; let b=inputs[id.x*2u+1u];
+      outputs[id.x*2u]=qAdd(a,b); outputs[id.x*2u+1u]=qMul(a,b);
+    }`, "quad-check");
+  const pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "check" } });
+  const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+    { binding: 0, resource: { buffer: input } }, { binding: 1, resource: { buffer: output } },
+  ] });
+  const encoder = device.createCommandEncoder(); const pass = encoder.beginComputePass();
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(cases.length); pass.end();
+  device.queue.submit([encoder.finish()]);
+  const result = new Float32Array(await readBuffer(device, output, cases.length * 32));
+  const raw = new Uint32Array(result.buffer);
+  // Exact binary decoding, independent of the Decimal component splitter.
+  const decode = (index: number) => {
+    const word = raw[index]; if ((word & 0x7fffffff) === 0) return 0n;
+    const exponent = (word >>> 23) & 255;
+    const mantissa = BigInt((word & 0x7fffff) + (exponent ? 0x800000 : 0));
+    return (word >>> 31 ? -1n : 1n) * (mantissa << BigInt(256 + (exponent || 1) - 150));
+  };
+  let failures = 0;
+  cases.forEach(([left, right], i) => {
+    const a = scaleDecimal(left, 256n), b = scaleDecimal(right, 256n);
+    [a + b, a * b / (1n << 256n)].forEach((expected, operation) => {
+      let actual = 0n;
+      for (let j = 0; j < 4; j++) actual += decode(i * 8 + operation * 4 + j);
+      const error = actual - expected;
+      if ((error < 0n ? -error : error) > (1n << 176n)) failures++;
+    });
+  });
+  input.destroy(); output.destroy();
+  return { name: "Julia quad addition, cancellation and products", passed: failures === 0,
+    detail: `${cases.length * 2} results, ${failures} outside absolute 2^-80 tolerance` };
+}
+
 export async function runSelfTest(
   log: (result: CheckResult) => void
 ): Promise<boolean> {
@@ -355,6 +434,7 @@ export async function runSelfTest(
   });
 
   const results: CheckResult[] = [];
+  results.push(await checkQuad(ctx));
   results.push(await checkMul32(ctx));
   for (const limbs of [8, 16, 64]) {
     results.push(await checkBigOp(ctx, 1, limbs, 64));
@@ -362,6 +442,10 @@ export async function runSelfTest(
     results.push(await checkBigOp(ctx, 0, limbs, 64));
   }
   results.push(await checkOrbit(ctx, 16, "-1", "0", 32));
+  results.push(await checkOrbit(ctx, 16, "-0.8", "0.156", 256, 7, [
+    "-0.52750311864353461078974640244491533756674594781170728533987519700320301109745",
+    "0.07591217835228786707181419482634804636642219484797802253973259344918689150308",
+  ]));
   results.push(await checkOrbit(ctx, 32, "-0.25", "0", 128));
   results.push(await checkOrbit(ctx, 64, "-0.743643887037151", "0.13182590420533", 256));
   results.push(
