@@ -18,12 +18,15 @@ const app=async fn=>page.evaluate(fn);
 const status=()=>app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.status();});
 const check=(name,pass,detail)=>{report.checks.push({name,pass,detail});console.log(`${pass?'PASS':'FAIL'} ${name}${detail?' '+JSON.stringify(detail):''}`);};
 const settle=async()=>{const started=Date.now();for(;;){const s=await status();if(s.error)throw Error(s.error);if(!s.busy&&!s.dirty&&s.quality===1)return s;if(Date.now()-started>120000)throw Error('Refinement timeout');await page.waitForTimeout(100);}};
-async function compare(name){
+async function compare(name, extraPoints=[]){
   const s=await settle();
   const data=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return {view:a.testing.snapshot(),field:Array.from(await a.testing.engine.debugReadField()),width:document.querySelector('canvas').width,height:document.querySelector('canvas').height};});
-  const rows=[];
+  const rows=[],points=[...extraPoints];
   for(let j=0;j<7;j++)for(let i=0;i<7;i++){
     const x=Math.floor((i+.5)*data.width/7),y=Math.floor((j+.5)*data.height/7);
+    points.push([x,y]);
+  }
+  for(const [x,y] of points){
     const a=direct(data.view,x,y,data.width,data.height,512),b=direct(data.view,x,y,data.width,data.height,768),gpu=data.field[2*(y*data.width+x)];
     rows.push({x,y,oracle512:a,oracle768:b,gpu,delta:gpu-b});
   }
@@ -46,6 +49,21 @@ try{
   await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);const {HOME}=await import('/src/state.ts');a.testing.load({...HOME,family:'julia',x:'0'});});await compare('julia-home');
   // An already-escaped Julia point must be reported at iteration zero.
   await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);a.testing.load({...a.testing.snapshot(),x:'15',y:'15',span:'1e-30'});});await compare('julia-initial-bailout');
+  // Preserve the reported view and its three failing pixels, plus each pixel's
+  // immediate neighbours. Expected counts still come only from direct.mjs.
+  await app(async()=>{
+    const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);
+    a.testing.load({family:'mandelbrot',
+      x:'-0.7306415249567179674564126808137349766637195178413058594098862566062443058950219458733751053543136202285',
+      y:'0.1618038929239254474321368117854708727846076829629497296639618850035467323583391272471056909498211475756',
+      span:'5.34547864799099529616966098711236667733050369615924011990458268501488728289618249845607183383544102148e-18',
+      iterations:10000,jx:'-0.8',jy:'0.156'});
+  });
+  const neighbours=[];
+  for(const [x,y] of [[668,102],[668,171],[51,377]])for(const dx of [-1,0,1])for(const dy of [-1,0,1]){
+    if(dx||dy)neighbours.push([x+dx,y+dy]);
+  }
+  await compare('mandelbrot-actual10000',neighbours);
   await page.selectOption('#places','2');await settle();
   const before=await status();await page.selectOption('#palette','2');await settle();const after=await status();
   check('palette reuses numeric field',after.fields===before.fields&&after.recolours>before.recolours,{before:before.fields,after:after.fields,beforeStats:before.stats,afterStats:after.stats});

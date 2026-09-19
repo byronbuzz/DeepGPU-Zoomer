@@ -15,7 +15,7 @@ import orbitSource from "../gpu/shaders/orbit.wgsl?raw";
 import compensatedSource from "../arithmetic/compensated.wgsl?raw";
 import quadSource from "../arithmetic/quad.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
-import juliaSource from "./julia.wgsl?raw";
+import wideSource from "./wide.wgsl?raw";
 import reuseSource from "./reuse.wgsl?raw";
 import { createSampleGridAnchor, planSampleGrid, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
 import type { FrameView } from "./reprojection";
@@ -39,7 +39,7 @@ function yieldToEvents(): Promise<void> {
 /** No scaling, no offset: show the frame exactly as rendered. */
 const IDENTITY_XFORM = new Float32Array([1, 1, 0, 0]);
 import { hexToRgb, MAX_STOPS, type ColorSettings } from "../logic/colorSettings";
-import { parseFixed, fixedToHdr } from "../arithmetic/types";
+import { parseFixed } from "../arithmetic/types";
 import { BASE_STEP, ENTRY_FLOATS, buildBla } from "./bla";
 
 const orbitModule = [orbitBindings, bigfixedSource, orbitSource].join("\n");
@@ -211,6 +211,8 @@ export class WebGpuRenderer {
   private orbitPipelines = new Map<string, Promise<GPUComputePipeline>>();
   private pipelineWaitMs = 0;
   private renderPipeline: GPUComputePipeline | null = null;
+  private directPipeline: GPUComputePipeline | null = null;
+  private approxPipeline: GPUComputePipeline | null = null;
   private juliaPipeline: GPUComputePipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
 
@@ -347,7 +349,7 @@ export class WebGpuRenderer {
     this.reusePipeline = device.createComputePipeline({ layout: "auto", compute: { module: reuseModule, entryPoint: "remap" } });
     this.reuseUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    const renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, juliaSource].join("\n"), "perturbation");
+    const renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, wideSource].join("\n"), "perturbation");
 
     // Explicit rather than "auto": the two entry points touch different
     // subsets of the bindings, and an auto layout would derive a different
@@ -379,10 +381,20 @@ export class WebGpuRenderer {
       bindGroupLayouts: [bindLayout],
     });
 
+    this.directPipeline = device.createComputePipeline({
+      label: "direct-compute",
+      layout: pipelineLayout,
+      compute: { module: renderModule, entryPoint: "compute", constants: { DIRECT: 1 } },
+    });
     this.renderPipeline = device.createComputePipeline({
       label: "perturbation-compute",
       layout: pipelineLayout,
       compute: { module: renderModule, entryPoint: "compute" },
+    });
+    this.approxPipeline = device.createComputePipeline({
+      label: "approximation-compute",
+      layout: pipelineLayout,
+      compute: { module: renderModule, entryPoint: "compute", constants: { APPROX: 1 } },
     });
     this.juliaPipeline = device.createComputePipeline({
       label: "julia-compute",
@@ -488,7 +500,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     const julia = request.family === "julia";
     const pipelineStarted = performance.now();
-    const pipeline = await this.orbitPipeline(limbs, julia ? 20 : 12);
+    const pipeline = await this.orbitPipeline(limbs, 20);
     this.pipelineWaitMs = performance.now() - pipelineStarted;
     const state = storageBuffer(device, limbs * 2, "orbit-state");
     const seed = storageBuffer(device, limbs * 4, "orbit-seed");
@@ -508,14 +520,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     device.queue.writeBuffer(seed,0,seedData);
     const initial = new Uint32Array(limbs*2);initial.set(initialX);initial.set(initialY,limbs);
     device.queue.writeBuffer(state,0,initial);
-    if (julia) {
-      device.queue.writeBuffer(this.orbitBuffer!, 0, new Float32Array([
-        ...fixedToQuad(initialX, limbs), ...fixedToQuad(initialY, limbs), ...Array(10).fill(0),
-      ]));
-    } else {
-      const sx=fixedToHdr(initialX,limbs),sy=fixedToHdr(initialY,limbs);
-      device.queue.writeBuffer(this.orbitBuffer!,0,new Float32Array([sx.mantissaHi,sx.mantissaLo,sx.exponent,sy.mantissaHi,sy.mantissaLo,sy.exponent,0,0,0,0,0,0]));
-    }
+    device.queue.writeBuffer(this.orbitBuffer!, 0, new Float32Array([
+      ...fixedToQuad(initialX, limbs), ...fixedToQuad(initialY, limbs), ...Array(10).fill(0),
+    ]));
 
     const bind = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
@@ -615,8 +622,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       .plus(request.centerY.minus(this.refY).abs())
       .toNumber();
 
-    const samples = await this.debugReadOrbit(this.refLength);
-    const table = buildBla(samples, this.refLength, halfDiagonal);
+    const samples = new Float32Array(await readBuffer(device, this.orbitBuffer!, this.refLength * 20 * 4));
+    const table = buildBla(samples, this.refLength, halfDiagonal, { sampleWords: 20 });
     this.tableMaxDelta = halfDiagonal;
 
     this.laLevels = table.levels;
@@ -720,14 +727,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   async debugReadOrbit(count: number): Promise<Float32Array> {
     if (!this.orbitBuffer) return new Float32Array(0);
     const n = Math.min(count,this.orbitCapacity);
-    const stride = this.refFamily === "julia" ? 20 : 12;
+    const stride = 20;
     const raw = new Float32Array(await readBuffer(this.ctx.device,this.orbitBuffer,n*stride*4));
     const absolute = new Float32Array(n*6);
     for(let i=0;i<n;i++) {
       const at = i * stride;
-      // This legacy diagnostic/BLA view exposes the leading pair only.
-      absolute.set(stride === 12 ? raw.subarray(at,at+6) :
-        [raw[at],raw[at+1],raw[at+4],raw[at+5],raw[at+6],raw[at+9]],i*6);
+      // This legacy diagnostic view exposes the leading pair only.
+      absolute.set([raw[at],raw[at+1],raw[at+4],raw[at+5],raw[at+6],raw[at+9]],i*6);
     }
     return absolute;
   }
@@ -1008,7 +1014,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     const method = request.forceMethod ?? methodForScale(request.unitsPerPixel);
-    const limbs = limbsForScale(request.unitsPerPixel, request.family === "julia" ? 96 : 48);
+    const wide = request.family === "julia" || method !== Method.Direct;
+    const limbs = limbsForScale(request.unitsPerPixel, wide ? 96 : 48);
     Decimal.set({ precision: Math.max(Decimal.precision,Math.ceil((32 * (limbs - 1)) / 3.32) + 10) });
 
     // Reuse the reference orbit while the view stays near the point it was
@@ -1127,8 +1134,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     f32[18] = interior[2];
     u32[19] = Math.max(1, Math.min(MAX_STOPS, colors.stops.length));
     const deltaBound = requiredDelta;
-    u32[20] =
+    const approximationLevels =
       request.useApprox === false || method !== Method.Hdr || family === "julia" || colors.mode === 1 || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
+    u32[20] = approximationLevels;
     u32[21] = BASE_STEP;
     u32[22] = colors.mode;
     f32[23] = colors.colorDensity;
@@ -1157,11 +1165,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     f32[48] = request.juliaX?.toNumber() ?? 0; f32[49] = request.juliaY?.toNumber() ?? 0;
     f32[50] = request.juliaX?.minus(f32[48]).toNumber() ?? 0; f32[51] = request.juliaY?.minus(f32[49]).toNumber() ?? 0;
     f32[52] = request.centerX.minus(f32[38]).toNumber(); f32[53] = request.centerY.minus(f32[39]).toNumber();
-    if (family === "julia") {
+    if (family === "julia" || method !== Method.Direct) {
       const offsetPower = new Decimal(2).pow(offset.exponent);
       [request.unitsPerPixel.div(power), request.centerX.minus(this.refX).div(offsetPower),
         request.centerY.minus(this.refY).div(offsetPower), request.centerX, request.centerY,
-        request.juliaX!, request.juliaY!].forEach((value, i) => f32.set(splitQuad(value), 56 + i * 4));
+        request.juliaX ?? new Decimal(0), request.juliaY ?? new Decimal(0)].forEach((value, i) => f32.set(splitQuad(value), 56 + i * 4));
     }
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(8));
@@ -1276,7 +1284,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const encoder = device.createCommandEncoder({ label: "calculate-region" });
       const sample = this.timing.begin("calculate");
       const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
-      pass.setPipeline(family === "julia" ? this.juliaPipeline! : this.renderPipeline);
+      pass.setPipeline(family === "julia" ? this.juliaPipeline! : method === Method.Direct ? this.directPipeline! :
+        approximationLevels > 0 ? this.approxPipeline! : this.renderPipeline);
       pass.setBindGroup(0, bind);
       pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(rows / 8)); pass.end();
       this.timing.resolve(encoder, sample); timingSamples.push(sample);

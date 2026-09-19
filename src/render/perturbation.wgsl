@@ -55,16 +55,16 @@ struct Uniforms {
     constant: vec2<f32>,
     constantLow: vec2<f32>,
     centreLow: vec2<f32>,
-    juliaScale: vec4<f32>,
-    juliaOffsetX: vec4<f32>,
-    juliaOffsetY: vec4<f32>,
-    juliaCentreX: vec4<f32>,
-    juliaCentreY: vec4<f32>,
+    wideScale: vec4<f32>,
+    wideOffsetX: vec4<f32>,
+    wideOffsetY: vec4<f32>,
+    wideCentreX: vec4<f32>,
+    wideCentreY: vec4<f32>,
     juliaConstantX: vec4<f32>,
     juliaConstantY: vec4<f32>,
 };
 
-@group(0) @binding(0) var<storage, read> orbit: array<f32>;   // hi, lo, exp per component
+@group(0) @binding(0) var<storage, read> orbit: array<f32>;   // four mantissa words + exponent per component
 @group(0) @binding(1) var<uniform> u: Uniforms;
 @group(0) @binding(2) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<storage, read> stops: array<vec4<f32>>;
@@ -97,8 +97,12 @@ struct Uniforms {
 const TAU: f32 = 6.283185307179586;
 const ESCAPE_R: f32 = 16.0;
 const ESCAPE_R2: f32 = 256.0;
-// Specialize by set so Julia's wider live values do not burden Mandelbrot.
+// Specialize the set and direct path to remove unused recurrence branches.
 override JULIA: bool = false;
+// Separate direct specialization keeps the cheap path free of wide live values.
+override DIRECT: bool = false;
+// Keep approximation coefficients and operations out of unaccelerated kernels.
+override APPROX: bool = false;
 
 // ------------------------------------------------------- mantissa/exponent pair
 
@@ -138,20 +142,6 @@ fn hdrValue(a: Hdr) -> vec2<f32> {
     if (a.e < -120 || a.e > 120) { return vec2<f32>(0.0); }
     return ldexp(a.m+a.lo,vec2<i32>(a.e));
 }
-fn orbitHdr(i: u32, relative: bool) -> Hdr {
-    let base = i * 12u + select(0u,6u,relative);
-    let ex = i32(orbit[base+2u]); let ey = i32(orbit[base+5u]);
-    let x = vec2<f32>(orbit[base],orbit[base+1u]);
-    let y = vec2<f32>(orbit[base+3u],orbit[base+4u]);
-    if (all(x == vec2<f32>(0.0)) && all(y == vec2<f32>(0.0))) { return hdrZero(); }
-    let e = max(select(ex,-100000,all(x == vec2<f32>(0.0))),select(ey,-100000,all(y == vec2<f32>(0.0)))) + 32;
-    let xx = select(ldexp(x,vec2<i32>(max(-126,ex-e))),vec2<f32>(0.0),ex-e < -126);
-    let yy = select(ldexp(y,vec2<i32>(max(-126,ey-e))),vec2<f32>(0.0),ey-e < -126);
-    return hdrNorm(Hdr(vec2<f32>(xx.x,yy.x),vec2<f32>(xx.y,yy.y),e));
-}
-fn refHdr(i: u32) -> Hdr { return orbitHdr(i,false); }
-fn refSample(i: u32) -> vec2<f32> { return hdrValue(refHdr(i)); }
-fn rebaseDelta(i: u32, dz: Hdr) -> Hdr { return hdrAdd(refHdr(i),dz); }
 
 // -------------------------------------------------------------------- colour
 
@@ -259,11 +249,11 @@ fn loadSkip(entry: u32) -> Skip {
 }
 
 /// Applies the truncated polynomial.
-fn applySkip(skip: Skip, w: Hdr, d: Hdr) -> Hdr {
-    var out = hdrAdd(hdrMul(skip.a, w), hdrMul(skip.b, d));
-    out = hdrAdd(out, hdrMul(skip.c, hdrMul(w, w)));
-    out = hdrAdd(out, hdrMul(skip.d, hdrMul(w, d)));
-    out = hdrAdd(out, hdrMul(skip.e, hdrMul(d, d)));
+fn applySkip(skip: Skip, w: Wide, d: Wide) -> Wide {
+    var out = wideAdd(wideMul(wideFromHdr(skip.a), w), wideMul(wideFromHdr(skip.b), d));
+    out = wideAdd(out, wideMul(wideFromHdr(skip.c), wideMul(w, w)));
+    out = wideAdd(out, wideMul(wideFromHdr(skip.d), wideMul(w, d)));
+    out = wideAdd(out, wideMul(wideFromHdr(skip.e), wideMul(d, d)));
     return out;
 }
 
@@ -283,14 +273,14 @@ fn hdrLog2(v: Hdr) -> f32 {
  */
 fn takeSkip(
     at: u32,
-    dz: ptr<function, Hdr>,
+    dz: ptr<function, Wide>,
     deriv: ptr<function, Hdr>,
     withDerivative: bool,
-    delta0: Hdr,
+    delta0: Wide,
     remaining: u32
 ) -> u32 {
     if (u.laLevels == 0u) { return 0u; }
-    let dzLog2 = hdrLog2(*dz);
+    let dzLog2 = wideLog(*dz);
 
     // A level-L step starts only at multiples of laBaseStep << L, so the
     // highest level that can possibly align here is fixed by the trailing zeros
@@ -355,84 +345,6 @@ struct Sample {
 
 const HDR_ONE = Hdr(vec2<f32>(1.0, 0.0), vec2<f32>(0.0), 0);
 
-fn iterate(delta0: Hdr, wantDerivative: bool) -> Sample {
-    var dz = hdrZero();
-    var injection = delta0;
-    // D_{k+1} = 2*z_k*D_k + 1, the derivative of the whole orbit w.r.t. c.
-    var deriv = hdrZero();
-    var z = vec2<f32>(0.0);
-    var refIter: u32 = 0u;
-    let lastRef = max(u.refLength - 1u, 1u);
-    var n: u32 = 0u;
-    var z2: f32 = dot(z,z);
-    var escaped = z2 > ESCAPE_R2;
-
-    var skipped: u32 = 0u;
-    var skips: u32 = 0u;
-    var rebases: u32 = 0u;
-
-    while (n < u.maxIterations && !escaped) {
-        // The skip table describes the reference orbit's own map from index j to
-        // j + span, so it is indexed by refIter, not by n. Keying it on n would
-        // switch approximation off permanently after the first rebase — and at a
-        // minibrot nucleus the orbit returns to zero every period, so every
-        // pixel rebases many times.
-        if ((refIter % u.laBaseStep) == 0u &&
-            refIter + u.laBaseStep <= lastRef &&
-            n + u.laBaseStep <= u.maxIterations) {
-            let span = takeSkip(refIter, &dz, &deriv, wantDerivative, delta0, u.maxIterations - n);
-            if (span > 0u) {
-                n = n + span;
-                refIter = refIter + span;
-                skipped = skipped + span;
-                skips = skips + 1u;
-
-                let jumped = hdrAdd(refHdr(refIter), dz);
-                z = hdrValue(jumped);
-                z2 = dot(z, z);
-                if (z2 > ESCAPE_R2) { escaped = true; break; }
-                let rebased = rebaseDelta(refIter,dz);
-                if (hdrLess(rebased, dz) || refIter >= lastRef) {
-                    dz = rebased;
-                    refIter = 0u;
-                    rebases = rebases + 1u;
-                }
-                continue;
-            }
-        }
-
-        // dz <- 2*X_k*dz + dz^2 + delta0
-        let currentZ = hdrAdd(refHdr(refIter),dz);
-        let twoX = hdrMulPlain(refHdr(refIter),vec2<f32>(2.0,0.0));
-        dz = hdrAdd(hdrAdd(hdrMul(dz, twoX), hdrMul(dz, dz)), injection);
-        if (wantDerivative) {
-            deriv = hdrMul(deriv,hdrMulPlain(currentZ,vec2<f32>(2.0,0.0)));
-            deriv = hdrAdd(deriv,HDR_ONE);
-        }
-        refIter = refIter + 1u;
-
-        let zHdr = hdrAdd(refHdr(refIter), dz);
-        z = hdrValue(zHdr);
-        n = n + 1u;
-
-        z2 = dot(z, z);
-        if (z2 > ESCAPE_R2) { escaped = true; break; }
-
-        let rebased = rebaseDelta(refIter,dz);
-        if (hdrLess(rebased, dz) || refIter >= lastRef) {
-            dz = rebased;
-            refIter = 0u;
-            rebases = rebases + 1u;
-        }
-    }
-
-    var logDeriv = 0.0;
-    if (wantDerivative) { logDeriv = hdrLog2(deriv); }
-
-    return Sample(escaped, n, z, z2, logDeriv, skipped, skips, rebases,
-                  hdrLog2(dz), refIter);
-}
-
 // --------------------------------------------------- distance-estimation field
 
 /// log2 of one pixel's width in the complex plane.
@@ -453,13 +365,6 @@ fn heightOf(s: Sample) -> f32 {
     let logDistance =
         -1.0 + log2(magnitude) + log2(max(log(magnitude), 1e-30)) - s.logDeriv;
     return -(logDistance - logPixelSize());
-}
-
-fn delta0For(pixel: vec2<f32>) -> Hdr {
-    let fromCentre = pixel - 0.5 * u.resolution;
-    let pixelDelta = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(fromCentre,0));
-    let centreOffset = hdrNorm(Hdr(u.offsetMantissa,u.offsetLow,u.offsetExponent));
-    return hdrAdd(pixelDelta, centreOffset);
 }
 
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -491,12 +396,12 @@ fn iterateDirect(c0: Hdr, wantDerivative: bool) -> Sample {
     return Sample(escaped,n,hdrValue(z),z2,hdrLog2(deriv),0u,0u,0u,hdrLog2(z),0u);
 }
 fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
-    if (JULIA) { return iterateJulia(pixel, wantDerivative); }
-    if (u.method == 0u) {
+    if (JULIA) { return iterateWide(pixel, wantDerivative); }
+    if (DIRECT) {
         let offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
         return iterateDirect(hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset),wantDerivative);
     }
-    return iterate(delta0For(pixel),wantDerivative);
+    return iterateWide(pixel,wantDerivative);
 }
 
 // --------------------------------------------------------------------- shading

@@ -68,6 +68,21 @@ const CX = -0.12;
 const CY = 0.74;
 
 describe("second-order bilinear approximation", () => {
+  it("retains reference bits below the leading f32 pair when constructing skips", () => {
+    // With X = 1/2 + 2^-49 throughout an eight-step block, the exact linear
+    // coefficient is (2X)^8 = (1 + 2^-48)^8. Its rounded double is 1 + 2^-45.
+    // The third transported word contributes that term; a pair-only read loses it.
+    const orbit = new Float32Array((BASE_STEP + 1) * 20);
+    for (let i = 0; i <= BASE_STEP; i++) {
+      orbit[i * 20] = 0.5;
+      orbit[i * 20 + 2] = 2 ** -49;
+    }
+    const table = buildBla(orbit, BASE_STEP + 1, 0, { sampleWords: 20 });
+    const a = readStep(table, 0, 0).a;
+    expect(a.x * 2 ** a.e).toBe(1 + 2 ** -45);
+    expect(a.y).toBe(0);
+  });
+
   it("recovers the first-order coefficients exactly", () => {
     // Adding the quadratic terms must not disturb A and B: they obey their own
     // recurrences and nothing above them feeds back down.

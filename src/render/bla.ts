@@ -150,6 +150,8 @@ export function compose(first: Step, second: Step): Omit<Step, "radiusLog2"> {
 
 export interface BuildOptions {
   maxLevels?: number;
+  /** Legacy reduced samples or the renderer's full four-word reference samples. */
+  sampleWords?: 6 | 20;
   /** Set false to drop the second-order terms, for A/B comparison. */
   quadratic?: boolean;
 }
@@ -157,7 +159,7 @@ export interface BuildOptions {
 /**
  * Builds the skip table from reference orbit samples.
  *
- * @param orbit reduced samples, 6 floats per entry (hi, lo, exp per component)
+ * @param orbit 6-word reduced samples, or 20-word full samples with sampleWords:20
  * @param length valid sample count
  * @param maxDelta largest |d| any pixel will use, so radii can account for the
  *   terms `d` injects without knowing the pixel
@@ -177,8 +179,16 @@ export function buildBla(
   const refX = new Float64Array(count + 1);
   const refY = new Float64Array(count + 1);
   for (let i = 0; i <= count; i++) {
-    refX[i] = (orbit[i * 6 + 0] + orbit[i * 6 + 1]) * 2 ** orbit[i * 6 + 2];
-    refY[i] = (orbit[i * 6 + 3] + orbit[i * 6 + 4]) * 2 ** orbit[i * 6 + 5];
+    if (options.sampleWords === 20) {
+      // Let all transported chunks contribute to double rounding. Reducing to
+      // the leading pair first loses bits that affect long accelerated orbits.
+      const at = i * 20;
+      refX[i] = (orbit[at] + orbit[at + 1] + orbit[at + 2] + orbit[at + 3]) * 2 ** orbit[at + 4];
+      refY[i] = (orbit[at + 5] + orbit[at + 6] + orbit[at + 7] + orbit[at + 8]) * 2 ** orbit[at + 9];
+    } else {
+      refX[i] = (orbit[i * 6 + 0] + orbit[i * 6 + 1]) * 2 ** orbit[i * 6 + 2];
+      refY[i] = (orbit[i * 6 + 3] + orbit[i * 6 + 4]) * 2 ** orbit[i * 6 + 5];
+    }
   }
 
   const maxDeltaLog2 = maxDelta > 0 ? Math.log2(maxDelta) : -Infinity;

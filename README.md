@@ -96,35 +96,40 @@ It uses an isolated sandboxed profile and checks for physical AMD hardware.
 Set `GPU_ZOOMER_URL` and `GPU_ZOOMER_TEST_DIR` to override the server and
 external evidence directory. No browser profiles or recordings belong here.
 
-Current checks include 67 CPU tests, 20 GPU arithmetic/orbit checks, atomic
+Current checks include 68 CPU tests, 20 GPU arithmetic/orbit checks, atomic
 publication across GPU fences, exact copied sample identity, nearest
 magnification/minification, palette reuse, Julia preview/promotion/return,
 rapid family changes, responsive layout and 1440p motion/refinement. Streaming
 checks read actual GPU presentation pixels before field completion, including
 unknown-sample fallback, incompatible Julia constants and partial-field reuse.
 Native preview resizing is checked at normal and high DPI.
-Seven numerical views compare 49 raw escape counts each with independently
+Seven original numerical views compare 49 raw escape counts each with independently
 structured 512/768-bit direct evaluation, including the difficult 6e-42
-view and both original 1e50 fixtures.
+view and both original 1e50 fixtures. An eighth regression preserves the
+reported 10,000-iteration view near (-0.730641524956718, 0.161803892923925),
+span 5.34548e-18, and checks 73 points including the failing pixels and their
+immediate neighbours against the same independent oracles.
 
 These are sampled checks, not universal per-pixel certification. Mandelbrot
-uses compensated perturbation and bounded BLA; Julia uses QD-derived
-four-f32 mantissas with BLA disabled. Neither WGSL nor these tests establish
-universal error-free arithmetic. Precision grows through profiles up to
+and Julia perturbation share QD-derived four-f32 mantissas for coordinates,
+reference transport, recurrence and rebasing. Julia keeps BLA disabled, and
+direct Mandelbrot retains its cheaper compensated-pair path.
+BLA reads all reference words into its existing double-precision table builder;
+its bounded polynomial and pair coefficient transport remain approximations.
+Neither WGSL nor these tests establish universal error-free arithmetic.
+Precision grows through profiles up to
 256 u32 limbs; views beyond that range are rejected.
 
-Additional qualification at the reported 10,000-iteration view near
-(-0.730641524956718, 0.161803892923925), span 5.34548e-18, found three of 49
-sampled raw counts disagreeing with mutually agreeing 512/768-bit direct
-oracles in the preceding committed version. Its forced-BLA alternative also
-disagreed and provided no material measured speedup. This change preserves
-the existing numerical method and does not claim to repair that limitation.
+At the reported view the preceding compensated-pair path disagreed at eight
+of those 73 points, including a false escape. Wider transport and recurrence
+repair those sampled counts without changing the iteration cap or oracle.
+They cost more GPU time; this is a fidelity repair, not a throughput improvement.
 
 A roughly 60 Hz presentation callback rate does not imply 60 newly calculated
 or correctly delivered display frames. Expensive views magnify known samples
 while refinement runs; newly exposed areas use the nearest available edge
 until coverage arrives. New detail may change pixels abruptly, with no blur
-to hide it. Deep Julia remains substantially more expensive than Mandelbrot.
+to hide it. Deep fields can take seconds to refine at high resolution.
 GPU loss requires a reload. There is no built-in recording or public deploy.
 
 ## Licensing

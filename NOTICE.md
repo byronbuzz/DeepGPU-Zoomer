@@ -39,3 +39,5 @@ renorm, default sloppy_add and accurate_mul algorithms from
 b1c8ddfd2d4a0f0901a88491524df728a26cbe8e. The adaptation uses f32 components,
 splitter 4097, and normalized exponent-carrying operands. See licenses/QD-LICENSE
 (BSD-3-Clause) and licenses/QD-COPYING for the original notices.
+The shared src/render/wide.wgsl recurrence uses these operations for both
+Julia and Mandelbrot, with each family's initialization and pixel injection.
