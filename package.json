@@ -1,0 +1,22 @@
+{
+  "name": "gpu-zoomer-3",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "test": "vitest run",
+    "test:browser": "node tests/browser/run.mjs"
+  },
+  "dependencies": { "decimal.js": "10.6.0" },
+  "devDependencies": {
+    "@webgpu/types": "0.1.71",
+    "typescript": "5.9.3",
+    "vite": "5.4.21",
+    "vitest": "2.1.9",
+    "playwright-core": "1.61.1"
+  }
+}

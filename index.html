@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>GPU Zoomer</title></head>
+<body>
+  <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Keyboard plus and minus zoom; arrows pan."></canvas>
+  <header><div class="brand">GPU <strong>ZOOMER</strong><span id="set-label">MANDELBROT</span></div><button id="toggle" aria-expanded="true" aria-controls="controls">Hide controls</button></header>
+  <aside id="controls" aria-label="Explorer controls">
+    <div class="section-title">Explore</div>
+    <label>Fractal<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
+    <div class="row"><button id="julia-from">Julia at pointer</button><button id="return" disabled>Return</button></div>
+    <form id="julia-form" hidden><label>Julia c · real<input id="jx" value="-0.8" spellcheck="false"></label><label>Imaginary<input id="jy" value="0.156" spellcheck="false"></label><button>Apply constant</button></form>
+    <label>Places<select id="places"><option value="">Choose a view…</option></select></label>
+    <div class="row"><button id="back" disabled>Back</button><button id="forward" disabled>Forward</button><button id="reset">Reset</button></div>
+    <div class="section-title">Motion & detail</div>
+    <label>Zoom speed <output id="speed-value">1.0×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="1"></label>
+    <label>Iteration limit<input id="iterations" type="number" min="32" max="200000" step="100" value="1000"></label>
+    <label>Palette<select id="palette"><option value="1">Ember & ice</option><option value="0">Spectrum</option><option value="2">Aurora</option><option value="3">Ocean</option><option value="4">Monochrome</option></select></label>
+    <label>Colour spacing<input id="cycle" type="range" min="8" max="512" value="64" step="1"></label>
+    <div class="section-title">Keep this view</div>
+    <label>Location name<input id="location-name" maxlength="80" placeholder="Untitled location"></label>
+    <div class="row"><button id="save">Save location</button><button id="share">Copy link</button></div>
+    <label>Saved locations<select id="saved"><option value="">No saved locations</option></select></label>
+    <details><summary>Exact coordinates</summary><form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label>Vertical span<input id="span" spellcheck="false"></label><button>Go to coordinates</button></form></details>
+    <p class="help">Hold left / right to zoom in / out.<br>Steer with the pointer. Shift-drag to pan.<br>Wheel zooms. + / − and arrows also work.<br>Press J for Julia at the pointer; Esc stops motion.</p>
+  </aside>
+  <footer><span id="cadence">Starting WebGPU…</span><span id="freshness">Preparing first field</span><span id="depth"></span></footer>
+  <div id="message" role="status" aria-live="polite"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body></html>
