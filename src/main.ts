@@ -81,12 +81,12 @@ function measurePreview(){
   const limit=gpuContext?.device.limits.maxTextureDimension2D??Infinity;
   const limits=gpuContext?.device.limits;
   const pixelLimit=limits?Math.floor(Math.min(limits.maxStorageBufferBindingSize,limits.maxBufferSize)/8):Infinity;
-  const scale=Math.min(dpr,192/rect.width,160/rect.height,limit/rect.width,limit/rect.height,Math.sqrt(pixelLimit/(rect.width*rect.height)));
+  const scale=Math.min(dpr,limit/rect.width,limit/rect.height,Math.sqrt(pixelLimit/(rect.width*rect.height)));
   const round=scale<dpr?Math.floor:Math.round;
   const width=Math.max(1,round(rect.width*scale)),height=Math.max(1,round(rect.height*scale));
   if(width===previewSize.width&&height===previewSize.height)return;
   previewSize={width,height};
-  // Queue the latest geometry while the previous bounded image finishes.
+  // Queue the latest geometry while the previous complete image stays visible.
   if(selectedJulia)queuePreview();
 }
 const previewObserver=new ResizeObserver(measurePreview);

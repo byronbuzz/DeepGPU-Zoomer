@@ -30,9 +30,10 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   title and editors; the status and independently toggled Julia preview remain.
 - Resize Julia from its bottom-right corner. The previous complete image stays
   visible until a coherent replacement is ready. Selection updates coalesce;
-  bounded images finish even during continuous dragging. Displayed c labels the
+  images finish even during continuous dragging. Displayed c labels the
   displayed image; M always promotes the latest selection with main precision
-  and iteration limit. The preview uses at most 192×160 pixels and its own
+  and iteration limit. The preview follows its displayed size and device pixel
+  ratio, subject to GPU capacity, and uses its own
   1,000-iteration limit, independent of the main viewport's limit.
 - The iteration slider is logarithmic from 32 to 1,000,000. Its value previews
   during dragging and applies on release; exact numeric entry applies on Enter.
@@ -146,7 +147,7 @@ Proxy checks compare 40 fractional pans with original-source reprojection and
 verify that unmappable history stays transparent, 1024x broad sources survive
 repeated retention, and coarser incoming samples preserve finer available pixels.
 The external suite includes native preview resizing at normal and high DPI;
-the in-app suite checks bounded preview backing sizes across aspect ratios.
+the in-app suite checks size-matched preview backing sizes across aspect ratios.
 For in-app browser verification, open `/tests/browser/gpu.html` and
 `/tests/browser/ui.html` on the development server. They exercise the same
 production renderer and unchanged independent oracle without launching an

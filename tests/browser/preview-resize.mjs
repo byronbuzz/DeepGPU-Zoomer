@@ -50,20 +50,19 @@ export async function previewResizeChecks(context, url, artifactsDir) {
       await page.waitForTimeout(50);
     }
   };
-  const previewSettled = () => until(({ preview: s, backing }) =>
+  const previewSettled = () => until(({ preview: s, backing, css, dpr }) =>
     s.enabled && !s.busy && !s.pending && s.epoch === s.renderedEpoch &&
-    backing.width === s.size.width && backing.height === s.size.height);
+    backing.width === s.size.width && backing.height === s.size.height &&
+    backing.width === Math.round(css.width*dpr) && backing.height === Math.round(css.height*dpr));
   const check = (name, condition, detail) => {
     checks.push({ name, pass: Boolean(condition), detail });
     console.log(`${condition ? 'PASS' : 'FAIL'} ${name}`);
     assert.ok(condition, `${name}: ${JSON.stringify(detail)}`);
   };
   const checkPixels = state => {
-    const scale=Math.min(state.dpr,192/state.css.width,160/state.css.height);
-    const round=scale<state.dpr?Math.floor:Math.round;
-    check('preview backing follows bounded DPR and displayed dimensions',
-      state.backing.width === Math.max(1,round(state.css.width * scale)) &&
-      state.backing.height === Math.max(1,round(state.css.height * scale)), state);
+    check('preview backing follows DPR and displayed dimensions',
+      state.backing.width === Math.max(1,Math.round(state.css.width * state.dpr)) &&
+      state.backing.height === Math.max(1,Math.round(state.css.height * state.dpr)), state);
     // Each backing pixel gets the same complex units; CSS scaling must match on both axes.
     const xScale = state.backing.width / state.css.width;
     const yScale = state.backing.height / state.css.height;
