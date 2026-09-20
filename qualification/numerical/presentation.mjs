@@ -173,9 +173,9 @@ export async function presentationChecks(context, baseUrl) {
         pass: !!savedCoverage&&stationaryChanged===0&&distinguishable>0,
         detail: { compared:64*48, changed:stationaryChanged, distinctHistoricalPixels:distinguishable } });
 
-      const { PLACES } = await import('/src/places.ts'), { direct } = await import('/tests/browser/direct.mjs');
+      const { PLACES } = await import('/src/places.ts'), { direct } = await import('/qualification/numerical/direct.mjs');
       const deep = PLACES[2]; renderer.invalidateHistory();
-      active = { ...request(deep.x), centerY: new Decimal(deep.y), unitsPerPixel: new Decimal(deep.span).div(24), maxIterations: deep.iterations };
+      active = { ...request(deep.x), centerY: new Decimal(deep.y), unitsPerPixel: new Decimal(deep.span).div(24), maxIterations: deep.iterations, useApprox:true };
       await renderer.render(active); const firstBound = renderer.tableMaxDelta;
       active = { ...active, centerX: active.centerX.plus(new Decimal(deep.span).times('.2')), interacting: true };
       const expanded = await renderer.render(active), expandedView = renderer.fieldView, expandedField = await renderer.debugReadField();

@@ -150,9 +150,11 @@ throughput for responsiveness; eight milliseconds is a sizing target, not a
 GPU latency guarantee. Input state never selects a different batch policy.
 The Julia preview can run between main-stream batches.
 Orbit pipelines compile
-asynchronously. Expanded views rebuild the BLA table's conservative offset
-bound while retaining the reference orbit. Statistics distinguish reference work, pipeline wait,
-BLA-table preparation, completed-field wall time and copied/computed samples.
+asynchronously. Ordinary product rendering does not build or use BLA skips.
+Explicit development experiments can opt in; expanded experimental views rebuild
+the table's conservative offset bound while retaining the reference orbit.
+Statistics distinguish reference work, pipeline wait, optional table preparation,
+completed-field wall time and copied/computed samples.
 Wide perturbation carries the already decoded absolute reference sample across
 iterations and reuses the current Mandelbrot value for its identical rebase
 comparison; this changes neither the recurrence nor its magnitude test.
@@ -198,12 +200,16 @@ reported 10,000-iteration view near (-0.730641524956718, 0.161803892923925),
 span 5.34548e-18, and checks 73 points including the failing pixels and their
 immediate neighbours against the same independent oracles.
 
-These are sampled checks, not universal per-pixel certification. Mandelbrot
+These are sampled checks, not universal per-pixel certification. One original
+fixed-cap pixel independently escapes at 19688 while the unaccelerated GPU path
+reports 19679; this remains unresolved. Mandelbrot
 and Julia perturbation share QD-derived four-f32 mantissas for coordinates,
 reference transport, recurrence and rebasing. Julia keeps BLA disabled, and
 direct Mandelbrot retains its cheaper compensated-pair path.
-BLA reads all reference words into its existing double-precision table builder;
-its bounded polynomial and pair coefficient transport remain approximations.
+The older BLA path is disabled by default after demonstrated additional count
+and endpoint errors. It remains available only through explicit development
+opt-in for diagnostics; its bounded polynomial and pair coefficient transport
+remain unqualified approximations.
 Neither WGSL nor these tests establish universal error-free arithmetic.
 Precision grows through profiles up to
 256 u32 limbs; views beyond that range are rejected.
@@ -220,7 +226,7 @@ until coverage arrives. New detail may change pixels abruptly, with no blur
 to hide it. Deep fields can take seconds to refine at high resolution.
 The one-million cap is supported, not a speed promise. Work counters use paired
 words so high-cap totals do not wrap at 32 bits. Reference/table allocations
-check actual device capacity; BLA preparation yields cooperatively and high-cap
+check actual device capacity; optional experimental BLA preparation yields cooperatively and high-cap
 batches shrink. Cancellation still waits for an already submitted GPU batch.
 GPU loss requires a reload. There is no built-in recording or public deploy.
 

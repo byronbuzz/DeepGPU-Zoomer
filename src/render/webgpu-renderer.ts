@@ -65,7 +65,7 @@ export interface RenderRequest {
   height: number;
   maxIterations: number;
   colors: ColorSettings;
-  /** Set false to bypass linear approximation, for A/B comparison. */
+  /** Development-only: set true to opt into unqualified BLA skips. */
   useApprox?: boolean;
   /** Forces an iteration method instead of picking one from the zoom. */
   forceMethod?: Method;
@@ -1094,7 +1094,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
 
     const requestKey = [request.centerX, request.centerY, request.unitsPerPixel, request.width, request.height,
-      request.family, request.juliaX, request.juliaY, request.maxIterations, request.forceMethod, request.useApprox,
+      request.family, request.juliaX, request.juliaY, request.maxIterations, request.forceMethod, request.useApprox === true,
       JSON.stringify(request.colors)].join("|");
     if (requestKey === this.cachedRequest && this.cachedStats && this.historyValid && request.isCurrent!()) {
       this.referencePreparing=false;this.exactTotalSamples=request.width*request.height;this.exactCompletedSamples=this.exactTotalSamples;
@@ -1149,7 +1149,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.refSamples = orbit.samples; this.refValid = true;
         drift = new Decimal(0); orbitMs = orbit.ms;
         this.tableMs = 0; this.laLevels=0; this.tableMaxDelta=-1;
-        if (method === Method.Hdr && family === "mandelbrot" && request.useApprox!==false && request.colors.mode===0) await this.buildApproxTable(request);
+        if (method === Method.Hdr && family === "mandelbrot" && request.useApprox===true && request.colors.mode===0) await this.buildApproxTable(request);
       } catch (error) {
         this.referencePreparing=false;
         throw error;
@@ -1159,7 +1159,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // orbit. Rebuild the inexpensive table for that domain instead of silently
     // turning acceleration off for the whole expanded field.
     const requiredDelta = request.unitsPerPixel.times(Math.hypot(request.width, request.height) / 2).plus(drift).toNumber();
-    if (method === Method.Hdr && family === "mandelbrot" && request.useApprox !== false && request.colors.mode === 0 &&
+    if (method === Method.Hdr && family === "mandelbrot" && request.useApprox === true && request.colors.mode === 0 &&
         requiredDelta > this.tableMaxDelta * (1 + 1e-12)) {
       await this.buildApproxTable(request);
     }
@@ -1249,7 +1249,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     u32[19] = Math.max(1, Math.min(MAX_STOPS, colors.stops.length));
     const deltaBound = requiredDelta;
     const approximationLevels =
-      request.useApprox === false || method !== Method.Hdr || family === "julia" || colors.mode === 1 || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
+      request.useApprox !== true || method !== Method.Hdr || family === "julia" || colors.mode === 1 || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
     u32[20] = approximationLevels;
     u32[21] = BASE_STEP;
     u32[22] = colors.mode;
@@ -1309,7 +1309,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     ].join("|");
     const fieldStale = fieldKey !== this.fieldKey || this.aborted;
     const sampleKey = [family, constant, request.maxIterations, colors.mode, grid, method,
-      limbs, this.refLimbs, !!u32[20], request.useApprox].join("|");
+      limbs, this.refLimbs, !!u32[20], request.useApprox === true].join("|");
     if (fieldStale) {
       await checkedGpu(device,()=>this.moveField(request, request.width * request.height * grid * grid, sampleKey,
         grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid));
