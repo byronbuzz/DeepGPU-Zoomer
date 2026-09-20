@@ -1,10 +1,11 @@
 import { orbitStep, subFixed, type FixedComplex } from "../arithmetic/cpu-oracle";
-import { fixedToQuad } from "../arithmetic/quad";
-import { fromLimbs, parseFixed, toLimbs } from "../arithmetic/types";
+import { fromLimbs, parseFixed } from "../arithmetic/types";
 
 const SUPPORTED_LIMBS = new Set([8, 16, 32, 64, 128, 256]);
 const SAMPLE_FLOATS = 20;
 const CHUNK_SAMPLES = 8192;
+const WORD_MASK = 0xffffffffn;
+const QUAD_SCALES = [2 ** -23, 2 ** -47, 2 ** -71, 2 ** -95] as const;
 export type ReferenceStage = "generation" | "packing";
 
 export interface ReferenceOrbitInput {
@@ -24,6 +25,23 @@ export interface PackedReferenceOrbit {
   escapeIndex: number;
 }
 
+interface PackingContext {
+  limbs: number;
+  fractionalBits: number;
+  highWordShift: bigint;
+  lowWordShift: bigint;
+}
+
+function packingContext(limbs: number): PackingContext {
+  const highWordShift = 32n * BigInt(limbs - 1);
+  return {
+    limbs,
+    fractionalBits: 32 * (limbs - 1),
+    highWordShift,
+    lowWordShift: highWordShift - 32n,
+  };
+}
+
 function gpuApproximation(words: Uint32Array, limbs: number): number {
   const high = Math.fround(words[limbs - 1] | 0);
   const low = Math.fround(Math.fround(words[limbs - 2] >>> 0) * Math.fround(2 ** -32));
@@ -36,10 +54,38 @@ export function gpuReferenceEscaped(x: Uint32Array, y: Uint32Array, limbs: numbe
   return Math.fround(Math.fround(ax * ax) + Math.fround(ay * ay)) > 256;
 }
 
-function writeComponent(target: Float32Array, offset: number, value: bigint, limbs: number): Uint32Array {
-  const words = toLimbs(value, limbs);
-  target.set(fixedToQuad(words, limbs), offset);
-  return words;
+function gpuApproximationFixed(value: bigint, context: PackingContext): number {
+  const high = Number((value >> context.highWordShift) & WORD_MASK) | 0;
+  const low = Number((value >> context.lowWordShift) & WORD_MASK) >>> 0;
+  return Math.fround(Math.fround(high) + Math.fround(Math.fround(low) * Math.fround(2 ** -32)));
+}
+
+/** Mirrors the GPU predicate without materialising every fixed-point limb. */
+export function gpuReferenceEscapedFixed(x: bigint, y: bigint, limbs: number): boolean {
+  const context = packingContext(limbs);
+  const ax = gpuApproximationFixed(x, context), ay = gpuApproximationFixed(y, context);
+  return Math.fround(Math.fround(ax * ax) + Math.fround(ay * ay)) > 256;
+}
+
+function writeComponent(target: Float32Array, offset: number, value: bigint, context: PackingContext): void {
+  // Every sample region is written once in a newly zeroed Float32Array.
+  if (value === 0n) return;
+  const magnitude = value < 0n ? -value : value;
+  const bits = magnitude.toString(2).length;
+  const sign = value < 0n ? -1 : 1;
+  for (let index = 0; index < 4; index++) {
+    const shift = bits - 24 * (index + 1);
+    const chunk = (shift >= 0 ? magnitude >> BigInt(shift) : magnitude << BigInt(-shift)) & 0xffffffn;
+    target[offset + index] = sign * Number(chunk) * QUAD_SCALES[index];
+  }
+  target[offset + 4] = bits - 1 - context.fractionalBits;
+}
+
+/** Test-facing wrapper around the allocation-free production packer. */
+export function fixedBigIntToQuad(value: bigint, limbs: number): Float32Array {
+  const packed = new Float32Array(5);
+  writeComponent(packed, 0, value, packingContext(limbs));
+  return packed;
 }
 
 function writeSample(
@@ -47,14 +93,18 @@ function writeSample(
   index: number,
   value: FixedComplex,
   initial: FixedComplex,
-  limbs: number,
-): { x: Uint32Array; y: Uint32Array } {
+  context: PackingContext,
+  relativeIsAbsolute: boolean,
+): void {
   const offset = index * SAMPLE_FLOATS;
-  const x = writeComponent(target, offset, value.x, limbs);
-  const y = writeComponent(target, offset + 5, value.y, limbs);
-  writeComponent(target, offset + 10, subFixed(value.x, initial.x, limbs), limbs);
-  writeComponent(target, offset + 15, subFixed(value.y, initial.y, limbs), limbs);
-  return { x, y };
+  writeComponent(target, offset, value.x, context);
+  writeComponent(target, offset + 5, value.y, context);
+  if (relativeIsAbsolute) {
+    if (value.x !== 0n || value.y !== 0n) target.copyWithin(offset + 10, offset, offset + 10);
+  } else {
+    writeComponent(target, offset + 10, subFixed(value.x, initial.x, context.limbs), context);
+    writeComponent(target, offset + 15, subFixed(value.y, initial.y, context.limbs), context);
+  }
 }
 
 /**
@@ -69,6 +119,7 @@ export function generatePackedReference(input: ReferenceOrbitInput, onStage?: (s
   }
   const { limbs } = input;
   const julia = input.family === "julia";
+  const context = packingContext(limbs);
   const initial: FixedComplex = {
     x: fromLimbs(parseFixed(julia ? input.centerX : "0", limbs), limbs),
     y: fromLimbs(parseFixed(julia ? input.centerY : "0", limbs), limbs),
@@ -79,8 +130,10 @@ export function generatePackedReference(input: ReferenceOrbitInput, onStage?: (s
   };
   const packed = new Float32Array((input.maxIterations + 1) * SAMPLE_FLOATS);
   // GPU sample zero is the absolute initial state plus ten zero relative words.
-  writeComponent(packed, 0, initial.x, limbs);
-  writeComponent(packed, 5, initial.y, limbs);
+  if (julia) {
+    writeComponent(packed, 0, initial.x, context);
+    writeComponent(packed, 5, initial.y, context);
+  }
 
   let z = initial, length = 1, escaped = false, escapeIndex = 0, iteration = 0;
   let reportedGeneration = false, reportedPacking = false;
@@ -93,18 +146,20 @@ export function generatePackedReference(input: ReferenceOrbitInput, onStage?: (s
       batch.push({ index: iteration, value: z });
       // Preserve GPU ordering: the sample is logically emitted before this
       // f32 predicate. Physical packing follows in the bounded batch below.
-      if (gpuReferenceEscaped(toLimbs(z.x, limbs), toLimbs(z.y, limbs), limbs)) {
+      const ax = gpuApproximationFixed(z.x, context), ay = gpuApproximationFixed(z.y, context);
+      if (Math.fround(Math.fround(ax * ax) + Math.fround(ay * ay)) > 256) {
         escaped = true; escapeIndex = iteration;
       }
     }
     if (!reportedPacking) { reportedPacking = true; onStage?.("packing"); }
     for (const sample of batch) {
-      writeSample(packed, sample.index, sample.value, initial, limbs);
+      writeSample(packed, sample.index, sample.value, initial, context, !julia);
       length = sample.index + 1;
     }
   }
   const byteLength = length * SAMPLE_FLOATS * Float32Array.BYTES_PER_ELEMENT;
-  return { buffer: packed.buffer.slice(0, byteLength), length, escaped, escapeIndex };
+  const buffer = byteLength === packed.byteLength ? packed.buffer : packed.buffer.slice(0, byteLength);
+  return { buffer, length, escaped, escapeIndex };
 }
 
 export const REFERENCE_SAMPLE_FLOATS = SAMPLE_FLOATS;
