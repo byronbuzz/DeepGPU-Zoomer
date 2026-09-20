@@ -12,10 +12,21 @@ const check=(name,pass,detail)=>{checks.push({name,pass,detail});console.log(`${
 const app=(fn,arg)=>page.evaluate(fn,arg);
 const status=()=>app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.status();});
 const snapshot=()=>app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
+const canvasFocus=()=>page.locator('#fractal').evaluate(node=>({focused:document.activeElement===node,focusVisible:node.matches(':focus-visible'),outlineStyle:getComputedStyle(node).outlineStyle,outlineWidth:getComputedStyle(node).outlineWidth,outlineColor:getComputedStyle(node).outlineColor}));
 const settle=async()=>{const started=Date.now();for(;;){const s=await status();if(s.error)throw Error(s.error);if(!s.busy&&!s.dirty&&s.quality===1&&s.progress?.complete)return s;if(Date.now()-started>120000)throw Error('settle timeout');await page.waitForTimeout(50);}};
 
 try{
   await page.goto(base);await app(()=>localStorage.clear());await page.goto(base);await page.waitForFunction(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;return !!a.testing?.engine;});await settle();
+  const initialFocus=await canvasFocus();check('initial canvas has no viewport outline',initialFocus.outlineStyle==='none',initialFocus);
+  const pointerSpan=(await snapshot()).span;await page.mouse.move(300,300);await page.mouse.down();await page.waitForTimeout(120);const pointerDuring=await canvasFocus();await page.mouse.up();await settle();const pointerAfter=await canvasFocus();
+  check('pointer zoom focuses the canvas without a viewport outline',(await snapshot()).span!==pointerSpan&&pointerDuring.focused&&pointerDuring.outlineStyle==='none'&&pointerAfter.outlineStyle==='none',{pointerDuring,pointerAfter});
+  await page.screenshot({path:path.join(output,'canvas-pointer-zoom.png')});
+  await page.locator('#reset').click();await settle();const homeFocus=await canvasFocus();check('Home leaves no canvas viewport outline',homeFocus.outlineStyle==='none',homeFocus);
+  const keyboardSpan=(await snapshot()).span;await page.locator('#fractal').focus();await page.keyboard.down('+');await page.waitForTimeout(120);const keyboardDuring=await canvasFocus();await page.keyboard.up('+');await settle();
+  check('keyboard zoom works without a canvas viewport outline',(await snapshot()).span!==keyboardSpan&&keyboardDuring.focused&&keyboardDuring.outlineStyle==='none',{keyboardDuring});
+  await page.screenshot({path:path.join(output,'canvas-keyboard-zoom.png')});
+  await page.locator('#reset').click();await settle();await page.keyboard.press('Tab');await page.keyboard.press('Shift+Tab');const buttonFocus=await page.locator('#reset').evaluate(node=>({active:document.activeElement===node,focusVisible:node.matches(':focus-visible'),outlineStyle:getComputedStyle(node).outlineStyle,outlineWidth:getComputedStyle(node).outlineWidth}));await page.keyboard.press('Tab');await page.keyboard.press('Tab');const inputFocus=await page.locator('#location-name').evaluate(node=>({active:document.activeElement===node,focusVisible:node.matches(':focus-visible'),outlineStyle:getComputedStyle(node).outlineStyle,outlineWidth:getComputedStyle(node).outlineWidth}));
+  check('button and input keyboard focus indicators remain visible',buttonFocus.active&&buttonFocus.focusVisible&&buttonFocus.outlineStyle!=='none'&&buttonFocus.outlineWidth!=='0px'&&inputFocus.active&&inputFocus.focusVisible&&inputFocus.outlineStyle!=='none'&&inputFocus.outlineWidth!=='0px',{buttonFocus,inputFocus});
   const save=async name=>{await page.locator('#location-name').fill(name);await page.locator('#save').click();};
   await save('First timer');await page.waitForTimeout(1800);await save('Fresh timer');await page.waitForTimeout(1500);
   check('successive saves replace the old dismissal timer',await page.locator('#message').innerText()==='Location saved on this browser.');
