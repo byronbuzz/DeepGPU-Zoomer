@@ -1,6 +1,7 @@
 /**
- * WebGPU rendering path: arbitrary-precision reference orbit on the GPU, then
- * a perturbation compute pass whose per-pixel deltas carry their own exponent.
+ * WebGPU rendering path: arbitrary-precision reference orbit in a dedicated
+ * CPU worker, then a perturbation compute pass whose per-pixel deltas carry
+ * their own exponent.
  *
  * Unlike the WebGL path there is no f32 underflow floor, so zoom depth is
  * bounded by the precision profile (limb count) rather than by the renderer.
@@ -9,9 +10,6 @@
 import Decimal from "decimal.js";
 import { compileShader, readBuffer, storageBuffer, type GpuContext } from "../gpu/device";
 import { GpuTiming, type TimingSample } from "../gpu/timing";
-import bigfixedSource from "../gpu/shaders/bigfixed.wgsl?raw";
-import orbitBindings from "../gpu/shaders/orbit-bindings.wgsl?raw";
-import orbitSource from "../gpu/shaders/orbit.wgsl?raw";
 import compensatedSource from "../arithmetic/compensated.wgsl?raw";
 import quadSource from "../arithmetic/quad.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
@@ -22,8 +20,10 @@ export const ANTIALIAS_SHADER=antialiasSource;
 import { createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
-import { fixedToQuad, splitQuad } from "../arithmetic/quad";
+import { splitQuad } from "../arithmetic/quad";
 import { reprojectionFor } from "./reprojection";
+import { ReferenceWorkerClient } from "./reference-worker-client";
+import type { ReferenceOrbitInput } from "./reference-orbit";
 
 /**
  * Hands control back to the event loop for one turn. setTimeout is clamped to
@@ -42,37 +42,12 @@ function yieldToEvents(): Promise<void> {
 /** No scaling, no offset: show the frame exactly as rendered. */
 const IDENTITY_XFORM = new Float32Array([1, 1, 0, 0]);
 import { hexToRgb, MAX_STOPS, stopPositions, needsEndpoints, type ColorSettings } from "../logic/colorSettings";
-import { parseFixed } from "../arithmetic/types";
 import { BASE_STEP, ENTRY_FLOATS, buildBlaAsync } from "./bla";
-
-const orbitModule = [orbitBindings, bigfixedSource, orbitSource].join("\n");
 
 /** Precision profiles, chosen from the zoom depth. */
 const LIMB_PROFILES = [8, 16, 32, 64, 128, 256] as const;
-
-/**
- * Reference-orbit iterations per dispatch. Each batch costs one small status
- * readback, so larger batches mean fewer CPU round trips; keep it bounded so a
- * single submission stays responsive.
- */
-const ORBIT_BATCH = 256;
-
-/**
- * Dispatches encoded into one submission. Bounded so a single submission stays
- * short enough not to trip a device watchdog on a slow GPU.
- */
-const DISPATCHES_PER_SUBMIT = 2;
-
-/**
- * How long one submission should aim to take.
- *
- * A GPU command that runs too long is killed by the driver's watchdog, which
- * takes the WebGPU device and the tab with it. The work per submission is not
- * predictable in advance -- it scales with the limb count, the iteration
- * count and the hardware -- so both loops below measure what they just did
- * and size the next piece from it.
- */
 const SUBMIT_BUDGET_MS = 8;
+
 // 64K expensive samples measured >120ms; 16K preserved presentation cadence.
 // Grow cheap batches from measured cost, without changing policy on release.
 const MIN_BATCH_SAMPLES = 16_384;
@@ -183,9 +158,25 @@ export function limbsForScale(unitsPerPixel: Decimal, mantissaBits = 48): number
 }
 
 /** Splits a Decimal into an f32 mantissa and a binary exponent. */
+export function binaryExponent(value: Decimal): number {
+  const magnitude = value.abs();
+  const decimalExponent = magnitude.e;
+  const leading = magnitude
+    .div(new Decimal(10).pow(decimalExponent))
+    .toSignificantDigits(16)
+    .toNumber();
+  let exponent = Math.floor(Math.log2(leading) + decimalExponent * Math.LOG2E * Math.LN10);
+  let power = new Decimal(2).pow(exponent);
+  if (magnitude.lt(power)) {
+    exponent--;
+    power = power.div(2);
+  }
+  if (magnitude.gte(power.times(2))) exponent++;
+  return exponent;
+}
 function splitExponent(value: Decimal): { mantissa: number; exponent: number } {
   if (value.isZero()) return { mantissa: 0, exponent: 0 };
-  const exponent = Math.floor(Number(value.abs().log(2).toFixed(6)));
+  const exponent = binaryExponent(value);
   const mantissa = Number(value.div(new Decimal(2).pow(exponent)).toFixed(12));
   return { mantissa, exponent };
 }
@@ -197,7 +188,7 @@ function splitExponent(value: Decimal): { mantissa: number; exponent: number } {
 function splitComplex(x: Decimal, y: Decimal) {
   const magnitude = Decimal.max(x.abs(), y.abs());
   if (magnitude.isZero()) return { x: 0, y: 0, exponent: 0 };
-  const exponent = Math.floor(Number(magnitude.log(2).toFixed(6)));
+  const exponent = binaryExponent(magnitude);
   const divisor = new Decimal(2).pow(exponent);
   return {
     x: Number(x.div(divisor).toFixed(12)),
@@ -206,8 +197,11 @@ function splitComplex(x: Decimal, y: Decimal) {
   };
 }
 
-function scratchWords(limbs: number): number {
-  return 7 * limbs + 2 * limbs * 3;
+interface ReferenceDemand {
+  input: ReferenceOrbitInput;
+  centerX: Decimal;
+  centerY: Decimal;
+  followView: boolean;
 }
 
 async function readTexturePoints(device:GPUDevice,texture:GPUTexture,size:{width:number;height:number},points:[number,number][]):Promise<number[][]>{
@@ -230,7 +224,6 @@ export class WebGpuRenderer {
   private context: GPUCanvasContext;
   private format: GPUTextureFormat;
 
-  private orbitPipelines = new Map<string, Promise<GPUComputePipeline>>();
   private pipelineWaitMs = 0;
   private renderPipeline: GPUComputePipeline | null = null;
   private directPipeline: GPUComputePipeline | null = null;
@@ -316,6 +309,7 @@ export class WebGpuRenderer {
       regions: this.partialRegions, firstPublicationAt: this.firstPartialAt, lastPublicationAt: this.lastPartialAt,
       active: !!this.incomingFrame, complete, percentage, exactCompletedSamples:this.exactCompletedSamples, exactTotalSamples:this.exactTotalSamples,
       referencePreparing:this.referencePreparing, finalizing:this.finalizing, calculationSubmissions:this.calculationSubmissions, orbitSubmissions:this.orbitSubmissions, antialiasPasses:this.antialiasPasses,
+      referenceWorkerActive:this.referenceWorker.active,
       pending: this.pending.size, targets: this.streamTargets, latestRegion: this.latestRegion,
       width: this.fieldView?.width ?? 0, height: this.fieldView?.height ?? 0 };
   }
@@ -350,6 +344,8 @@ export class WebGpuRenderer {
   private statsBuffer: GPUBuffer;
   private orbitBuffer: GPUBuffer | null = null;
   private orbitCapacity = 0;
+  private referenceWorker = new ReferenceWorkerClient();
+  private pendingReferenceDemand: ReferenceDemand | null = null;
 
   /** Cached reference orbit: regenerating it per frame would kill panning. */
   private refX = new Decimal(0);
@@ -359,6 +355,7 @@ export class WebGpuRenderer {
   private refLength = 0;
   private refEscaped = false;
   private refValid = false;
+  private refSamples: Float32Array | null = null;
   private refFamily = "";
   private refConstant = "";
 
@@ -542,148 +539,83 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.antialiasPipeline=device.createRenderPipeline({label:'completed-image-antialias',layout:'auto',vertex:{module:antialiasModule,entryPoint:'vs'},fragment:{module:antialiasModule,entryPoint:'fs',targets:[{format:'rgba8unorm-srgb'}]},primitive:{topology:'triangle-strip'}});
   }
 
-  private orbitPipeline(limbs: number, sampleWords: number): Promise<GPUComputePipeline> {
-    const key = `${limbs}:${sampleWords}`;
-    const cached = this.orbitPipelines.get(key);
-    if (cached) return cached;
-    // The module compiled cleanly during the self-test, so plain creation is
-    // safe here; errors would already have surfaced at init.
-    const module = this.ctx.device.createShaderModule({
-      label: `orbit-${limbs}`,
-      code: orbitModule,
-    });
-    const pipeline = this.ctx.device.createComputePipelineAsync({
-      label: `orbit-${limbs}`,
-      layout: "auto",
-      compute: { module, entryPoint: "advanceOrbit", constants: { LIMBS: limbs, SAMPLE_WORDS: sampleWords } },
-    });
-    this.orbitPipelines.set(key, pipeline);
-    return pipeline;
+  private referenceDemand(request: RenderRequest, limbs: number): ReferenceDemand {
+    const family = request.family ?? "mandelbrot";
+    return {
+      centerX: request.centerX,
+      centerY: request.centerY,
+      followView: !!request.followView,
+      input: {
+        family,
+        centerX: request.centerX.toFixed(), centerY: request.centerY.toFixed(),
+        juliaX: request.juliaX?.toFixed() ?? "0", juliaY: request.juliaY?.toFixed() ?? "0",
+        limbs, maxIterations: request.maxIterations,
+      },
+    };
   }
 
-  /** Generates the reference orbit at the view centre, entirely on the GPU. */
+  private referenceDemandCompatible(demand: ReferenceDemand, request: RenderRequest): boolean {
+    const method = request.forceMethod ?? methodForScale(request.unitsPerPixel);
+    if (method === Method.Direct) return false;
+    const family = request.family ?? "mandelbrot";
+    if (family !== demand.input.family || request.maxIterations > demand.input.maxIterations) return false;
+    if (family === "julia" &&
+        (request.juliaX?.toFixed() !== demand.input.juliaX || request.juliaY?.toFixed() !== demand.input.juliaY)) return false;
+    let limbs: number;
+    try { limbs = limbsForScale(request.unitsPerPixel, 96); }
+    catch { return false; }
+    if (limbs !== demand.input.limbs) return false;
+    const halfSpan = request.unitsPerPixel.times(Math.min(request.width, request.height) / 2);
+    const drift = request.centerX.minus(demand.centerX).abs().plus(request.centerY.minus(demand.centerY).abs());
+    return drift.lessThanOrEqualTo(halfSpan.times(0.5));
+  }
+
+  private cancelPendingReference(message: string) {
+    if (!this.pendingReferenceDemand && !this.referenceWorker.active) return;
+    this.pendingReferenceDemand = null;
+    this.referenceWorker.cancel(message);
+  }
+
+  /** Generates and transfers the packed reference in one persistent worker. */
   private async generateOrbit(
     request: RenderRequest,
     limbs: number
-  ): Promise<{ length: number; escaped: boolean; ms: number }> {
-    const { device } = this.ctx;
-    const started = performance.now();
-    const maxSamples = request.maxIterations + 1;
-
-    this.ensureOrbitCapacity(maxSamples);
-
-    const julia = request.family === "julia";
-    const pipelineStarted = performance.now();
-    const pipeline = await this.orbitPipeline(limbs, 20);
-    this.pipelineWaitMs = performance.now() - pipelineStarted;
-    const state = storageBuffer(device, limbs * 2, "orbit-state");
-    const seed = storageBuffer(device, limbs * 4, "orbit-seed");
-    const scratch = storageBuffer(device, scratchWords(limbs), "orbit-scratch");
-    const status = storageBuffer(device, 4, "orbit-status", GPUBufferUsage.COPY_SRC);
-    const params = device.createBuffer({
-      size: 16,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-
-    const initialX = parseFixed(julia ? request.centerX.toFixed() : "0",limbs);
-    const initialY = parseFixed(julia ? request.centerY.toFixed() : "0",limbs);
-    const seedData = new Uint32Array(limbs*4);
-    seedData.set(parseFixed((julia ? request.juliaX! : request.centerX).toFixed(),limbs));
-    seedData.set(parseFixed((julia ? request.juliaY! : request.centerY).toFixed(),limbs),limbs);
-    seedData.set(initialX,limbs*2); seedData.set(initialY,limbs*3);
-    device.queue.writeBuffer(seed,0,seedData);
-    const initial = new Uint32Array(limbs*2);initial.set(initialX);initial.set(initialY,limbs);
-    device.queue.writeBuffer(state,0,initial);
-    device.queue.writeBuffer(this.orbitBuffer!, 0, new Float32Array([
-      ...fixedToQuad(initialX, limbs), ...fixedToQuad(initialY, limbs), ...Array(10).fill(0),
-    ]));
-
-    const bind = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: state } },
-        { binding: 1, resource: { buffer: seed } },
-        { binding: 2, resource: { buffer: scratch } },
-        { binding: 3, resource: { buffer: this.orbitBuffer! } },
-        { binding: 4, resource: { buffer: status } },
-        { binding: 5, resource: { buffer: params } },
-      ],
-    });
-
-    // `sampleCount` counts written samples; sample 0 comes from the CPU.
-    // The shader emits at `startIndex + iter + 1`, so startIndex must be the
-    // index of the last sample already written, i.e. sampleCount - 1. Passing
-    // the count itself skips one sample per batch and shifts all the rest.
-    // Sample 0 is zero for Mandelbrot and the view centre for Julia.
-    device.queue.writeBuffer(status, 0, new Uint32Array([1, 0, 0, 0]));
-    device.queue.writeBuffer(
-      params,
-      0,
-      new Uint32Array([ORBIT_BATCH, 0, maxSamples, 0])
-    );
-
-    let sampleCount = 1;
-    let escaped = false;
-    let batchLimit = DISPATCHES_PER_SUBMIT;
-
-    while (sampleCount - 1 < request.maxIterations) {
-      if (request.isCurrent && !request.isCurrent()) {
-        [state,seed,scratch,status,params].forEach(b=>b.destroy());
-        throw new DOMException("Superseded", "AbortError");
-      }
-      const remaining = request.maxIterations - (sampleCount - 1);
-      const dispatches = Math.min(
-        batchLimit,
-        Math.max(1, Math.ceil(remaining / ORBIT_BATCH))
-      );
-      const batchStarted = performance.now();
-
-      // Many dispatches per submission. Each readback is a full pipeline
-      // flush, and one per 512 iterations meant hundreds of stalls on a deep
-      // view — that is what made the page freeze. The shader resumes from the
-      // status buffer, so a whole run can be encoded at once.
-      const encoder = device.createCommandEncoder();
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, bind);
-      for (let i = 0; i < dispatches; i++) pass.dispatchWorkgroups(1);
-      pass.end();
-      device.queue.submit([encoder.finish()]);this.orbitSubmissions++;
-
-      // Only the 4-word status comes back; the big state never leaves the GPU.
-      const raw = new Uint32Array(await readBuffer(device, status, 16));
-
-      // Aim the next submission at the budget. A deep view at a high limb
-      // count can take milliseconds per dispatch, and 24 of those in one
-      // command is long enough for the driver to give up on the device.
-      const elapsed = performance.now() - batchStarted;
-      if (elapsed > SUBMIT_BUDGET_MS * 1.5) {
-        batchLimit = Math.max(1, Math.floor(batchLimit / 2));
-      } else if (elapsed < SUBMIT_BUDGET_MS * 0.5) {
-        batchLimit = Math.min(DISPATCHES_PER_SUBMIT, batchLimit * 2);
-      }
-      if (raw[0] <= sampleCount) break; // no progress: escaped or done
-      sampleCount = Math.min(raw[0], maxSamples);
-      if (raw[1] === 1) {
-        escaped = true;
-        break;
-      }
+  ): Promise<{ length: number; escaped: boolean; ms: number; samples: Float32Array }> {
+    const started = performance.now(), demand = this.referenceDemand(request, limbs);
+    const requestedBytes=(request.maxIterations+1)*20*Float32Array.BYTES_PER_ELEMENT;
+    if(requestedBytes>Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize)) {
+      throw new Error("The reference orbit exceeds this GPU's buffer capacity.");
     }
-
-    [state, seed, scratch, status, params].forEach((b) => b.destroy());
-    return {
-      length: Math.max(2, sampleCount),
-      escaped,
-      ms: performance.now() - started,
-    };
+    this.pendingReferenceDemand = demand;
+    this.pipelineWaitMs = 0;
+    try {
+      const orbit = await this.referenceWorker.generate(demand.input);
+      const live = demand.followView ? this.currentView ?? request : request;
+      if (this.pendingReferenceDemand !== demand || request.isCurrent && !request.isCurrent() || !this.referenceDemandCompatible(demand, live)) {
+        throw new DOMException("Superseded reference", "AbortError");
+      }
+      const samples = new Float32Array(orbit.buffer);
+      if (samples.length !== orbit.length * 20) throw new Error("Reference worker returned an invalid sample buffer");
+      let target=this.orbitBuffer,replacement:GPUBuffer|null=null;
+      if(!target||this.orbitCapacity<orbit.length){
+        replacement=storageBuffer(this.ctx.device,orbit.length*20,"reference-orbit",GPUBufferUsage.COPY_SRC);
+        target=replacement;
+      }
+      try{this.ctx.device.queue.writeBuffer(target,0,samples);}
+      catch(error){replacement?.destroy();throw error;}
+      if(replacement){const previous=this.orbitBuffer;this.orbitBuffer=replacement;this.orbitCapacity=orbit.length;previous?.destroy();}
+      return { length: orbit.length, escaped: orbit.escaped, ms: performance.now() - started, samples };
+    } finally {
+      if (this.pendingReferenceDemand === demand) this.pendingReferenceDemand = null;
+    }
   }
 
   /**
    * Builds the linear-approximation table from the freshly generated orbit.
    *
-   * This is the one place the reduced orbit comes back to the CPU — once per
-   * orbit, not per frame. The table then lets each pixel jump whole ranges of
-   * reference iterations instead of stepping through them.
+   * The transferred CPU orbit remains available for this one table build per
+   * reference. The table then lets each pixel jump whole ranges of reference
+   * iterations instead of stepping through them.
    */
   private async buildApproxTable(request: RenderRequest) {
     const { device } = this.ctx;
@@ -696,7 +628,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       .plus(request.centerY.minus(this.refY).abs())
       .toNumber();
 
-    const samples = new Float32Array(await readBuffer(device, this.orbitBuffer!, this.refLength * 20 * 4));
+    const samples = this.refSamples;
+    if (!samples || samples.length !== this.refLength * 20) {
+      throw new Error("The CPU reference orbit is unavailable for approximation");
+    }
     const table = await buildBlaAsync(samples, this.refLength, halfDiagonal, async()=>{
       await yieldToEvents();
       if(this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException("Superseded table","AbortError");
@@ -976,10 +911,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    */
   abort() {
     this.abortRequested = true;
+    this.cancelPendingReference("Reference generation aborted");
   }
 
   reproject(request: RenderRequest): boolean {
     this.currentView = request;
+    if (this.pendingReferenceDemand?.followView && !this.referenceDemandCompatible(this.pendingReferenceDemand, request)) {
+      this.cancelPendingReference("Reference demand changed");
+    }
     const aa=!!(this.historyValid&&request.colors.postAntialias&&this.antialiasFrame&&this.antialiasTexture&&this.sameView(this.antialiasFrame,request)&&JSON.stringify(this.antialiasFrame.colors)===JSON.stringify(request.colors));
     const last = aa ? this.antialiasFrame : this.historyValid ? this.lastFrame : this.incomingFrame;
     const source = aa ? this.antialiasTexture : this.historyValid ? this.history : this.target;
@@ -1009,7 +948,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   invalidateHistory() {
-    this.publicationEpoch++; this.historyValid=false; this.refValid=false;
+    this.publicationEpoch++; this.historyValid=false; this.refValid=false; this.refSamples=null;
     this.incomingFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
@@ -1193,22 +1132,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.pipelineWaitMs = 0;
     this.tableMs = 0;
     if (method !== Method.Direct && stale) {
-      this.refFamily=family; this.refConstant=constant;
-      this.refX = request.centerX;
-      this.refY = request.centerY;
-      const orbit = await this.generateOrbit(request, limbs);
-      if (!request.isCurrent!()) { this.refValid=false; throw new DOMException("Superseded reference", "AbortError"); }
-      this.refLimbs = limbs;
-      this.refIterations = request.maxIterations;
-      this.refLength = orbit.length;
-      this.refEscaped = orbit.escaped;
-      this.refValid = true;
-      drift = new Decimal(0);
-      orbitMs = orbit.ms;
-      this.tableMs = 0;
-      this.laLevels=0;
-      this.tableMaxDelta=-1;
-      if (method === Method.Hdr && family === "mandelbrot" && request.useApprox!==false && request.colors.mode===0) await this.buildApproxTable(request);
+      try {
+        const orbit = await this.generateOrbit(request, limbs);
+        if (!request.isCurrent!()) throw new DOMException("Superseded reference", "AbortError");
+        // Publish payload identity only after the transferred buffer is
+        // accepted and queued for upload. No stale centre can describe old data.
+        this.refFamily=family; this.refConstant=constant;
+        this.refX = request.centerX; this.refY = request.centerY;
+        this.refLimbs = limbs; this.refIterations = request.maxIterations;
+        this.refLength = orbit.length; this.refEscaped = orbit.escaped;
+        this.refSamples = orbit.samples; this.refValid = true;
+        drift = new Decimal(0); orbitMs = orbit.ms;
+        this.tableMs = 0; this.laLevels=0; this.tableMaxDelta=-1;
+        if (method === Method.Hdr && family === "mandelbrot" && request.useApprox!==false && request.colors.mode===0) await this.buildApproxTable(request);
+      } catch (error) {
+        this.referencePreparing=false;
+        throw error;
+      }
     }
     // Reversal/overscan can need a larger delta domain without needing a new
     // orbit. Rebuild the inexpensive table for that domain instead of silently

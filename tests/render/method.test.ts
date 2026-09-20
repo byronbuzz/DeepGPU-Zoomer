@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
 import Decimal from "decimal.js";
-import { Method, methodForScale, limbsForScale } from "../../src/render/webgpu-renderer";
+import { binaryExponent, Method, methodForScale, limbsForScale } from "../../src/render/webgpu-renderer";
 
 const upp = (span: string, height = 1080) => new Decimal(span).div(height);
 
 describe("methodForScale", () => {
+  it("normalises exact powers of two and adjacent values at ordinary and upper profiles", () => {
+    Decimal.set({ precision: 2600 });
+    for (const exponent of [-10, -3953]) {
+      const power = new Decimal(2).pow(exponent), epsilon = new Decimal(10).pow(-100);
+      expect(binaryExponent(power)).toBe(exponent);
+      expect(binaryExponent(power.times(new Decimal(1).minus(epsilon)))).toBe(exponent-1);
+      expect(binaryExponent(power.times(new Decimal(1).plus(epsilon)))).toBe(exponent);
+    }
+  });
   it("keeps enough reference bits for the selected pixel mantissa", () => {
     const spacing = new Decimal("1e-40");
     expect(limbsForScale(spacing)).toBe(8);

@@ -203,7 +203,8 @@ function tick(time:number){
       engine.reproject(request());
       // Give the latest preview one turn between main jobs, without awaiting it.
       // Both renderers keep at most one bounded numerical region in the queue.
-      if(!busy&&!previewBusy&&previewPending)void computeJuliaPreview();
+      const referenceWorkerWaiting=busy&&engine.debugProgress().referenceWorkerActive;
+      if((!busy||referenceWorkerWaiting)&&!previewBusy&&previewPending)void computeJuliaPreview();
       if(dirty&&!busy)void compute();
     }
     if(time-statusTime>250){statusTime=time;const mean=frameTimes.reduce((a,b)=>a+b,0)/Math.max(1,frameTimes.length);cadence.textContent=`Presentation ${Math.round(1000/mean)||0} Hz`;
@@ -290,7 +291,7 @@ export const ready=(async()=>{
   load({...HOME,appearance:validateColors(rememberedAppearance)},false);
   el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');
   resize();requestAnimationFrame(tick);
-  try{const ctx=await acquireGpu();gpuContext=ctx;measurePreview();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
+  try{const ctx=await acquireGpu();gpuContext=ctx;measurePreview();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
   catch(e){error=String(e);message(error);throw e;}
 })();
 // Development-only access exercises the displayed app and its real field.
