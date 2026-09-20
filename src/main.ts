@@ -257,7 +257,7 @@ el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSel
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
-const paletteController=setupPaletteEditor(()=>colors,c=>{colors=c;dirty=true;freshness.textContent='Preparing current view';if(previewEnabled)queuePreview();clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
+const paletteController=setupPaletteEditor(()=>colors,c=>{colors=c;generation++;engine?.abort();dirty=true;freshness.textContent='Preparing current view';if(previewEnabled)queuePreview();clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
 syncAppearance=paletteController.sync;
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);

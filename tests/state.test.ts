@@ -44,6 +44,15 @@ describe('exact view state',()=>{
       expect(decodeColors(encodeColors({...DEFAULT_COLORS,cycle:value}))?.cycle).toBe(value);
     }
   });
+  it('roundtrips the expanded relief range and rejects invalid live values',()=>{
+    const maximum=validateColors({...DEFAULT_COLORS,slopeDepth:80});
+    expect(decodeColors(encodeColors(maximum))?.slopeDepth).toBe(80);
+    const oversized=encodeColors(maximum).split('.');oversized[11]='9000';
+    expect(decodeColors(oversized.join('.'))?.slopeDepth).toBe(80);
+    expect(decodeColors(encodeColors({...DEFAULT_COLORS,slopeDepth:20}))?.slopeDepth).toBe(20);
+    expect(()=>validateColors({...DEFAULT_COLORS,slopeDepth:80.1})).toThrow();
+    expect(()=>validateColors({...DEFAULT_COLORS,slopeDepth:-.1})).toThrow();
+  });
   it('round trips every coordinate digit, Julia constant and span',()=>{
     const v={...PLACES[4],span:'2.812345678901234567890123456789e-50'};
     expect(decodeView(encodeView(v))).toEqual(validateView(v));

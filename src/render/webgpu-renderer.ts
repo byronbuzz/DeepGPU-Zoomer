@@ -311,7 +311,8 @@ export class WebGpuRenderer {
     const progressCurrent=!!(this.currentView&&this.fieldView&&this.sameView(this.fieldView,this.currentView));
     const complete=!this.referencePreparing&&!!this.currentView&&this.isComplete(this.currentView)&&this.pending.size===0&&!this.incomingFrame&&!this.finalizing;
     const percentage=this.referencePreparing||!progressCurrent?null:complete&&this.exactTotalSamples?100:this.exactTotalSamples?Math.min(99,Math.floor(this.exactCompletedSamples/this.exactTotalSamples*100)):null;
-    return { epoch: this.publicationEpoch, serial: this.partialSerial,
+    let fieldHash=2166136261;for(let i=0;i<this.fieldKey.length;i++){fieldHash^=this.fieldKey.charCodeAt(i);fieldHash=Math.imul(fieldHash,16777619);}
+    return { epoch: this.publicationEpoch, serial: this.partialSerial, fieldIdentity:(fieldHash>>>0).toString(16).padStart(8,'0'),
       regions: this.partialRegions, firstPublicationAt: this.firstPartialAt, lastPublicationAt: this.lastPartialAt,
       active: !!this.incomingFrame, complete, percentage, exactCompletedSamples:this.exactCompletedSamples, exactTotalSamples:this.exactTotalSamples,
       referencePreparing:this.referencePreparing, finalizing:this.finalizing, calculationSubmissions:this.calculationSubmissions, orbitSubmissions:this.orbitSubmissions, antialiasPasses:this.antialiasPasses,
@@ -755,10 +756,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    */
   private ensureHistory(request: RenderRequest) {
     const { width, height } = request;
-    const compatible = (frame: WebGpuRenderer["lastFrame"]) => frame &&
-      frame.family === request.family && frame.maxIterations === request.maxIterations &&
-      (request.family !== "julia" || frame.juliaX?.eq(request.juliaX!) && frame.juliaY?.eq(request.juliaY!)) &&
-      JSON.stringify(frame.colors) === JSON.stringify(request.colors);
+    const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
     const view = this.currentView ?? request;
     const bounds = (frame: FrameView) => {
       const m = reprojectionFor(frame, view);
@@ -897,9 +895,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
-    const matchesView = (frame: WebGpuRenderer["lastFrame"]) => !this.currentView || frame &&
-      frame.family === this.currentView.family && frame.maxIterations === this.currentView.maxIterations &&
-      (frame.family !== "julia" || frame.juliaX?.eq(this.currentView.juliaX!) && frame.juliaY?.eq(this.currentView.juliaY!));
+    const matchesView = (frame: WebGpuRenderer["lastFrame"]) => !this.currentView || this.samePresentation(frame,this.currentView);
     const coverage = source === this.history && this.coverageFrame && matchesView(this.coverageFrame) && this.currentView
       ? reprojectionFor(this.coverageFrame, this.currentView, true) : null;
     const transforms = new Float32Array(24); transforms.set(xform);
@@ -915,8 +911,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       transforms[9] = !front.proxy && !exactStationary && this.coverageFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
     }
     const fresh = this.incomingFrame, view = this.currentView;
-    if (fresh && view && this.target && fresh.family === view.family && fresh.maxIterations === view.maxIterations &&
-        (view.family !== "julia" || fresh.juliaX?.eq(view.juliaX!) && fresh.juliaY?.eq(view.juliaY!))) {
+    if (fresh && view && this.target && this.samePresentation(fresh,view)) {
       const m = reprojectionFor(fresh, view);
       if (m) {
         transforms.set([m.scaleX, m.scaleY, m.offsetX, m.offsetY], 12);
@@ -991,9 +986,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!last || !source || !this.blitPipeline) {
       return false;
     }
-    const compatible = (frame: WebGpuRenderer["lastFrame"]) => frame && frame.family === request.family &&
-      frame.maxIterations === request.maxIterations && (request.family !== "julia" ||
-        frame.juliaX?.eq(request.juliaX!) && frame.juliaY?.eq(request.juliaY!));
+    const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
     const incomingAvailable = compatible(this.incomingFrame) && reprojectionFor(this.incomingFrame!, request);
     if (!compatible(last) && !incomingAvailable) return false;
 
@@ -1035,6 +1028,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
       (request.family!=="julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors)===JSON.stringify(request.colors) && (!request.colors.postAntialias||!!this.antialiasFrame);
+  }
+  private samePresentation(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>): frame is NonNullable<WebGpuRenderer["lastFrame"]> {
+    return !!frame && frame.family === request.family && frame.maxIterations === request.maxIterations &&
+      (request.family !== "julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
+      JSON.stringify(frame.colors) === JSON.stringify(request.colors);
   }
 
   /** Captures only the completed, current 8-bit presentation image. */
@@ -1081,13 +1079,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private retainPartial() {
     const frame = this.incomingFrame;
     if (!frame || !this.target || !this.partialRegions) return;
+    if (this.currentView && !this.samePresentation(frame,this.currentView)) {
+      this.incomingFrame=null;this.partialRegions=0;this.determined=new CoverageRegions();
+      this.determinedRegion=null;this.determinedSpacing=undefined;
+      return;
+    }
     const { device } = this.ctx;
     this.retainedAnchor ??= createSampleGridAnchor(this.lastFrame ?? frame);
     const retained={...frame,...planRetainedView(frame,this.retainedAnchor,{overscan:1})};
     const snapshot = device.createTexture({ label: "retained-progress", size: [retained.width,retained.height],
       format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
     const candidates=[...this.coverageIn({...frame,proxy:true,coveredRegions:this.determined.rectangles.map(r=>({...r,spacing:frame.unitsPerPixel.times(r.spacing??1)}))},retained),...[this.historyValid?this.lastFrame:null,this.coverageFrame].flatMap(
-      old=>old && old.family===frame.family ? this.coverageIn(old,retained) : [])].filter(r=>r!==null);
+      old=>this.samePresentation(old,frame) ? this.coverageIn(old!,retained) : [])].filter(r=>r!==null);
     const covered=candidates.sort((a,b)=>b.width*b.height-a.width*a.height)[0];
     const retainedCoverage=new CoverageRegions();
     for(const c of candidates)retainedCoverage.add({...c,spacing:c.spacing.div(retained.unitsPerPixel).toNumber()});
@@ -1112,7 +1115,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const m = reprojectionFor(request,live);
     const focus = live.focus ?? {x:.5,y:.5};
     const covered = [this.historyValid ? this.lastFrame : null,this.coverageFrame].flatMap(frame => {
-      if (!frame || frame.family !== request.family) return [];
+      if (!this.samePresentation(frame,request)) return [];
       return this.coverageIn(frame,request).map(r=>({...r,spacing:r.spacing.div(request.unitsPerPixel).toNumber()}));
     });
     covered.push(...this.determined.rectangles.map(r=>({...r,spacing:r.spacing??1})));

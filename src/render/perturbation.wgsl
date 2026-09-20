@@ -525,8 +525,8 @@ fn toLinear(c: vec3<f32>) -> vec3<f32> {
  * shading just reads as a surface. The bands flow and fold while zooming
  * because the distance field itself changes, not because the palette scrolls.
  */
-fn shade(hCentre: f32, hRight: f32, hUp: f32) -> vec3<f32> {
-    let base = toLinear(palette(wrapCoordinate(hCentre * u.colorDensity + u.colorPhase)));
+fn shade(baseColour: vec3<f32>, hCentre: f32, hRight: f32, hUp: f32) -> vec3<f32> {
+    let base = toLinear(baseColour);
     if (u.slopeLighting == 0u) { return base; }
 
     let dx = hRight - hCentre;
@@ -706,11 +706,15 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (right.y > 0.0) { hRight = entry.x+(right.x-entry.x)/f32(anchorStep); }
                 if (up.y > 0.0) { hUp = entry.x+(up.x-entry.x)/f32(anchorStep); }
             }
-            if(u.effect!=0u){
-                let endpoint=endpoints[fieldIndex(anchor.x,anchor.y)];
-                accumulated+=toLinear(effectColour(entry.x*u.colorDensity+u.colorPhase,atan2(endpoint.y,endpoint.x),vec2<f32>(hRight-entry.x,hUp-entry.x)*f32(grid)));
+            let endpoint=endpoints[fieldIndex(anchor.x,anchor.y)];
+            let p=formulaCoordinate(endpoint.z,endpoint.w,endpoint.xy);
+            let gradient=vec2<f32>(hRight-entry.x,hUp-entry.x)*f32(grid);
+            let baseColour=effectColour(p,atan2(endpoint.y,endpoint.x),gradient);
+            if(u.effect>=7u&&u.effect<=9u){
+                // These effects already apply their own directional relief.
+                accumulated+=toLinear(baseColour);
             }else { accumulated = accumulated + shade(
-                entry.x,
+                baseColour, entry.x,
                 entry.x + (hRight - entry.x) * f32(grid),
                 entry.x + (hUp - entry.x) * f32(grid)
             ); }

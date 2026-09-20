@@ -137,7 +137,7 @@ export function validateColors(value:unknown):ColorSettings {
   if(positions.length!==c.stops.length||positions.some((p,i)=>!Number.isFinite(p)||p<0||p>1||i>0&&p<positions[i-1]))throw Error('Invalid palette positions');
   c.positions=[...positions];c.locks=c.stops.map((_,i)=>v.locks?.[i]===true);c.repeating=v.repeating!==false;
   for(const [key,max] of [['formula',FORMULAS.length-1],['effect',10],['capped',CAPPED.length-1]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
-  if(![0,1,2].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.gamma<1||c.gamma>4||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
+  if(![0,1,2].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.slopeDepth<0||c.slopeDepth>80||c.gamma<1||c.gamma>4||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
   return c;
 }
 
@@ -260,7 +260,7 @@ export function decodeColors(code: string): ColorSettings | null {
     mode: clamp(number(parts[8], d.mode), 0, COLOR_MODES.length - 1),
     colorDensity: clamp(number(parts[9], d.colorDensity * 1000) / 1000, 0.01, 8),
     colorPhase: clamp(number(parts[10], 0) / 1000, 0, 1),
-    slopeDepth: clamp(number(parts[11], d.slopeDepth * 100) / 100, 0, 20),
+    slopeDepth: clamp(number(parts[11], d.slopeDepth * 100) / 100, 0, 80),
     lightAngle: number(parts[12], d.lightAngle) % 360,
     lightElevation: clamp(number(parts[13], d.lightElevation), 0, 90),
     ambientLight: clamp(number(parts[14], d.ambientLight * 100) / 100, 0, 2),
