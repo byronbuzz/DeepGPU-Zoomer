@@ -53,13 +53,13 @@ const LIMB_PROFILES = [8, 16, 32, 64, 128, 256] as const;
  * readback, so larger batches mean fewer CPU round trips; keep it bounded so a
  * single submission stays responsive.
  */
-const ORBIT_BATCH = 128;
+const ORBIT_BATCH = 256;
 
 /**
  * Dispatches encoded into one submission. Bounded so a single submission stays
  * short enough not to trip a device watchdog on a slow GPU.
  */
-const DISPATCHES_PER_SUBMIT = 4;
+const DISPATCHES_PER_SUBMIT = 2;
 
 /**
  * How long one submission should aim to take.
