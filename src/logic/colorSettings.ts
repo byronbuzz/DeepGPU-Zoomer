@@ -35,6 +35,8 @@ export interface ColorSettings {
   formula?: number;
   effect?: number;
   capped?: number;
+  /** Completed-image presentation filter. Never changes the numerical field. */
+  postAntialias?: boolean;
 
   // --- distance-estimation colouring ---
   /** Palette cycles per octave of the distance field. */
@@ -85,12 +87,34 @@ export const DEFAULT_COLORS: ColorSettings = {
   slopeLighting: true,
   supersample: 1,
   gamma: 2.2,
+  postAntialias: false,
 };
 
-export const FORMULAS=['Smooth escape','Classic iteration bands','Binary decomposition','Colour decomposition','Biomorphs'];
+/** IDs 0–4 are the released mappings and must remain stable in saved views. */
+export const FORMULAS=[
+  'Smooth escape',
+  'Classic iteration bands',
+  'Binary decomposition',
+  'Colour decomposition',
+  'Biomorphs',
+  'Final endpoint angle',
+  'Final endpoint radius',
+  'Final endpoint real bands',
+  'Final endpoint imaginary bands',
+  'Final endpoint checker',
+  'Final endpoint log-polar weave',
+  'Fractional escape bands',
+  'Escape parity',
+  'Triangular escape wave',
+  'Golden phase bands',
+] as const;
 export const EFFECTS=['None','Contour Ink','Terraces','Fluted Ridges','Interference','Phase Weave','Neon Filaments','Pearl Relief','Brushed Relief','Engraved Relief','Depth Mist'];
 export function stopPositions(c:ColorSettings){return c.positions??c.stops.map((_,i)=>i/(c.repeating===false?c.stops.length-1:c.stops.length));}
-export function needsEndpoints(c:ColorSettings){return (c.formula??0)>=2||c.effect===5||c.capped===1;}
+const ENDPOINT_FORMULAS = new Set([2,3,4,5,6,7,8,9,10]);
+export function needsEndpoints(c:ColorSettings){return ENDPOINT_FORMULAS.has(c.formula??0)||c.effect===5||(c.capped??0)>0;}
+const CYCLE_MIN=8,CYCLE_MAX=512;
+export function cycleFromSlider(value:number){return CYCLE_MIN*Math.pow(CYCLE_MAX/CYCLE_MIN,Math.max(0,Math.min(1,value)));}
+export function cycleToSlider(value:number){return Math.log(Math.max(CYCLE_MIN,Math.min(CYCLE_MAX,value))/CYCLE_MIN)/Math.log(CYCLE_MAX/CYCLE_MIN);}
 export function validateColors(value:unknown):ColorSettings {
   const v=value as ColorSettings;
   if(!v||!Array.isArray(v.stops)||v.stops.length<2||v.stops.length>8||v.stops.some(s=>typeof s!=='string'||!/^#[0-9a-f]{6}$/i.test(s)))throw Error('Palette needs 2–8 RGB colours');
@@ -105,7 +129,7 @@ export function validateColors(value:unknown):ColorSettings {
   const positions=v.positions??stopPositions({...c,positions:undefined,repeating:v.repeating});
   if(positions.length!==c.stops.length||positions.some((p,i)=>!Number.isFinite(p)||p<0||p>1||i>0&&p<positions[i-1]))throw Error('Invalid palette positions');
   c.positions=[...positions];c.locks=c.stops.map((_,i)=>v.locks?.[i]===true);c.repeating=v.repeating!==false;
-  for(const [key,max] of [['formula',4],['effect',10],['capped',2]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
+  for(const [key,max] of [['formula',FORMULAS.length-1],['effect',10],['capped',2]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
   if(![0,1,2].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.gamma<1||c.gamma>4||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
   return c;
 }
@@ -181,6 +205,13 @@ export function encodeColors(settings: ColorSettings): string {
     settings.slopeLighting ? 1 : 0,
     settings.supersample,
     Math.round(settings.gamma * 100),
+    stopPositions(settings).map(position=>Math.round(position*1_000_000)).join(','),
+    (settings.locks??[]).map(locked=>locked?'1':'0').join(''),
+    settings.repeating===false?0:1,
+    settings.formula??0,
+    settings.effect??0,
+    settings.capped??0,
+    settings.postAntialias?1:0,
   ];
   return fields.join(".");
 }
@@ -204,15 +235,18 @@ export function decodeColors(code: string): ColorSettings | null {
   }
 
   const d = DEFAULT_COLORS;
-  return {
+  const decodedStops=stops.length ? stops : d.stops;
+  const positions=(parts[20]??'').split(',').map(Number).filter(Number.isFinite).map(v=>v/1_000_000);
+  const locks=(parts[21]??'').split('').map(v=>v==='1');
+  return validateColors({
     palette: clamp(number(parts[0], d.palette), 0, 5),
-    cycle: clamp(number(parts[1], d.cycle), 4, 400),
+    cycle: clamp(number(parts[1], d.cycle), 8, 512),
     offset: clamp(number(parts[2], 0) / 1000, 0, 1),
     smooth: parts[3] !== "0",
     mapping: clamp(number(parts[4], 0), 0, 2),
     mirror: parts[5] === "1",
     interior: color(parts[6], d.interior),
-    stops: stops.length ? stops : d.stops,
+    stops: decodedStops,
 
     mode: clamp(number(parts[8], d.mode), 0, COLOR_MODES.length - 1),
     colorDensity: clamp(number(parts[9], d.colorDensity * 1000) / 1000, 0.01, 8),
@@ -226,5 +260,12 @@ export function decodeColors(code: string): ColorSettings | null {
     slopeLighting: parts[17] === undefined ? d.slopeLighting : parts[17] === "1",
     supersample: clamp(number(parts[18], d.supersample), 1, 3),
     gamma: clamp(number(parts[19], d.gamma * 100) / 100, 1, 4),
-  };
+    positions:positions.length===decodedStops.length?positions:undefined,
+    locks:locks.length===decodedStops.length?locks:undefined,
+    repeating:parts[22]===undefined?d.repeating:parts[22]!=='0',
+    formula:clamp(number(parts[23],d.formula??0),0,FORMULAS.length-1),
+    effect:clamp(number(parts[24],d.effect??0),0,EFFECTS.length-1),
+    capped:clamp(number(parts[25],d.capped??0),0,2),
+    postAntialias:parts[26]===undefined?false:parts[26]==='1',
+  });
 }

@@ -31,7 +31,7 @@ export class GpuTiming {
     slot.busy = true;
     return { slot, phase, generation: this.generation };
   }
-  writes(sample: TimingSample | undefined): GPUComputePassTimestampWrites | undefined {
+  writes(sample: TimingSample | undefined): GPUComputePassTimestampWrites | GPURenderPassTimestampWrites | undefined {
     return sample && { querySet: sample.slot.query, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
   }
   resolve(encoder: GPUCommandEncoder, sample: TimingSample | undefined) {

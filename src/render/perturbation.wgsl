@@ -424,10 +424,9 @@ fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
 
 // --------------------------------------------------------------------- shading
 
-fn potential(n: f32, z2: f32) -> f32 {
-    if(u.formula==1u){return n/u.colorCycle+u.colorOffset;}
+fn mappedPotential(n: f32, z2: f32, useSmoothing: bool) -> f32 {
     var mu = n;
-    if (u.smoothShading == 1u && u.formula==0u) {
+    if (u.smoothShading == 1u && useSmoothing) {
         mu = mu - log2(max(0.5 * log(max(z2,1.000001)) / log(ESCAPE_R),1e-20));
     }
     var cycle = u.colorCycle;
@@ -440,14 +439,32 @@ fn potential(n: f32, z2: f32) -> f32 {
     }
     return mu / max(cycle, 0.001) + u.colorOffset;
 }
+fn potential(n: f32, z2: f32) -> f32 {
+    if(u.formula==1u){return n/u.colorCycle+u.colorOffset;}
+    return mappedPotential(n,z2,true);
+}
 
 // Adapted from XaoS color_output/incolor_output, formulas.cpp, GPL-2.0-or-later.
 // Jan Hubicka and Thomas Marsh, 1996–1997. See NOTICE.md for pinned source.
-fn orbitCoordinate(n:f32,z:vec2<f32>)->f32 {
+fn formulaCoordinate(n:f32,z2:f32,z:vec2<f32>)->f32 {
+    let spacing=max(u.colorCycle,0.001);
+    let angle=atan2(z.y,z.x)/TAU+.5;
+    if(u.formula==1u){return n/spacing+u.colorOffset;}
     if(u.formula==2u){return select(n,f32(u.maxIterations)-n,z.y>0.0)/u.colorCycle+u.colorOffset;}
     if(u.formula==3u){return (atan2(z.x,z.y)/TAU+.75)*78.125/u.colorCycle+u.colorOffset;}
     if(u.formula==4u){return select(n,f32(u.maxIterations)-n,abs(z.x)<2.0||abs(z.y)<2.0)/u.colorCycle+u.colorOffset;}
-    return potential(n,dot(z,z));
+    if(u.formula==5u){return angle*64.0/spacing+u.colorOffset;}
+    if(u.formula==6u){return log2(max(length(z),1e-7))*16.0/spacing+u.colorOffset;}
+    if(u.formula==7u){return z.x*32.0/spacing+u.colorOffset;}
+    if(u.formula==8u){return z.y*32.0/spacing+u.colorOffset;}
+    if(u.formula==9u){return (floor(z.x*4.0)+floor(z.y*4.0))*16.0/spacing+u.colorOffset;}
+    if(u.formula==10u){return (log2(max(length(z),1e-7))*12.0+angle*18.0)*16.0/spacing+u.colorOffset;}
+    let smoothValue=mappedPotential(n,z2,true);
+    if(u.formula==11u){return fract((smoothValue-u.colorOffset)*8.0)+u.colorOffset;}
+    if(u.formula==12u){return f32(u32(n)%2u)*0.5+u.colorOffset;}
+    if(u.formula==13u){return abs(fract(smoothValue-u.colorOffset)*2.0-1.0)+u.colorOffset;}
+    if(u.formula==14u){return n*0.61803398875*16.0/spacing+u.colorOffset;}
+    return smoothValue;
 }
 fn effectColour(p:f32,angle:f32,gradient:vec2<f32>)->vec3<f32>{
     var t=p;let phase=TAU*p;let line=pow(.5+.5*cos(phase),32.0);
@@ -640,8 +657,7 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (entry.x < 0.0) {
                     accumulated = accumulated + toLinear(cappedColour(entry.y,z));
                 } else {
-                    var p=potential(entry.x,entry.y);
-                    if(u.formula>=2u){p=orbitCoordinate(entry.x,z);}
+                    let p=formulaCoordinate(entry.x,entry.y,z);
                     var gradient=vec2<f32>(0.0);
                     if(u.effect>=7u&&u.effect<=9u){
                         let right=field[fieldIndex(min(anchor.x+anchorStep,lastCol),anchor.y)];

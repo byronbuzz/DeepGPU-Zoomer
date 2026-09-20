@@ -25,6 +25,7 @@ const previewCanvas=el<HTMLCanvasElement>('julia-preview-canvas');
 let previewSize={width:previewCanvas.width,height:previewCanvas.height};
 const keys=new Set<string>(), timeline:SavedView[]=[];let timelineIndex=-1;
 let saved: {name:string;view:SavedView}[]=[];
+let linkedView:SavedView|null=null;
 let frameTimes:number[]=[], frameCount=0, sessionStart=performance.now();
 const cadence=el('cadence'),freshness=el('freshness'),depth=el('depth');
 let syncAppearance=()=>{};
@@ -34,12 +35,13 @@ function checkpoint(){const s=snapshot();if(timelineIndex>=0 && encodeView(timel
 function historyButtons(){el<HTMLButtonElement>('back').disabled=timelineIndex<=0;el<HTMLButtonElement>('forward').disabled=timelineIndex>=timeline.length-1;}
 function stop(){direction=0;wheelDirection=0;dragging=false;selecting=false;keys.clear();}
 function syncPlace(){
-  const index=PLACES.findIndex(p=>p.family===view.family && p.iterations===view.iterations && camera.x.eq(p.x) && camera.y.eq(p.y) && camera.span.eq(p.span) && (view.family==='mandelbrot'||new Decimal(view.jx).eq(p.jx)&&new Decimal(view.jy).eq(p.jy)));
-  el<HTMLSelectElement>('places').value=index<0?'':String(index);
+  const matches=(p:SavedView)=>p.family===view.family && p.iterations===view.iterations && camera.x.eq(p.x) && camera.y.eq(p.y) && camera.span.eq(p.span) && (view.family==='mandelbrot'||new Decimal(view.jx).eq(p.jx)&&new Decimal(view.jy).eq(p.jy));
+  const index=PLACES.findIndex(matches),savedIndex=saved.findIndex(item=>matches(item.view));
+  el<HTMLSelectElement>('locations').value=index>=0?`place:${index}`:savedIndex>=0?`saved:${savedIndex}`:'';
 }
 function syncControls(){
-  el<HTMLSelectElement>('family').value=view.family;el('set-label').textContent=view.family.toUpperCase();
-  el<HTMLFormElement>('julia-form').hidden=view.family!=='julia';el<HTMLInputElement>('iterations').value=String(view.iterations);
+  el<HTMLSelectElement>('family').value=view.family;
+  el<HTMLFormElement>('julia-form').hidden=view.family!=='julia';
   el<HTMLInputElement>('iteration-slider').value=String(iterationToSlider(view.iterations));
   el('iteration-value').textContent=view.iterations.toLocaleString();
   el<HTMLInputElement>('jx').value=view.jx;el<HTMLInputElement>('jy').value=view.jy;
@@ -52,15 +54,15 @@ function syncControls(){
 function load(next:SavedView,record=true){
   const valid=validateView(next);if(record && engine)checkpoint();stop();view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
   if(view.family==='julia')setPreview(false);
-  engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';message('');syncControls();
+  engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';freshness.textContent='Preparing current view';message('');syncControls();
   if(record){checkpoint();persist();}
 }
 function persist(){
-  const s=snapshot();try{localStorage.setItem('gpu-zoomer-view',JSON.stringify(s));history.replaceState(null,'','#'+encodeView(s));}catch{message('This browser could not save the view locally. Copy a share link to keep it.');}
+  const s=snapshot();try{localStorage.setItem('gpu-zoomer-view',JSON.stringify(s));}catch{message('This browser could not save preferences locally. Copy a share link to keep this exact view.');}
   syncControls();
 }
 function moving(){return direction!==0||dragging||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(){dirty=true;lastInteraction=performance.now();syncPlace();}
+function changed(){dirty=true;lastInteraction=performance.now();freshness.textContent='Preparing current view';syncPlace();}
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
   el('julia-preview').hidden=!visible;
@@ -161,7 +163,7 @@ async function compute(){
   }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
   finally{busy=false;if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
-function resize(){measurePreview();const dpr=devicePixelRatio||1;const width=Math.round(innerWidth*dpr),height=Math.round(innerHeight*dpr);if(canvas.width===width&&canvas.height===height)return;canvas.width=width;canvas.height=height;dirty=true;}
+function resize(){measurePreview();const dpr=devicePixelRatio||1;const width=Math.round(innerWidth*dpr),height=Math.round(innerHeight*dpr);if(canvas.width===width&&canvas.height===height)return;canvas.width=width;canvas.height=height;dirty=true;freshness.textContent='Preparing current view';}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -180,12 +182,12 @@ function tick(time:number){
     if(time-statusTime>250){statusTime=time;const mean=frameTimes.reduce((a,b)=>a+b,0)/Math.max(1,frameTimes.length);cadence.textContent=`Presentation ${Math.round(1000/mean)||0} Hz`;
       const fresh=!busy && !dirty && !moving() && lastRevision===camera.revision && completedQuality===1;
       const progress=engine?.debugProgress();
-      const state=fresh?'Refined':progress?.active&&progress.regions?`Refining · ${progress.regions} regions`:busy?'Computing':'Preview';
+      const state=fresh?'Refined · 100%':progress?.finalizing?'Finishing':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:busy?'Computing':'Preview';
       freshness.textContent=error?'Rendering stopped':`${state} · ${progress?.lastPublicationAt?Math.max(0,(time-progress.lastPublicationAt)/1000).toFixed(1)+'s since update':lastFresh?'Field ready':'first update pending'}`;
       depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
       if(profilingEnabled&&engine){
         const profile=engine.performance();
-        const phases=Object.entries(profile.phases).filter(([,p])=>p.count).map(([name,p])=>`${name==='calculate'?'Calculation':'Shading'}: ${p.meanMs.toFixed(2)} ms mean, ${p.p95Ms.toFixed(2)} ms p95 (${p.count} samples)`);
+        const phases=Object.entries(profile.phases).filter(([,p])=>p.count).map(([name,p])=>`${name==='calculate'?'Calculation':name==='antialias'?'Antialias pass':'Shading'}: ${p.meanMs.toFixed(2)} ms mean, ${p.p95Ms.toFixed(2)} ms p95 (${p.count} samples)`);
         el('profiling-data').textContent=!profile.supported?'GPU timings are unavailable on this device.':phases.join(' · ')||'Waiting for the next render.';
       }
     }
@@ -214,27 +216,29 @@ el('julia-from').onclick=toggleJuliaPreview;
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
 el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(String(err));}};
 el('return').onclick=switchJuliaView;
-el('reset').onclick=()=>load({...HOME,family:view.family,x:view.family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy});
+el('reset').onclick=()=>load({...HOME,appearance:validateColors(colors)});
 el('back').onclick=()=>{if(timelineIndex>0){load(timeline[--timelineIndex],false);historyButtons();persist();}};
 el('forward').onclick=()=>{if(timelineIndex<timeline.length-1){load(timeline[++timelineIndex],false);historyButtons();persist();}};
-PLACES.forEach((p,i)=>el<HTMLSelectElement>('places').add(new Option(p.name,String(i))));el<HTMLSelectElement>('places').onchange=e=>{const v=(e.target as HTMLSelectElement).value;if(v!=='')load(PLACES[Number(v)]);};
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
-el<HTMLInputElement>('iterations').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();try{load({...snapshot(),iterations:Number((e.target as HTMLInputElement).value)});}catch(err){message(String(err));}}};
-el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();el<HTMLInputElement>('iterations').value=String(n);};
+el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
 el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
 el<HTMLFormElement>('coordinates').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),x:el<HTMLInputElement>('cx').value,y:el<HTMLInputElement>('cy').value,span:el<HTMLInputElement>('span').value});}catch(err){message(String(err));}};
 el<HTMLFormElement>('julia-form').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),jx:el<HTMLInputElement>('jx').value,jy:el<HTMLInputElement>('jy').value});}catch(err){message(String(err));}};
-function savedOptions(){const select=el<HTMLSelectElement>('saved');select.replaceChildren(new Option(saved.length?'Choose a saved location…':'No saved locations',''));saved.forEach((s,i)=>select.add(new Option(s.name,String(i))));}
-el('save').onclick=()=>{saved.push({name:el<HTMLInputElement>('location-name').value.trim()||`${view.family} ${saved.length+1}`,view:snapshot()});try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(saved));savedOptions();message('Location saved on this browser.');}catch{message('Local storage is unavailable. Copy a share link instead.');}};
-el<HTMLSelectElement>('saved').onchange=e=>{const v=(e.target as HTMLSelectElement).value;if(v!=='')load(saved[Number(v)].view);};
-el('share').onclick=async()=>{persist();try{await navigator.clipboard.writeText(location.href);message('Exact view link copied.');}catch{message('Copy the address bar to share this exact view.');}};
+function savedOptions(){const select=el<HTMLSelectElement>('locations');select.replaceChildren(new Option('Choose a location…',''));const places=document.createElement('optgroup');places.label='Places';PLACES.forEach((p,i)=>places.append(new Option(p.name,`place:${i}`)));select.append(places);if(saved.length){const own=document.createElement('optgroup');own.label='Saved locations';saved.forEach((s,i)=>own.append(new Option(s.name,`saved:${i}`)));select.append(own);}}
+el('save').onclick=()=>{saved.push({name:el<HTMLInputElement>('location-name').value.trim()||`${view.family} ${saved.length+1}`,view:snapshot()});try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(saved));savedOptions();syncPlace();message('Location saved on this browser.');}catch{message('Local storage is unavailable. Copy a share link instead.');}};
+el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value.startsWith('place:'))load(PLACES[Number(value.slice(6))]);else if(value.startsWith('saved:'))load(saved[Number(value.slice(6))].view);};
+el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
+el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 setupPanels();
 let appearanceSave:ReturnType<typeof setTimeout>;
-syncAppearance=setupPaletteEditor(()=>colors,c=>{colors=c;dirty=true;if(previewEnabled)queuePreview();clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
+syncAppearance=setupPaletteEditor(()=>colors,c=>{colors=c;dirty=true;freshness.textContent='Preparing current view';if(previewEnabled)queuePreview();clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
 export const ready=(async()=>{
   try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}savedOptions();
-  try{const restored=location.hash?decodeView(location.hash.slice(1)):JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null');load(restored||HOME,false);}catch{load(HOME,false);message('The saved view could not be read; showing the whole set.');}
+  let rememberedAppearance=DEFAULT_COLORS;try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
+  let linkedError=false;if(location.hash){try{linkedView=decodeView(location.hash.slice(1));}catch{linkedError=true;}}
+  load({...HOME,appearance:validateColors(rememberedAppearance)},false);
+  el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');
   checkpoint();resize();requestAnimationFrame(tick);
   try{const ctx=await acquireGpu();gpuContext=ctx;measurePreview();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
   catch(e){error=String(e);message(error);throw e;}
@@ -243,7 +247,7 @@ export const ready=(async()=>{
 export const testing = import.meta.env.DEV ? {
   load, snapshot, camera, get engine(){return engine;},
   selectPreview(x:number,y:number){pointer={x,y};selectJuliaAtPointer();},
-  juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,size:{...previewSize},selected:selectedJulia?{...selectedJulia}:null,displayed:displayedJulia?{...displayedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null}),
-  status:()=>({busy,dirty,error,fields,recolours,lastRevision,revision:camera.revision,quality:completedQuality,stats,frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
+  juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,size:{...previewSize},selected:selectedJulia?{...selectedJulia}:null,displayed:displayedJulia?{...displayedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null,work:previewEngine?.debugProgress()}),
+  status:()=>({busy,dirty,error,fields,recolours,lastRevision,revision:camera.revision,quality:completedQuality,stats,progress:engine?.debugProgress(),frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
   resetTiming(){frameTimes=[];frameCount=0;sessionStart=performance.now();},
 } : undefined;
