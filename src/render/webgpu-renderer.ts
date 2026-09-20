@@ -8,7 +8,7 @@
  */
 
 import Decimal from "decimal.js";
-import { compileShader, readBuffer, storageBuffer, type GpuContext } from "../gpu/device";
+import { checkedGpu, validateRenderSize, compileShader, readBuffer, storageBuffer, type GpuContext } from "../gpu/device";
 import { GpuTiming, type TimingSample } from "../gpu/timing";
 import compensatedSource from "../arithmetic/compensated.wgsl?raw";
 import quadSource from "../arithmetic/quad.wgsl?raw";
@@ -234,6 +234,9 @@ export class WebGpuRenderer {
   private retainFloatPipeline: GPURenderPipeline | null = null;
   private antialiasPipeline: GPURenderPipeline | null = null;
   private antialiasTexture: GPUTexture | null = null;
+  private spareHistory: GPUTexture | null = null;
+  private spareAntialias: GPUTexture | null = null;
+  private deviceLost=false;
   private antialiasSize = {width:0,height:0};
   private antialiasFrame: WebGpuRenderer["lastFrame"] = null;
 
@@ -361,6 +364,7 @@ export class WebGpuRenderer {
 
   constructor(ctx: GpuContext, canvas: HTMLCanvasElement) {
     this.ctx = ctx;
+    void ctx.lost.then(()=>{this.deviceLost=true;this.abort();});
     this.timing = new GpuTiming(ctx.device);
     this.canvas = canvas;
 
@@ -665,12 +669,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     device.queue.writeBuffer(this.laIndexBuffer, 0, index);
   }
 
-  private ensureTarget(width: number, height: number) {
+  private async ensureTarget(width: number, height: number) {
     if (this.target && this.targetSize.width === width && this.targetSize.height === height) {
       return;
     }
-    this.target?.destroy();
-    this.target = this.ctx.device.createTexture({
+    let replacement:GPUTexture|undefined;
+    try{await checkedGpu(this.ctx.device,()=>{replacement = this.ctx.device.createTexture({
       label: "render-target",
       size: { width, height },
       format: "rgba8unorm",
@@ -679,6 +683,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         GPUTextureUsage.TEXTURE_BINDING |
         GPUTextureUsage.COPY_SRC,
     });
+    });}catch(error){replacement?.destroy();throw error;}
+    this.target?.destroy();this.target=replacement!;
     this.targetSize = { width, height };
   }
 
@@ -689,7 +695,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    * Retain one useful completed source while preparing the incoming image.
    * Neither source changes geometry without its corresponding pixel copy.
    */
-  private ensureHistory(request: RenderRequest) {
+  private commitHistory(request: RenderRequest,candidate:GPUTexture) {
     const { width, height } = request;
     const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
     const view = this.currentView ?? request;
@@ -719,31 +725,22 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.coverageHistory?.destroy(); this.coverageHistory=null; this.coverageFrame=null;
       }
     }
-    if (available && (available.usage & GPUTextureUsage.COPY_DST) && available.width === width && available.height === height) this.history = available;
-    else {
-      available?.destroy();
-      this.history = this.ctx.device.createTexture({
-        label: "last-complete-frame",
-        size: { width, height },
-        format: "rgba8unorm",
-        viewFormats: ["rgba8unorm-srgb"],
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
-      });
-    }
-    this.historySize = { width, height };
-    this.historyValid = false;
+    this.spareHistory=available;this.history=candidate;
+    this.historySize = { width, height };this.historyValid=true;
   }
 
-  private ensureAntialias(width:number,height:number){
-    if(this.antialiasTexture&&this.antialiasSize.width===width&&this.antialiasSize.height===height)return;
-    this.antialiasTexture?.destroy();
-    this.antialiasTexture=this.ctx.device.createTexture({label:'completed-image-antialias',size:{width,height},format:'rgba8unorm',viewFormats:['rgba8unorm-srgb'],usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
-    this.antialiasSize={width,height};this.antialiasFrame=null;
+  private candidateTexture(width:number,height:number,antialias=false){
+    const spare=antialias?this.spareAntialias:this.spareHistory;
+    if(antialias)this.spareAntialias=null;else this.spareHistory=null;
+    const usage=GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC|(antialias?GPUTextureUsage.RENDER_ATTACHMENT:GPUTextureUsage.COPY_DST);
+    if(spare&&spare.width===width&&spare.height===height&&(spare.usage&usage)===usage)return spare;
+    spare?.destroy();
+    return this.ctx.device.createTexture({label:antialias?'candidate-antialias':'candidate-complete-frame',size:{width,height},format:'rgba8unorm',viewFormats:['rgba8unorm-srgb'],usage});
   }
 
-  private encodeAntialias(encoder:GPUCommandEncoder,source:GPUTexture,width:number,height:number,timingSamples:(TimingSample|undefined)[]){
-    this.ensureAntialias(width,height);const sample=this.timing.begin('antialias');
-    const pass=encoder.beginRenderPass({label:'completed-image-antialias',timestampWrites:this.timing.writes(sample) as GPURenderPassTimestampWrites|undefined,colorAttachments:[{view:this.antialiasTexture!.createView({format:'rgba8unorm-srgb'}),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
+  private encodeAntialias(encoder:GPUCommandEncoder,source:GPUTexture,target:GPUTexture,timingSamples:(TimingSample|undefined)[]){
+    const sample=this.timing.begin('antialias');
+    const pass=encoder.beginRenderPass({label:'completed-image-antialias',timestampWrites:this.timing.writes(sample) as GPURenderPassTimestampWrites|undefined,colorAttachments:[{view:target.createView({format:'rgba8unorm-srgb'}),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
     pass.setPipeline(this.antialiasPipeline!);pass.setBindGroup(0,this.ctx.device.createBindGroup({layout:this.antialiasPipeline!.getBindGroupLayout(0),entries:[{binding:0,resource:source.createView({format:'rgba8unorm-srgb'})},{binding:1,resource:this.antialiasSampler}]}));pass.draw(4);pass.end();
     this.timing.resolve(encoder,sample);timingSamples.push(sample);this.antialiasPasses++;
   }
@@ -754,11 +751,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    */
   /** Largest sample grid up to `wanted` whose field fits in one binding. */
   private affordableGrid(wanted: number, width: number, height: number): number {
-    const limit = this.ctx.device.limits.maxStorageBufferBindingSize;
-    for (let grid = wanted; grid > 1; grid--) {
+    const limit = Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize);
+    for (let grid = wanted; grid >= 1; grid--) {
       if (width * height * grid * grid * 8 <= limit) return grid;
     }
-    return 1;
+    throw Error('The sample field exceeds this GPU’s buffer capacity. Reduce the viewport.');
   }
 
   private moveField(request: RenderRequest, samples: number, key: string, reuse: boolean, grid = 1): boolean {
@@ -915,6 +912,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   reproject(request: RenderRequest): boolean {
+    if(this.deviceLost)return false;
     this.currentView = request;
     if (this.pendingReferenceDemand?.followView && !this.referenceDemandCompatible(this.pendingReferenceDemand, request)) {
       this.cancelPendingReference("Reference demand changed");
@@ -962,6 +960,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   isComplete(request: RenderRequest) {
+    if(this.deviceLost||this.finalizing||this.referencePreparing)return false;
     const frame=this.lastFrame;
     return this.fieldComplete && !this.finalizing && this.historyValid && !!frame && !frame.proxy &&
       this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
@@ -1067,7 +1066,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let result: RenderStats;
     do {
       this.retarget=false;
-      result=await this.renderTarget(request);
+      try{result=await this.renderTarget(request);}catch(error){
+        this.referencePreparing=false;this.finalizing=false;this.cachedRequest='';this.fieldKey='';this.fieldComplete=false;
+        if(!(error instanceof DOMException&&error.name==='AbortError')){this.incomingFrame=null;this.sampleKey='';this.fieldView=null;this.aborted=true;this.exactCompletedSamples=0;}
+        throw error;
+      }
       // Counter readback also yields. Demand arriving during that last fence
       // must be serviced before reporting the stream complete.
       if (request.followView && result.completed && this.currentView && !this.isComplete(this.currentView)) this.retarget=true;
@@ -1080,6 +1083,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private async renderTarget(request: RenderRequest): Promise<RenderStats> {
 
     const { device } = this.ctx;
+    validateRenderSize(device.limits,request.width,request.height,needsEndpoints(request.colors)||request.colors.mode===1?16:8);
+    if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
     this.referencePreparing=true;this.finalizing=false;
     const epoch = this.publicationEpoch;
     this.abortRequested=false;
@@ -1170,7 +1175,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.laIndexBuffer = storageBuffer(device, 2, "la-index");
     }
     this.incomingFrame = null;
-    this.ensureTarget(request.width, request.height);
+    await this.ensureTarget(request.width, request.height);
+    if(this.abortRequested||!request.isCurrent!())throw new DOMException("Superseded target","AbortError");
 
     const scale = splitExponent(request.unitsPerPixel);
     const offset = splitComplex(
@@ -1221,7 +1227,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.retainEndpoints ||= wantsEndpoints;
     const endpointCount=this.retainEndpoints?request.width*request.height*grid*grid:1;
     if(endpointCount*16>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('Final-orbit channels exceed this GPU’s buffer capacity. Reduce the viewport or disable the orbit-dependent mode.');
-    if(!this.endpointBuffer||this.endpointCapacity<endpointCount){this.endpointBuffer?.destroy();this.endpointBuffer=storageBuffer(device,endpointCount*4,'final-orbits');this.endpointCapacity=endpointCount;}
+    if(!this.endpointBuffer||this.endpointCapacity<endpointCount){
+      let replacement:GPUBuffer|undefined;
+      try{await checkedGpu(device,()=>{replacement=storageBuffer(device,endpointCount*4,'final-orbits');});}catch(error){replacement?.destroy();throw error;}
+      this.endpointBuffer?.destroy();this.endpointBuffer=replacement!;this.endpointCapacity=endpointCount;
+    }
+    if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded endpoints','AbortError');
     u32[84]=colors.formula??0;u32[85]=colors.effect??0;u32[86]=colors.capped??0;u32[87]=colors.repeating===false?0:1;u32[88]=this.retainEndpoints?1:0;
     u32[8] = this.refLength;
     u32[9] = colors.palette;
@@ -1300,8 +1311,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const sampleKey = [family, constant, request.maxIterations, colors.mode, grid, method,
       limbs, this.refLimbs, !!u32[20], request.useApprox].join("|");
     if (fieldStale) {
-      this.moveField(request, request.width * request.height * grid * grid, sampleKey,
-        grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid);
+      await checkedGpu(device,()=>this.moveField(request, request.width * request.height * grid * grid, sampleKey,
+        grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid));
+      if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded field','AbortError');
       u32[41] = grid === 1 && colors.mode !== 2 ? 1 : 0;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     }
@@ -1339,9 +1351,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8)); pass.end();
       this.timing.resolve(encoder, sample); timingSamples.push(sample);
     };
-    this.aborted = false; this.abortRequested = false;
+    this.aborted = false;
     this.partialRegions = 0; this.firstPartialAt = 0;
-    let completed = true, cpuReused = 0;
+    let completed = true, cpuReused = 0, submittedVisits=0;
+    let exactCoverage=fieldStale?0:request.width*request.height;
     u32[40] = 0; u32[42] = 0; u32[43] = request.width;
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     if (fieldStale) {
@@ -1371,7 +1384,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         m.offsetX + region.x * m.step >= 0 && m.offsetY + region.y * m.step >= 0 &&
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
         m.offsetY + (region.y + rows - 1) * m.step < old.height;
-      if (fullyKnown) { if(region.stride===1){cpuReused += width * rows;this.exactCompletedSamples=Math.min(this.exactTotalSamples,this.exactCompletedSamples+width*rows);} continue; }
+      if (fullyKnown) { if(region.stride===1){cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;} continue; }
       u32[54]=region.stride; u32[26]=region.y+rows;
       u32[40] = region.y; u32[42] = region.x; u32[43] = region.x + width;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
@@ -1386,6 +1399,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.timing.resolve(encoder, sample); timingSamples.push(sample);
       if (progressive) shade(encoder, width, rows);
       device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
+      submittedVisits+=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride)*grid*grid;
       collectTimings();
       if (progressive && request.isCurrent!()) {
         this.incomingFrame = frame; this.partialSerial++; this.partialRegions++;
@@ -1400,7 +1414,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.reproject(this.currentView ?? request);
       }
       await device.queue.onSubmittedWorkDone();
-      if(region.stride===1)this.exactCompletedSamples=Math.min(this.exactTotalSamples,this.exactCompletedSamples+width*rows);
+      if(region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
       const elapsed = performance.now() - batchStarted;
       const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
       this.batchMsPerSample = this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
@@ -1418,56 +1432,46 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.retarget=true; completed=false; break;
       }
     }
-    if (!request.isCurrent!()) completed = false;
-    this.fieldKey = completed ? fieldKey : "";
-    if (request.isCurrent!()) this.fieldComplete = completed;
-    if(completed){this.exactCompletedSamples=this.exactTotalSamples;this.finalizing=true;}
-
-    // Only completed fields enter retained history. Streaming already shaded
-    // its individual regions; recolours and neighbour-dependent distance
-    // lighting shade once here. Unknown partial samples stay out of history.
-    if (completed) {
-      const encoder = device.createCommandEncoder({ label: "shade" });
-      u32[26]=request.height; u32[54]=1;
-      u32[40] = 0; u32[42] = 0; u32[43] = request.width;
-      device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-      if (!fieldStale || !progressive || colors.mode===1 || (colors.effect??0)>=7&&(colors.effect??0)<=9) shade(encoder, request.width, request.height);
-      // Presentation belongs to the current camera, not this possibly older request.
-      this.ensureHistory(request);
-      encoder.copyTextureToTexture(
-        { texture: this.target! },
-        { texture: this.history! },
-        { width: request.width, height: request.height }
-      );
-      if(colors.postAntialias)this.encodeAntialias(encoder,this.history!,request.width,request.height,timingSamples);
-      device.queue.submit([encoder.finish()]);
-      collectTimings();
-      // Queue order makes subsequent blits see these pixels. Publish their
-      // description in the same JS turn, before any fence/readback can yield.
-      this.lastFrame = {
-        family: request.family, juliaX: request.juliaX, juliaY: request.juliaY,
-        centerX: request.centerX, centerY: request.centerY,
-        unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
-        colors: request.colors, maxIterations: request.maxIterations,
-      };
-      this.historyValid = true; this.incomingFrame = null;
-      this.antialiasFrame=colors.postAntialias?this.lastFrame:null;
+    if (!request.isCurrent!()||this.abortRequested) completed = false;
+    if(completed&&(this.pending.size!==0||exactCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
+    this.finalizing=completed;
+    let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined;
+    let counters:Uint32Array;
+    try{
+      counters=new Uint32Array(await checkedGpu(device,()=>{
+        if(completed){
+          candidate=this.candidateTexture(request.width,request.height);
+          if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);
+          const encoder=device.createCommandEncoder({label:'shade'});
+          u32[26]=request.height;u32[54]=1;u32[40]=0;u32[42]=0;u32[43]=request.width;
+          device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+          if(!fieldStale||!progressive||colors.mode===1||(colors.effect??0)>=7&&(colors.effect??0)<=9)shade(encoder,request.width,request.height);
+          encoder.copyTextureToTexture({texture:this.target!},{texture:candidate},{width:request.width,height:request.height});
+          if(candidateAa)this.encodeAntialias(encoder,candidate,candidateAa,timingSamples);
+          device.queue.submit([encoder.finish()]);collectTimings();
+        }
+        // Existing map fences the final copy. Scopes are popped before it yields.
+        return readBuffer(device,this.statsBuffer,48);
+      }));
+      if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+      if(request.isCurrent!()&&!this.abortRequested&&completed){
+        // Coarse and reused visits are not unique pixels. The region partition
+        // supplies exact coverage separately; cached recolours have zero visits.
+        if(colors.mode!==2&&counters[5]+counters[6]!==submittedVisits)throw Error('GPU sample accounting did not match submitted work.');
+        this.commitHistory(request,candidate!);candidate=undefined;
+        this.lastFrame=frame;this.incomingFrame=null;
+        if(candidateAa){this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
+        this.antialiasFrame=colors.postAntialias?frame:null;
+        this.fieldKey=fieldKey;this.fieldComplete=true;
+      }else{
+        completed=false;this.cachedRequest='';
+        if(epoch===this.publicationEpoch){this.fieldKey='';this.fieldComplete=false;}
+      }
+    }finally{
+      candidate?.destroy();candidateAa?.destroy();
+      if(epoch===this.publicationEpoch)this.finalizing=false;
     }
-
-    // Mapping the counters also fences the final copy; no redundant queue-wide
-    // completion round trip before the readback.
-    const counters = new Uint32Array(await readBuffer(device, this.statsBuffer, 48));
-    this.finalizing=false;
-    const renderMs = performance.now() - started;
-    // Invalidation owns visibility. An older asynchronous completion must not
-    // clear or replace a publication belonging to a newer epoch.
-    if(request.isCurrent && !request.isCurrent()) completed=false;
-    if (!completed) {
-      this.cachedRequest = "";
-      // The invalidator already cleared incompatible geometry. A compatible
-      // interrupted field retains its exact samples and unknown sentinels.
-      if (epoch !== this.publicationEpoch) this.incomingFrame = null;
-    }
+    const renderMs=performance.now()-started;
     const work = (i:number) => counters[i] + counters[i+8] * 4294967296;
     const skippedIterations = work(0);
     const plainIterations = work(3);

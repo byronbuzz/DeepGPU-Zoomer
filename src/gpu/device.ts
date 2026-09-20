@@ -18,6 +18,33 @@ export interface GpuContext {
 
 export class WebGpuUnavailable extends Error {}
 
+/** Scope only synchronous GPU calls; other renderers cannot enter across an await. */
+export async function checkedGpu<T>(device:GPUDevice,operation:()=>T):Promise<Awaited<T>> {
+  device.pushErrorScope('validation');device.pushErrorScope('out-of-memory');device.pushErrorScope('internal');
+  let value:T;
+  try{value=operation();}catch(error){
+    await Promise.all([device.popErrorScope(),device.popErrorScope(),device.popErrorScope()]);throw error;
+  }
+  const errors=Promise.all([device.popErrorScope(),device.popErrorScope(),device.popErrorScope()]);
+  const [result,reported]=await Promise.all([value,errors]);
+  const failure=reported.find(Boolean);if(failure)throw Error(`GPU operation failed: ${failure.message}`);
+  return result;
+}
+
+export function validateRenderSize(limits:Pick<GPUSupportedLimits,'maxTextureDimension2D'|'maxStorageBufferBindingSize'|'maxBufferSize'>,width:number,height:number,bytesPerSample=8){
+  if(!Number.isSafeInteger(width)||!Number.isSafeInteger(height)||width<1||height<1)throw Error('Render dimensions must be positive integers.');
+  if(width>limits.maxTextureDimension2D||height>limits.maxTextureDimension2D)throw Error('Render dimensions exceed this GPU’s texture capacity.');
+  if(width*height*bytesPerSample>Math.min(limits.maxStorageBufferBindingSize,limits.maxBufferSize))throw Error('The sample field exceeds this GPU’s buffer capacity. Reduce the viewport.');
+}
+
+export function backingSize(width:number,height:number,dpr:number,limits:Pick<GPUSupportedLimits,'maxTextureDimension2D'|'maxStorageBufferBindingSize'|'maxBufferSize'>,bytesPerSample=8){
+  const pixels=Math.min(limits.maxStorageBufferBindingSize,limits.maxBufferSize)/bytesPerSample;
+  const scale=Math.min(dpr,limits.maxTextureDimension2D/width,limits.maxTextureDimension2D/height,Math.sqrt(pixels/(width*height)));
+  const roundedWidth=Math.round(width*scale),roundedHeight=Math.round(height*scale);
+  const round=scale<dpr||roundedWidth>limits.maxTextureDimension2D||roundedHeight>limits.maxTextureDimension2D||roundedWidth*roundedHeight>pixels?Math.floor:Math.round;
+  return {width:Math.max(1,round(width*scale)),height:Math.max(1,round(height*scale))};
+}
+
 export function isWebGpuAvailable(): boolean {
   return typeof navigator !== "undefined" && "gpu" in navigator;
 }
@@ -88,9 +115,10 @@ export async function compileShader(
   device.pushErrorScope("validation");
   const module = device.createShaderModule({ label, code });
 
+  const validationResult=device.popErrorScope();
   const info = await module.getCompilationInfo();
   const problems = info.messages.filter((m) => m.type === "error");
-  const validation = await device.popErrorScope();
+  const validation = await validationResult;
 
   if (problems.length || validation) {
     const lines = code.split("\n");

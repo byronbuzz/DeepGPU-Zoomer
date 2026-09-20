@@ -3,9 +3,17 @@ import { PRESETS, FORMULAS, EFFECTS, CAPPED, validateColors, stopPositions, cycl
 type Stop={position:number;color:string;locked:boolean};
 export function paletteStops(c:ColorSettings):Stop[]{return c.stops.map((color,i)=>({color,position:stopPositions(c)[i],locked:c.locks?.[i]??false}));}
 export function withStops(c:ColorSettings,stops:Stop[]):ColorSettings{
-  const sorted=stops.slice().sort((a,b)=>a.position-b.position);
-  if(sorted.at(-1)?.position===1&&sorted.at(-1)?.color.toLowerCase()!==sorted[0].color.toLowerCase())sorted[sorted.length-1]={...sorted.at(-1)!,position:1-1e-6};
-  return validateColors({...c,palette:5,repeating:true,stops:sorted.map(s=>s.color),positions:sorted.map(s=>s.position),locks:sorted.map(s=>s.locked)});
+  return withSelectedStop(c,stops,0).colors;
+}
+/** Carry this operation's input index through normalization and stable sorting. */
+export function withSelectedStop(c:ColorSettings,stops:Stop[],selected:number){
+  const ordered=stops.map((stop,index)=>({...stop,index})).sort((a,b)=>a.position-b.position);
+  const first=ordered[0]?.color.toLowerCase();
+  const sorted=ordered.map(s=>s.position===1&&s.color.toLowerCase()!==first?{...s,position:1-1e-6}:s)
+    .sort((a,b)=>a.position-b.position||a.index-b.index);
+  const index=Math.max(0,Math.min(stops.length-1,selected));
+  return {colors:validateColors({...c,palette:5,repeating:true,stops:sorted.map(s=>s.color),positions:sorted.map(s=>s.position),locks:sorted.map(s=>s.locked)}),
+    selected:sorted.findIndex(s=>s.index===index)};
 }
 function randomColor(hue:number,harmonious:boolean){
   if(!harmonious)return '#'+Math.floor(Math.random()*0x1000000).toString(16).padStart(6,'0');
@@ -25,7 +33,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   let selected=0,dragging=false,dragDistance=0,dragRemembered=false,colourEditRemembered=false;const undo:ColorSettings[]=[],redo:ColorSettings[]=[];
   const remember=()=>{undo.push(validateColors(get()));if(undo.length>100)undo.shift();redo.length=0;};
   const commit=(c:ColorSettings,record=true)=>{if(record)remember();change(validateColors(c));sync();};
-  const update=(mutate:(s:Stop[])=>Stop[])=>commit(withStops(get(),mutate(paletteStops(get()))));
+  const update=(mutate:(s:Stop[])=>Stop[],selectAfter=selected)=>{remember();const next=withSelectedStop(get(),mutate(paletteStops(get())),selectAfter);selected=next.selected;commit(next.colors,false);};
   const popover=el('stop-colour-popover');
   const closePicker=()=>{popover.hidden=true;};
   const openPicker=(rect:DOMRect)=>{colourEditRemembered=false;popover.hidden=false;const width=180;const beside=rect.right+8+width<=innerWidth?rect.right+8:rect.left-width-8;popover.style.left=Math.max(8,Math.min(innerWidth-width-8,beside))+'px';popover.style.top=Math.max(8,Math.min(innerHeight-150,rect.top-20))+'px';syncFields();el<HTMLInputElement>('stop-color').focus();};
@@ -39,7 +47,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     // Keep that button alive until pointerup/cancel releases its capture.
     if(dragging)return;
     const restoreFocus=document.activeElement?.classList.contains('palette-stop');
-    const c=get(),stops=paletteStops(c);selected=Math.min(selected,stops.length-1);
+    const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));
     const preset=PRESETS.findIndex(p=>p.stops.length===c.stops.length&&p.stops.every((v,i)=>v.toLowerCase()===c.stops[i].toLowerCase())&&stopPositions(c).every((p,i)=>Math.abs(p-i/(c.repeating===false?c.stops.length-1:c.stops.length))<1e-9));
     el<HTMLSelectElement>('palette').value=preset<0?'':String(preset);
     const strip=el('palette-strip');const grad=stops.map(s=>`${s.color} ${s.position*100}%`);
@@ -49,10 +57,9 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
       let startX=0,startY=0;
       b.onpointerdown=e=>{e.stopPropagation();selected=i;dragging=true;dragDistance=0;dragRemembered=false;startX=e.clientX;startY=e.clientY;b.setPointerCapture(e.pointerId);b.focus();syncFields();};
       b.onpointermove=e=>{if(!b.hasPointerCapture(e.pointerId))return;dragDistance=Math.max(dragDistance,Math.hypot(e.clientX-startX,e.clientY-startY));if(dragDistance<3)return;if(!dragRemembered){remember();dragRemembered=true;}const r=strip.getBoundingClientRect();const s=paletteStops(get());s[selected].position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));
-        // Keep index stable during capture, then sort once the drag finishes.
-        const moved=s[selected];const next=withStops(get(),s);selected=paletteStops(next).findIndex(v=>v.position===moved.position&&v.color===moved.color);change(next);b.style.left=moved.position*100+'%';syncFields();};
+        const next=withSelectedStop(get(),s,selected);selected=next.selected;change(next.colors);b.style.left=stopPositions(next.colors)[selected]*100+'%';syncFields();};
       b.onpointerup=()=>{const rect=b.getBoundingClientRect(),clicked=dragDistance<3;dragging=false;sync();if(clicked)openPicker(rect);};b.onpointercancel=()=>{dragging=false;sync();};b.onlostpointercapture=()=>{if(dragging){dragging=false;sync();}};
-      b.onkeydown=e=>{if(e.key==='Delete'){el('stop-delete').click();return;}if(e.key==='Enter'||e.key===' '){e.preventDefault();selected=i;openPicker(b.getBoundingClientRect());return;}if(!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();selected=i;update(s=>{s[i].position=Math.max(0,Math.min(1,s[i].position+(e.key==='ArrowLeft'?-.01:.01)));return s;});};strip.append(b);});
+      b.onkeydown=e=>{if(e.key==='Delete'){selected=i;el('stop-delete').click();return;}if(e.key==='Enter'||e.key===' '){e.preventDefault();selected=i;openPicker(b.getBoundingClientRect());return;}if(!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();selected=i;update(s=>{s[i].position=Math.max(0,Math.min(1,s[i].position+(e.key==='ArrowLeft'?-.01:.01)));return s;});};strip.append(b);});
     syncFields();
     if(restoreFocus)(strip.children[selected] as HTMLElement)?.focus();
     el<HTMLButtonElement>('palette-undo').disabled=!undo.length;el<HTMLButtonElement>('palette-redo').disabled=!redo.length;
@@ -62,9 +69,9 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).value=String(c[key]);
     el<HTMLInputElement>('post-antialias').checked=c.postAntialias===true;
   }
-  function syncFields(){const c=get(),s=paletteStops(c)[selected];el<HTMLInputElement>('stop-color').value=s.color;el<HTMLInputElement>('stop-color-swatch').value=s.color;el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
-  el('palette-strip').onpointerdown=e=>{if(e.target!==el('palette-strip')||get().stops.length>=8)return;const r=el('palette-strip').getBoundingClientRect();const position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));update(s=>[...s,{position,color:s[selected].color,locked:false}]);selected=stopPositions(get()).indexOf(position);sync();};
-  const liveColour=(value:string)=>{if(!/^#[0-9a-f]{6}$/i.test(value))return;if(!colourEditRemembered){remember();colourEditRemembered=true;}const stops=paletteStops(get());stops[selected].color=value;change(withStops(get(),stops));sync();};
+  function syncFields(){const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));const s=stops[selected];el<HTMLInputElement>('stop-color').value=s.color;el<HTMLInputElement>('stop-color-swatch').value=s.color;el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
+  el('palette-strip').onpointerdown=e=>{if(e.target!==el('palette-strip')||get().stops.length>=8)return;const r=el('palette-strip').getBoundingClientRect();const position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));update(s=>[...s,{position,color:s[selected].color,locked:false}],get().stops.length);};
+  const liveColour=(value:string)=>{if(!/^#[0-9a-f]{6}$/i.test(value))return;if(!colourEditRemembered){remember();colourEditRemembered=true;}const stops=paletteStops(get());stops[selected].color=value;const next=withSelectedStop(get(),stops,selected);selected=next.selected;change(next.colors);sync();};
   el<HTMLInputElement>('stop-color').oninput=e=>liveColour((e.target as HTMLInputElement).value);
   el<HTMLInputElement>('stop-color-swatch').oninput=e=>liveColour((e.target as HTMLInputElement).value);
   popover.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closePicker();(el('palette-strip').children[selected] as HTMLElement)?.focus();}};
