@@ -24,10 +24,11 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
 - J toggles a small Julia preview. While it is open, left-click/drag selects
   the exact Mandelbrot point as c without zooming the main view. M opens the
   selected Julia; M again restores the preserved Mandelbrot view.
-- Drag panel headers to move whole panels, or focus a header and use arrow keys.
-  Reset panel layout restores their initial positions. Positions and background
-  opacity are device-local; text remains opaque. Hide controls includes the
-  title and editors; the status and independently toggled Julia preview remain.
+- Main, Colouring and Advanced controls share one movable, resizable tabbed
+  panel. Drag its header, or focus the header and use arrow keys. The tab row
+  supports Left/Right/Home/End. Reset panel layout restores its initial size
+  and position. Layout and background opacity are device-local; the footer uses
+  that opacity. The palette editor remains a separate movable popup.
 - Resize Julia from its bottom-right corner. The previous complete image stays
   visible until a coherent replacement is ready. Selection updates coalesce;
   images finish even during continuous dragging. Displayed c labels the
@@ -35,23 +36,35 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   and iteration limit. The preview follows its displayed size and device pixel
   ratio, subject to GPU capacity, and uses its own
   1,000-iteration limit, independent of the main viewport's limit.
-- The iteration slider is logarithmic from 32 to 1,000,000. Its value previews
-  during dragging and applies on release; exact numeric entry applies on Enter.
-  Old locations retain their limits. Depth uses `10^50.37×` notation without
+- The iteration slider is logarithmic from 32 to 1,000,000. Its numeric value
+  previews during dragging and applies on release. Old locations retain their
+  exact stored limits. Depth uses `10^50.37×` notation without
   converting the full magnification to a JavaScript number.
-- Palette and colouring editors open separately. Palettes have 2–8 positioned
-  RGB stops, optional repeating gradients, locks for randomisation, reversal,
-  even spacing and undo/redo. All 16 source presets remain available.
-- Colour mappings include smooth escape, classic bands, XaoS binary/colour
-  decomposition and biomorphs. Ten additional styles recolour known scalar
-  data. Endpoint-dependent mappings acquire their missing channels once;
+- Palette stops are dragged directly and adjusted with Left/Right. Clicking a
+  stop opens a nonmodal anchored RGB picker; valid hex or swatch edits recolour
+  immediately. Palettes retain 2–8 stops, repeating gradients, stop-bound
+  randomisation locks, reversal, even spacing and undo/redo. All 16 source
+  presets remain available.
+- Colour mappings retain the original five IDs for smooth escape, classic
+  bands, XaoS binary/colour decomposition and biomorphs. Ten additional
+  formulas use escape scalars or honestly labelled final endpoint coordinates.
+  Endpoint-dependent mappings acquire their missing channels once; scalar-only
+  formula changes reuse the field. Colour spacing uses an exponential slider;
   distance lighting explicitly opts into derivative computation. Capped samples
   default to black, with optional final-orbit patterns; capped is not proven interior.
 - Places includes whole-set, Seahorse Valley, period-1215 and structured
   Mandelbrot/Julia 1e50 views. Moving away clears the preset label.
-- Save browser-local locations, use Back/Forward, or copy a share link.
+- Built-in Places and browser-local saved locations share one grouped selector
+  with distinct IDs. Save locations, use Back/Forward, or copy a share link.
   Coordinates, span, c, iteration limit and appearance round-trip without
   trimming digits. Old links use default appearance.
+
+Every page load starts at shallow Home (`10^0`, 1,000 iterations). It retains
+saved locations, palette/appearance and panel preferences, but never restores a
+remembered deep camera or iteration budget automatically. A URL hash is parsed
+and staged without starting its calculation; Main shows **Open linked
+location** to apply that exact payload. Copy exact link does not rewrite the
+current address bar, so a base-URL reload remains Home.
 
 ## Display and calculation
 
@@ -90,6 +103,21 @@ changing the grid resolution or starting a separate quality stage. Matching
 complex coordinates retain their scalar samples through the existing GPU remap;
 off-grid retained imagery is presentation-only. Once the camera is unchanged,
 the same queue finishes every exact target pixel. Palette changes reuse scalars.
+
+The footer's refinement percentage is conservative exact-tier progress for the
+current target: only completed dense target samples and proven exact reuse are
+credited. Sparse preview samples and overlapping presentation coverage are not
+summed. It can decrease or reset as camera demand changes and reaches 100% only
+after the current field and any optional final pass have drained.
+
+Advanced offers optional completed-image antialiasing, off by default. It is a
+single cached low-preset FXAA-style presentation pass over a completed fractal
+image. It does not rerun orbits, alter the numerical field or its coverage
+alpha, filter the DOM HUD, recover missing subpixel detail, or claim to be the
+universally cheapest antialiasing method. Toggling it off presents the retained
+raw completion again. GPU profiling, when supported and enabled, reports this
+pass separately from recurrence and shading. The adapted shader and licenses
+are pinned in `NOTICE.md`.
 
 Before retargeting a partial image, the hard-edge composite is retained as a
 display proxy, including its validity and sample density. One original completed source
