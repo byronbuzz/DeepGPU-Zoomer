@@ -66,7 +66,11 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var delta = injection;
     if (!JULIA) { delta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     var z = wideAdd(wideNorm(Wide(u.wideCentreX, u.wideCentreY, 0)), pixelDelta);
-    if (!direct) { z = wideAdd(wideReference(0u, false), delta); }
+    var reference = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0);
+    if (!direct) {
+        reference = wideReference(0u, false);
+        z = wideAdd(reference, delta);
+    }
     let c = wideNorm(Wide(u.juliaConstantX, u.juliaConstantY, 0));
     var derivative = HDR_ONE;
     if (!JULIA) { derivative = hdrZero(); }
@@ -91,7 +95,8 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
             n += span;
             skipped += span;
             skips += 1u;
-            z = wideAdd(wideReference(referenceIndex, false), delta);
+            reference = wideReference(referenceIndex, false);
+            z = wideAdd(reference, delta);
         } else {
             if (wantDerivative) {
                 // Colouring retains its existing pair derivative; the orbit
@@ -103,13 +108,14 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
             if (direct) {
                 z = wideAdd(wideMul(z, z), c);
             } else {
-                var twiceReference = wideReference(referenceIndex, false);
+                var twiceReference = reference;
                 twiceReference.e += 1;
                 // Factored quadratic difference, shared with the Julia path.
                 delta = wideMul(delta, wideAdd(twiceReference, delta));
                 if (!JULIA) { delta = wideAdd(delta, injection); }
                 referenceIndex += 1u;
-                z = wideAdd(wideReference(referenceIndex, false), delta);
+                reference = wideReference(referenceIndex, false);
+                z = wideAdd(reference, delta);
             }
             n += 1u;
         }
@@ -119,10 +125,12 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
         if (!direct && !escaped) {
             // Julia rebases relative to its nonzero initial point. Mandelbrot
             // starts at zero, so its absolute and relative samples coincide.
-            let rebased = wideAdd(wideReference(referenceIndex, JULIA), delta);
+            var rebased = z;
+            if (JULIA) { rebased = wideAdd(wideReference(referenceIndex, true), delta); }
             if (wideLog(rebased) < wideLog(delta) || referenceIndex >= u.refLength - 1u) {
                 delta = rebased;
                 referenceIndex = 0u;
+                reference = wideReference(0u, false);
                 rebases += 1u;
             }
         }

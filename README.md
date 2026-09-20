@@ -116,6 +116,9 @@ Orbit pipelines compile
 asynchronously. Expanded views rebuild the BLA table's conservative offset
 bound while retaining the reference orbit. Statistics distinguish reference work, pipeline wait,
 BLA-table preparation, completed-field wall time and copied/computed samples.
+Wide perturbation carries the already decoded absolute reference sample across
+iterations and reuses the current Mandelbrot value for its identical rebase
+comparison; this changes neither the recurrence nor its magnitude test.
 Those wall times include waits and are not GPU timestamp measurements. Optional
 GPU profiling reports pass durations using a bounded asynchronous timestamp
 readback pool when supported. It is off by default; these timings are neither
