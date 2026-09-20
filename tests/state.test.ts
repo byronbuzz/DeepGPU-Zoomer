@@ -20,15 +20,19 @@ describe('exact view state',()=>{
   it('keeps released formula IDs and roundtrips all appended appearance fields',()=>{
     expect(FORMULAS.slice(0,5)).toEqual(['Smooth escape','Classic iteration bands','Binary decomposition','Colour decomposition','Biomorphs']);
     expect(FORMULAS).toHaveLength(15);
-    const c=validateColors({...DEFAULT_COLORS,cycle:512,formula:14,effect:10,capped:2,postAntialias:true,repeating:false,
+    const c=validateColors({...DEFAULT_COLORS,cycle:4096,formula:14,effect:10,capped:2,postAntialias:true,repeating:false,
       positions:[0,.16,.42,.6425,.8575,1],locks:[true,false,true,false,false,true]});
     expect(decodeColors(encodeColors(c))).toEqual(c);
+    expect(decodeView(encodeView({...HOME,appearance:c}))).toEqual(validateView({...HOME,appearance:c}));
     for(const id of [2,3,4,5,6,7,8,9,10])expect(needsEndpoints({...c,formula:id,capped:0,effect:0})).toBe(true);
     for(const id of [0,1,11,12,13,14])expect(needsEndpoints({...c,formula:id,capped:0,effect:0})).toBe(false);
   });
   it('maps colour spacing exponentially without losing endpoints',()=>{
-    for(const value of [8,64,512])expect(cycleFromSlider(cycleToSlider(value))).toBeCloseTo(value,10);
-    expect(cycleFromSlider(.5)).toBeCloseTo(64,10);
+    expect(DEFAULT_COLORS.cycle).toBe(64);
+    for(const value of [8,32,64,256,512,1024,4096]){
+      expect(cycleFromSlider(cycleToSlider(value))).toBeCloseTo(value,10);
+      expect(decodeColors(encodeColors({...DEFAULT_COLORS,cycle:value}))?.cycle).toBe(value);
+    }
   });
   it('round trips every coordinate digit, Julia constant and span',()=>{
     const v={...PLACES[4],span:'2.812345678901234567890123456789e-50'};

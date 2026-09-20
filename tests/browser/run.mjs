@@ -69,9 +69,9 @@ try{
   }
   await compare('mandelbrot-actual10000',neighbours);
   await page.selectOption('#locations','place:2');await settle();
-  const before=await status();await page.locator('#open-palette').click();await page.selectOption('#palette','2');await page.locator('#close-palette').click();await settle();const after=await status();
+  const before=await status();await page.locator('#tab-colouring').click();await page.locator('#open-palette').click();await page.selectOption('#palette','2');await page.locator('#close-palette').click();await settle();const after=await status();
   check('palette reuses numeric field',after.fields===before.fields&&after.recolours>before.recolours,{before:before.fields,after:after.fields,beforeStats:before.stats,afterStats:after.stats});
-  await page.selectOption('#locations','place:4');await settle();const exact=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
+  await page.locator('#tab-main').click();await page.selectOption('#locations','place:4');await settle();const exact=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
   await page.locator('#location-name').fill('Deep Julia test');await page.locator('#save').click();await page.locator('#share').click();
   const hash=await app(async()=>{const {encodeView}=await import('/src/state.ts');const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return encodeView(a.testing.snapshot());});
   await page.goto(`${process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183'}/?browser-suite=1#${hash}`);await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;});await settle();
