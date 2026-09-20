@@ -14,11 +14,12 @@ export function setupPanels():PanelController{
     p.addEventListener('pointerdown',e=>e.stopPropagation());
     const handle=p.querySelector<HTMLElement>('[data-handle]')??p;
     handle.tabIndex=0;handle.setAttribute('aria-label',`Move ${p.getAttribute('aria-label')??'title badge'} (arrow keys)`);
-    let start:{x:number;y:number;px:number;py:number}|undefined;
-    handle.addEventListener('pointerdown',e=>{if(e.button!==0||(e.target as HTMLElement).closest('button,input,select'))return;
-      const r=p.getBoundingClientRect();start={x:e.clientX,y:e.clientY,px:r.x,py:r.y};handle.setPointerCapture(e.pointerId);e.preventDefault();});
-    handle.addEventListener('pointermove',e=>{if(start)saved[p.id]=clamp(p,start.px+e.clientX-start.x,start.py+e.clientY-start.y);});
-    const end=()=>{start=undefined;persist();};handle.addEventListener('pointerup',end);handle.addEventListener('pointercancel',end);
+    let start:{x:number;y:number;px:number;py:number;tab:boolean;pointerId:number}|undefined,suppressClick=false;
+    handle.addEventListener('click',e=>{if(!suppressClick)return;suppressClick=false;e.preventDefault();e.stopPropagation();},true);
+    handle.addEventListener('pointerdown',e=>{const target=e.target as HTMLElement,tab=!!target.closest('[role=tab]');if(e.button!==0||(!tab&&target.closest('button,input,select')))return;
+      const r=p.getBoundingClientRect();start={x:e.clientX,y:e.clientY,px:r.x,py:r.y,tab,pointerId:e.pointerId};if(!tab){handle.setPointerCapture(e.pointerId);e.preventDefault();}});
+    window.addEventListener('pointermove',e=>{if(!start)return;const dx=e.clientX-start.x,dy=e.clientY-start.y;if(start.tab&&Math.hypot(dx,dy)<4)return;if(start.tab){suppressClick=true;if(!handle.hasPointerCapture(start.pointerId))handle.setPointerCapture(start.pointerId);}saved[p.id]=clamp(p,start.px+dx,start.py+dy);});
+    const end=(e:PointerEvent)=>{if(!start)return;start=undefined;persist();if(e.type==='pointercancel')suppressClick=false;else setTimeout(()=>{suppressClick=false;},0);};window.addEventListener('pointerup',end);window.addEventListener('pointercancel',end);
     handle.addEventListener('keydown',e=>{const d:Record<string,number[]>={ArrowLeft:[-10,0],ArrowRight:[10,0],ArrowUp:[0,-10],ArrowDown:[0,10]};if(e.target!==handle||!d[e.key])return;e.preventDefault();const r=p.getBoundingClientRect();saved[p.id]=clamp(p,r.x+d[e.key][0],r.y+d[e.key][1]);persist();});
     const size=saved[p.id];if(size?.width&&p.id==='controls'){p.style.width=size.width+'px';p.style.height=(size.height??p.offsetHeight)+'px';}
     let resizeReady=false;

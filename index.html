@@ -14,9 +14,9 @@
     </div>
     <div id="panel-main" class="tab-panel" role="tabpanel" aria-labelledby="tab-main">
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
-      <div class="row"><button id="julia-from" aria-pressed="false" aria-controls="julia-preview" aria-keyshortcuts="J">Julia preview · J</button><button id="return" disabled aria-keyshortcuts="M">Return · M</button></div>
+      <div class="row main-action-row"><button id="julia-from" aria-pressed="false" aria-controls="julia-preview" aria-keyshortcuts="J">Julia preview · J</button><button id="return" disabled aria-keyshortcuts="M">Return · M</button></div>
       <form id="julia-form" hidden><label>Julia c · real<input id="jx" value="-0.8" spellcheck="false"></label><label>Imaginary<input id="jy" value="0.156" spellcheck="false"></label><button>Apply constant</button></form>
-      <div class="row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
+      <div class="row main-action-row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
       <label>Locations<select id="locations"><option value="">Choose a location…</option></select></label>
       <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
       <label>Location name<input id="location-name" maxlength="80" placeholder="Untitled location"></label>
