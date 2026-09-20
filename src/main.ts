@@ -29,7 +29,18 @@ let linkedView:SavedView|null=null;
 let frameTimes:number[]=[], frameCount=0, sessionStart=performance.now();
 const cadence=el('cadence'),freshness=el('freshness'),depth=el('depth');
 let syncAppearance=()=>{};
-function message(text:string){el('message').textContent=text;}
+let messageDismissTimer=0,messageFadeTimer=0,messageVersion=0;
+function message(text:string,transient=false){
+  const target=el('message'),version=++messageVersion;
+  clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);target.classList.remove('message-fading');target.textContent=text;
+  if(!text||!transient)return;
+  messageDismissTimer=window.setTimeout(()=>{
+    if(version!==messageVersion)return;
+    target.classList.add('message-fading');
+    const fadeDelay=matchMedia('(prefers-reduced-motion: reduce)').matches?0:250;
+    messageFadeTimer=window.setTimeout(()=>{if(version===messageVersion){target.textContent='';target.classList.remove('message-fading');}},fadeDelay);
+  },3000);
+}
 function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString(),appearance:validateColors(colors)};}
 function checkpoint(){const s=snapshot();if(timelineIndex>=0 && encodeView(timeline[timelineIndex])===encodeView(s))return;timeline.splice(timelineIndex+1);timeline.push(s);timelineIndex=timeline.length-1;historyButtons();}
 function historyButtons(){el<HTMLButtonElement>('back').disabled=timelineIndex<=0;el<HTMLButtonElement>('forward').disabled=timelineIndex>=timeline.length-1;}
@@ -226,7 +237,7 @@ el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterati
 el<HTMLFormElement>('coordinates').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),x:el<HTMLInputElement>('cx').value,y:el<HTMLInputElement>('cy').value,span:el<HTMLInputElement>('span').value});}catch(err){message(String(err));}};
 el<HTMLFormElement>('julia-form').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),jx:el<HTMLInputElement>('jx').value,jy:el<HTMLInputElement>('jy').value});}catch(err){message(String(err));}};
 function savedOptions(){const select=el<HTMLSelectElement>('locations');select.replaceChildren(new Option('Choose a location…',''));const places=document.createElement('optgroup');places.label='Places';PLACES.forEach((p,i)=>places.append(new Option(p.name,`place:${i}`)));select.append(places);if(saved.length){const own=document.createElement('optgroup');own.label='Saved locations';saved.forEach((s,i)=>own.append(new Option(s.name,`saved:${i}`)));select.append(own);}}
-el('save').onclick=()=>{saved.push({name:el<HTMLInputElement>('location-name').value.trim()||`${view.family} ${saved.length+1}`,view:snapshot()});try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(saved));savedOptions();syncPlace();message('Location saved on this browser.');}catch{message('Local storage is unavailable. Copy a share link instead.');}};
+el('save').onclick=()=>{saved.push({name:el<HTMLInputElement>('location-name').value.trim()||`${view.family} ${saved.length+1}`,view:snapshot()});try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(saved));savedOptions();syncPlace();message('Location saved on this browser.',true);}catch{message('Local storage is unavailable. Copy a share link instead.');}};
 el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value.startsWith('place:'))load(PLACES[Number(value.slice(6))]);else if(value.startsWith('saved:'))load(saved[Number(value.slice(6))].view);};
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};

@@ -112,7 +112,7 @@ export const EFFECTS=['None','Contour Ink','Terraces','Fluted Ridges','Interfere
 export function stopPositions(c:ColorSettings){return c.positions??c.stops.map((_,i)=>i/(c.repeating===false?c.stops.length-1:c.stops.length));}
 const ENDPOINT_FORMULAS = new Set([2,3,4,5,6,7,8,9,10]);
 export function needsEndpoints(c:ColorSettings){return ENDPOINT_FORMULAS.has(c.formula??0)||c.effect===5||(c.capped??0)>0;}
-const CYCLE_MIN=8,CYCLE_MAX=512;
+const CYCLE_MIN=8,CYCLE_MAX=4096;
 export function cycleFromSlider(value:number){return CYCLE_MIN*Math.pow(CYCLE_MAX/CYCLE_MIN,Math.max(0,Math.min(1,value)));}
 export function cycleToSlider(value:number){return Math.log(Math.max(CYCLE_MIN,Math.min(CYCLE_MAX,value))/CYCLE_MIN)/Math.log(CYCLE_MAX/CYCLE_MIN);}
 export function validateColors(value:unknown):ColorSettings {
@@ -240,7 +240,7 @@ export function decodeColors(code: string): ColorSettings | null {
   const locks=(parts[21]??'').split('').map(v=>v==='1');
   return validateColors({
     palette: clamp(number(parts[0], d.palette), 0, 5),
-    cycle: clamp(number(parts[1], d.cycle), 8, 512),
+    cycle: clamp(number(parts[1], d.cycle), 8, 4096),
     offset: clamp(number(parts[2], 0) / 1000, 0, 1),
     smooth: parts[3] !== "0",
     mapping: clamp(number(parts[4], 0), 0, 2),
