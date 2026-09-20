@@ -7,7 +7,7 @@ import { streamingChecks } from './streaming.mjs';
 import { retargetChecks } from './retarget.mjs';
 import { proxyRetentionChecks } from './proxy-retention.mjs';
 
-const output=process.env.GPU_ZOOMER_TEST_DIR || 'F:/Coding/Temp/GPU-Zoomer-3-qualification/app-verification';
+const output=process.env.GPU_ZOOMER_TEST_DIR || `F:/Coding/Temp/GPU-Zoomer-3-lean-editor/numerical-${Date.now()}`;
 fs.mkdirSync(output,{recursive:true});
 const context=await chromium.launchPersistentContext(path.join(output,'edge-profile'),{
   channel:'msedge',headless:true,chromiumSandbox:true,ignoreDefaultArgs:['--enable-unsafe-swiftshader'],viewport:{width:720,height:480},

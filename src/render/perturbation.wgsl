@@ -489,8 +489,26 @@ fn effectColour(p:f32,angle:f32,gradient:vec2<f32>)->vec3<f32>{
     return col;
 }
 fn cappedColour(z2:f32,z:vec2<f32>)->vec3<f32>{
+    if(u.cappedPattern==0u){return u.interior;}
     if(u.cappedPattern==1u){return palette(wrapCoordinate((atan2(z.x,z.y)/TAU+.75)*78.125/u.colorCycle+u.colorOffset));}
     if(u.cappedPattern==2u){return palette(wrapCoordinate((z2*f32(u.maxIterations/2u)+1.0)/u.colorCycle+u.colorOffset));}
+    // 3–7 are inexpensive endpoint adaptations of XaoS incolouring ideas;
+    // 8–12 are local endpoint mappings. They consume the already-retained
+    // final z and never add an orbit pass or iteration.
+    let angle=atan2(z.y,z.x)/TAU;
+    let radius=sqrt(max(z2,0.0));
+    var t=0.0;
+    if(u.cappedPattern==3u){t=abs(z.x)/(abs(z.y)+0.000001);}
+    if(u.cappedPattern==4u){t=z2*cos(z.x*z.x)*3.0;}
+    if(u.cappedPattern==5u){t=sin(z.x*z.x-z.y*z.y)*4.0;}
+    if(u.cappedPattern==6u){t=atan(z.x*z.y)*5.0;}
+    if(u.cappedPattern==7u){let checker=(i32(floor((z.x+2.0)*6.0))+i32(floor((z.y+2.0)*6.0)))&1;t=select(angle*9.0,angle*17.0,checker!=0);}
+    if(u.cappedPattern==8u){t=sin(z.x*12.0)+cos(z.y*12.0);}
+    if(u.cappedPattern==9u){t=radius*18.0;}
+    if(u.cappedPattern==10u){t=angle*12.0+sin(radius*8.0);}
+    if(u.cappedPattern==11u){t=(abs(z.x)+abs(z.y))*14.0;}
+    if(u.cappedPattern==12u){t=1.0-exp(-radius*5.0);}
+    if(u.cappedPattern>=3u){return palette(wrapCoordinate(t*78.125/u.colorCycle+u.colorOffset));}
     return u.interior;
 }
 

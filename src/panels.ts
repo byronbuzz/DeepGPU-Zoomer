@@ -1,5 +1,6 @@
 /** Device-local panel placement. Handles move whole panels, never form controls. */
-export function setupPanels(){
+export interface PanelController { reset():void }
+export function setupPanels():PanelController{
   const panels=Array.from(document.querySelectorAll<HTMLElement>('[data-panel]'));
   let saved:Record<string,{x:number;y:number;width?:number;height?:number}>={};let opacity=.8;
   try{const v=JSON.parse(localStorage.getItem('gpu-zoomer-layout')||'{}');saved=v.positions??{};opacity=Number.isFinite(v.opacity)?Math.max(.15,Math.min(1,v.opacity)):.8;}catch{}
@@ -28,17 +29,15 @@ export function setupPanels(){
   const input=document.getElementById('panel-opacity') as HTMLInputElement;
   const setOpacity=()=>{document.documentElement.style.setProperty('--panel-opacity',String(opacity));input.value=String(opacity);};setOpacity();
   input.oninput=()=>{opacity=Number(input.value);setOpacity();persist();};
-  document.getElementById('reset-layout')!.onclick=()=>{saved={};panels.forEach(p=>{p.style.left='';p.style.top='';p.style.right='';p.style.bottom='';if(p.id==='controls'){p.style.width='';p.style.height='';}});restore();persist();};
-  for(const name of ['palette']){
-    const panel=document.getElementById(name+'-panel')!;
-    const opener=document.getElementById('open-'+name)!;
-    opener.onclick=()=>{panel.hidden=!panel.hidden;opener.setAttribute('aria-expanded',String(!panel.hidden));restore();if(!panel.hidden)panel.querySelector<HTMLElement>('[data-handle]')?.focus();};
-    document.getElementById('close-'+name)!.onclick=()=>{panel.hidden=true;opener.setAttribute('aria-expanded','false');opener.focus();};
-    panel.addEventListener('keydown',e=>{if(e.key==='Escape'){panel.hidden=true;opener.setAttribute('aria-expanded','false');opener.focus();}});
-  }
+  const resetLayout=(save=true)=>{saved={};panels.forEach(p=>{p.style.left='';p.style.top='';p.style.right='';p.style.bottom='';if(p.id==='controls'){p.style.width='';p.style.height='';}});restore();if(save)persist();};
+  document.getElementById('reset-layout')!.onclick=()=>resetLayout();
   const tabs=Array.from(document.querySelectorAll<HTMLButtonElement>('[role=tab]'));
   const selectTab=(tab:HTMLButtonElement,focus=false)=>{for(const item of tabs){const selected=item===tab;item.setAttribute('aria-selected',String(selected));item.tabIndex=selected?0:-1;const panel=document.getElementById(item.getAttribute('aria-controls')!);if(panel)panel.hidden=!selected;}if(focus)tab.focus();};
   tabs.forEach((tab,index)=>{tab.onclick=()=>selectTab(tab);tab.onkeydown=e=>{let next=index;if(e.key==='ArrowRight')next=(index+1)%tabs.length;else if(e.key==='ArrowLeft')next=(index+tabs.length-1)%tabs.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=tabs.length-1;else return;e.preventDefault();selectTab(tabs[next],true);};});
   const toggle=document.getElementById('toggle')!;
   toggle.onclick=()=>{const hidden=document.body.classList.toggle('controls-hidden');toggle.textContent=hidden?'Show controls':'Hide controls';toggle.setAttribute('aria-expanded',String(!hidden));};
+  return {reset(){
+    opacity=.8;setOpacity();resetLayout(false);document.body.classList.remove('controls-hidden');toggle.textContent='Hide controls';toggle.setAttribute('aria-expanded','true');
+    selectTab(tabs[0]);document.querySelectorAll<HTMLDetailsElement>('#controls details').forEach(details=>details.open=false);
+  }};
 }

@@ -17,6 +17,8 @@ import quadSource from "../arithmetic/quad.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
 import reuseSource from "./reuse.wgsl?raw";
+import antialiasSource from "./antialias.wgsl?raw";
+export const ANTIALIAS_SHADER=antialiasSource;
 import { createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
@@ -208,6 +210,20 @@ function scratchWords(limbs: number): number {
   return 7 * limbs + 2 * limbs * 3;
 }
 
+async function readTexturePoints(device:GPUDevice,texture:GPUTexture,size:{width:number;height:number},points:[number,number][]):Promise<number[][]>{
+  const {width,height}=size,bytesPerRow=Math.ceil(width*4/256)*256;
+  const staging=device.createBuffer({size:bytesPerRow*height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});let mapped=false;
+  try{const encoder=device.createCommandEncoder();encoder.copyTextureToBuffer({texture},{buffer:staging,bytesPerRow,rowsPerImage:height},{width,height});device.queue.submit([encoder.finish()]);await staging.mapAsync(GPUMapMode.READ);mapped=true;const bytes=new Uint8Array(staging.getMappedRange());return points.map(([x,y])=>{const i=y*bytesPerRow+x*4;return [bytes[i],bytes[i+1],bytes[i+2],bytes[i+3]];});}
+  finally{if(mapped)staging.unmap();staging.destroy();}
+}
+
+export interface WebGpuRenderer {
+  debugReadOrbit(count:number):Promise<Float32Array>;
+  debugReadPixels(points:[number,number][]):Promise<number[][]>;
+  debugReadAntialiasPixels(points:[number,number][]):Promise<number[][]>;
+  debugReadField():Promise<Float32Array>;
+}
+
 export class WebGpuRenderer {
   private ctx: GpuContext;
   private canvas: HTMLCanvasElement;
@@ -376,6 +392,12 @@ export class WebGpuRenderer {
       "render-stats",
       GPUBufferUsage.COPY_SRC
     );
+    if(import.meta.env.DEV)Object.assign(this,{
+      debugReadOrbit:async(count:number)=>{if(!this.orbitBuffer)return new Float32Array(0);const n=Math.min(count,this.orbitCapacity),stride=20,raw=new Float32Array(await readBuffer(this.ctx.device,this.orbitBuffer,n*stride*4)),absolute=new Float32Array(n*6);for(let i=0;i<n;i++){const at=i*stride;absolute.set([raw[at],raw[at+1],raw[at+4],raw[at+5],raw[at+6],raw[at+9]],i*6);}return absolute;},
+      debugReadPixels:async(points:[number,number][])=>this.target?readTexturePoints(this.ctx.device,this.target,this.targetSize,points):[],
+      debugReadAntialiasPixels:async(points:[number,number][])=>this.antialiasTexture?readTexturePoints(this.ctx.device,this.antialiasTexture,this.antialiasSize,points):[],
+      debugReadField:async()=>this.fieldBuffer?new Float32Array(await readBuffer(this.ctx.device,this.fieldBuffer,this.targetSize.width*this.targetSize.height*8)):new Float32Array(),
+    });
   }
 
   async init() {
@@ -515,31 +537,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.blitPipeline = device.createRenderPipeline(blitDescriptor(this.format));
     this.retainPipeline = device.createRenderPipeline(blitDescriptor("rgba8unorm"));
     this.retainFloatPipeline = device.createRenderPipeline(blitDescriptor("rgba16float"));
-    const antialiasModule=await compileShader(device,`
-// WGSL adaptation of mattdesl/glsl-fxaa FXAA v2, pinned in NOTICE.md.
-@group(0) @binding(0) var source: texture_2d<f32>;
-@group(0) @binding(1) var linearSampler: sampler;
-struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> };
-@vertex fn vs(@builtin(vertex_index) i:u32)->VsOut{
-  var p=array<vec2<f32>,4>(vec2<f32>(-1.0,-1.0),vec2<f32>(1.0,-1.0),vec2<f32>(-1.0,1.0),vec2<f32>(1.0,1.0));
-  var out:VsOut;out.pos=vec4<f32>(p[i],0.0,1.0);out.uv=vec2<f32>((p[i].x+1.0)*.5,(1.0-p[i].y)*.5);return out;
-}
-fn luma(c:vec3<f32>)->f32{return dot(c,vec3<f32>(.299,.587,.114));}
-fn sampleRgb(uv:vec2<f32>)->vec3<f32>{return textureSample(source,linearSampler,clamp(uv,vec2<f32>(0.0),vec2<f32>(1.0))).rgb;}
-@fragment fn fs(in:VsOut)->@location(0) vec4<f32>{
-  let inverse=1.0/vec2<f32>(textureDimensions(source));let centre=textureSample(source,linearSampler,in.uv);
-  let nw=sampleRgb(in.uv+vec2<f32>(-1.0,-1.0)*inverse);let ne=sampleRgb(in.uv+vec2<f32>(1.0,-1.0)*inverse);
-  let sw=sampleRgb(in.uv+vec2<f32>(-1.0,1.0)*inverse);let se=sampleRgb(in.uv+vec2<f32>(1.0,1.0)*inverse);
-  let lnw=luma(nw);let lne=luma(ne);let lsw=luma(sw);let lse=luma(se);let lm=luma(centre.rgb);
-  let low=min(lm,min(min(lnw,lne),min(lsw,lse)));let high=max(lm,max(max(lnw,lne),max(lsw,lse)));
-  var direction=vec2<f32>(-((lnw+lne)-(lsw+lse)),(lnw+lsw)-(lne+lse));
-  let reduce=max((lnw+lne+lsw+lse)*(.25*.125),1.0/128.0);let reciprocal=1.0/(min(abs(direction.x),abs(direction.y))+reduce);
-  direction=clamp(direction*reciprocal,vec2<f32>(-8.0),vec2<f32>(8.0))*inverse;
-  let a=.5*(sampleRgb(in.uv+direction*(-1.0/6.0))+sampleRgb(in.uv+direction*(1.0/6.0)));
-  let b=a*.5+.25*(sampleRgb(in.uv+direction*(-.5))+sampleRgb(in.uv+direction*.5));let lb=luma(b);
-  return vec4<f32>(select(b,a,lb<low||lb>high),centre.a);
-}`,'completed-image-antialias');
-    this.antialiasPipeline=device.createRenderPipeline({label:'completed-image-antialias',layout:'auto',vertex:{module:antialiasModule,entryPoint:'vs'},fragment:{module:antialiasModule,entryPoint:'fs',targets:[{format:'rgba8unorm'}]},primitive:{topology:'triangle-strip'}});
+    const antialiasModule=await compileShader(device,antialiasSource,'completed-image-antialias');
+    this.antialiasPipeline=device.createRenderPipeline({label:'completed-image-antialias',layout:'auto',vertex:{module:antialiasModule,entryPoint:'vs'},fragment:{module:antialiasModule,entryPoint:'fs',targets:[{format:'rgba8unorm-srgb'}]},primitive:{topology:'triangle-strip'}});
   }
 
   private orbitPipeline(limbs: number, sampleWords: number): Promise<GPUComputePipeline> {
@@ -794,7 +793,8 @@ fn sampleRgb(uv:vec2<f32>)->vec3<f32>{return textureSample(source,linearSampler,
         label: "last-complete-frame",
         size: { width, height },
         format: "rgba8unorm",
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        viewFormats: ["rgba8unorm-srgb"],
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
       });
     }
     this.historySize = { width, height };
@@ -804,68 +804,15 @@ fn sampleRgb(uv:vec2<f32>)->vec3<f32>{return textureSample(source,linearSampler,
   private ensureAntialias(width:number,height:number){
     if(this.antialiasTexture&&this.antialiasSize.width===width&&this.antialiasSize.height===height)return;
     this.antialiasTexture?.destroy();
-    this.antialiasTexture=this.ctx.device.createTexture({label:'completed-image-antialias',size:{width,height},format:'rgba8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
+    this.antialiasTexture=this.ctx.device.createTexture({label:'completed-image-antialias',size:{width,height},format:'rgba8unorm',viewFormats:['rgba8unorm-srgb'],usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
     this.antialiasSize={width,height};this.antialiasFrame=null;
   }
 
   private encodeAntialias(encoder:GPUCommandEncoder,source:GPUTexture,width:number,height:number,timingSamples:(TimingSample|undefined)[]){
     this.ensureAntialias(width,height);const sample=this.timing.begin('antialias');
-    const pass=encoder.beginRenderPass({label:'completed-image-antialias',timestampWrites:this.timing.writes(sample) as GPURenderPassTimestampWrites|undefined,colorAttachments:[{view:this.antialiasTexture!.createView(),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
-    pass.setPipeline(this.antialiasPipeline!);pass.setBindGroup(0,this.ctx.device.createBindGroup({layout:this.antialiasPipeline!.getBindGroupLayout(0),entries:[{binding:0,resource:source.createView()},{binding:1,resource:this.antialiasSampler}]}));pass.draw(4);pass.end();
+    const pass=encoder.beginRenderPass({label:'completed-image-antialias',timestampWrites:this.timing.writes(sample) as GPURenderPassTimestampWrites|undefined,colorAttachments:[{view:this.antialiasTexture!.createView({format:'rgba8unorm-srgb'}),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
+    pass.setPipeline(this.antialiasPipeline!);pass.setBindGroup(0,this.ctx.device.createBindGroup({layout:this.antialiasPipeline!.getBindGroupLayout(0),entries:[{binding:0,resource:source.createView({format:'rgba8unorm-srgb'})},{binding:1,resource:this.antialiasSampler}]}));pass.draw(4);pass.end();
     this.timing.resolve(encoder,sample);timingSamples.push(sample);this.antialiasPasses++;
-  }
-
-  /** Reads the reduced orbit samples back, for comparison against an oracle. */
-  async debugReadOrbit(count: number): Promise<Float32Array> {
-    if (!this.orbitBuffer) return new Float32Array(0);
-    const n = Math.min(count,this.orbitCapacity);
-    const stride = 20;
-    const raw = new Float32Array(await readBuffer(this.ctx.device,this.orbitBuffer,n*stride*4));
-    const absolute = new Float32Array(n*6);
-    for(let i=0;i<n;i++) {
-      const at = i * stride;
-      // This legacy diagnostic view exposes the leading pair only.
-      absolute.set([raw[at],raw[at+1],raw[at+4],raw[at+5],raw[at+6],raw[at+9]],i*6);
-    }
-    return absolute;
-  }
-
-  /** Reads pixels back from the render target (rgba8unorm). */
-  async debugReadPixels(points: [number, number][]): Promise<number[][]> {
-    if (!this.target) return [];
-    return this.debugReadTexturePixels(this.target,this.targetSize,points);
-  }
-  async debugReadAntialiasPixels(points:[number,number][]):Promise<number[][]>{
-    if(!this.antialiasTexture)return [];
-    return this.debugReadTexturePixels(this.antialiasTexture,this.antialiasSize,points);
-  }
-  private async debugReadTexturePixels(texture:GPUTexture,size:{width:number;height:number},points:[number,number][]):Promise<number[][]>{
-    const { device } = this.ctx;
-    const { width, height } = size;
-    // copyTextureToBuffer requires bytesPerRow to be a multiple of 256.
-    const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
-
-    const staging = device.createBuffer({
-      size: bytesPerRow * height,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-    });
-    const encoder = device.createCommandEncoder();
-    encoder.copyTextureToBuffer(
-      { texture },
-      { buffer: staging, bytesPerRow, rowsPerImage: height },
-      { width, height }
-    );
-    device.queue.submit([encoder.finish()]);
-
-    await staging.mapAsync(GPUMapMode.READ);
-    const bytes = new Uint8Array(staging.getMappedRange().slice(0));
-    staging.unmap();
-    staging.destroy();
-
-    return points.map(([x, y]) => {
-      const i = y * bytesPerRow + x * 4;
-      return [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]];
-    });
   }
 
   /**
@@ -1068,10 +1015,6 @@ fn sampleRgb(uv:vec2<f32>)->vec3<f32>{return textureSample(source,linearSampler,
     return true;
   }
 
-  async debugReadField(): Promise<Float32Array> {
-    if (!this.fieldBuffer) return new Float32Array();
-    return new Float32Array(await readBuffer(this.ctx.device,this.fieldBuffer,this.targetSize.width*this.targetSize.height*8));
-  }
   invalidateHistory() {
     this.publicationEpoch++; this.historyValid=false; this.refValid=false;
     this.incomingFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
@@ -1092,6 +1035,30 @@ fn sampleRgb(uv:vec2<f32>)->vec3<f32>{return textureSample(source,linearSampler,
       this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
       (request.family!=="julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors)===JSON.stringify(request.colors) && (!request.colors.postAntialias||!!this.antialiasFrame);
+  }
+
+  /** Captures only the completed, current 8-bit presentation image. */
+  async capturePixels(request:RenderRequest):Promise<{width:number;height:number;pixels:Uint8ClampedArray}> {
+    if(!this.isComplete(request))throw new Error('The current image is not ready to save yet.');
+    const texture=request.colors.postAntialias?this.antialiasTexture:this.history;
+    if(!texture)throw new Error('The completed image is unavailable.');
+    const {device}=this.ctx,{width,height}=request;
+    const bytesPerRow=Math.ceil(width*4/256)*256;
+    const staging=device.createBuffer({size:bytesPerRow*height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+    let mapped=false;
+    try{
+      const encoder=device.createCommandEncoder({label:'png-readback'});
+      encoder.copyTextureToBuffer({texture},{buffer:staging,bytesPerRow,rowsPerImage:height},{width,height});
+      device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);mapped=true;
+      const packed=new Uint8Array(staging.getMappedRange());
+      const pixels=new Uint8ClampedArray(width*height*4);
+      for(let y=0;y<height;y++)pixels.set(packed.subarray(y*bytesPerRow,y*bytesPerRow+width*4),y*width*4);
+      for(let i=3;i<pixels.length;i+=4)pixels[i]=255;
+      return {width,height,pixels};
+    }finally{
+      if(mapped)staging.unmap();staging.destroy();
+    }
   }
 
   /** Conservative rectangle with useful sample density for priority, not mere

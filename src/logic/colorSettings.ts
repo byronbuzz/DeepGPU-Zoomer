@@ -109,6 +109,13 @@ export const FORMULAS=[
   'Golden phase bands',
 ] as const;
 export const EFFECTS=['None','Contour Ink','Terraces','Fluted Ridges','Interference','Phase Weave','Neon Filaments','Pearl Relief','Brushed Relief','Engraved Relief','Depth Mist'];
+/** IDs 0–2 are released and remain stable in saved links. */
+export const CAPPED=[
+  'Solid black','Final endpoint angle','Final endpoint magnitude',
+  'Endpoint ratio · XaoS adapted','Radial cosine · XaoS adapted','Hyperbolic wave · XaoS adapted',
+  'Orbit-product angle · XaoS adapted','Endpoint checker · XaoS adapted',
+  'Cartesian weave','Concentric rings','Angular petals','Diamond lattice','Soft orbit glow',
+] as const;
 export function stopPositions(c:ColorSettings){return c.positions??c.stops.map((_,i)=>i/(c.repeating===false?c.stops.length-1:c.stops.length));}
 const ENDPOINT_FORMULAS = new Set([2,3,4,5,6,7,8,9,10]);
 export function needsEndpoints(c:ColorSettings){return ENDPOINT_FORMULAS.has(c.formula??0)||c.effect===5||(c.capped??0)>0;}
@@ -129,7 +136,7 @@ export function validateColors(value:unknown):ColorSettings {
   const positions=v.positions??stopPositions({...c,positions:undefined,repeating:v.repeating});
   if(positions.length!==c.stops.length||positions.some((p,i)=>!Number.isFinite(p)||p<0||p>1||i>0&&p<positions[i-1]))throw Error('Invalid palette positions');
   c.positions=[...positions];c.locks=c.stops.map((_,i)=>v.locks?.[i]===true);c.repeating=v.repeating!==false;
-  for(const [key,max] of [['formula',FORMULAS.length-1],['effect',10],['capped',2]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
+  for(const [key,max] of [['formula',FORMULAS.length-1],['effect',10],['capped',CAPPED.length-1]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
   if(![0,1,2].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.gamma<1||c.gamma>4||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
   return c;
 }
@@ -160,19 +167,21 @@ export const PRESETS: Preset[] = [
   { name: "Ultra", stops: ["#08103a", "#2f6bcb", "#f2ffff", "#ffaa00", "#3a1400"] },
   { name: "Midnight", stops: ["#01030f", "#10265c", "#4f8ff7", "#dbe9ff", "#0a1230"] },
   { name: "Ember", stops: ["#120200", "#7a1f05", "#ff7b18", "#ffe6b0", "#2b0a00"] },
-  { name: "Ice", stops: ["#01080f", "#0d4a6b", "#5fd0f0", "#eaffff", "#062033"] },
-  { name: "Gold", stops: ["#0a0600", "#5a3d02", "#d9a428", "#fff3c4", "#2a1a00"] },
+  { name: "Viridis · adapted", stops: ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"] },
+  { name: "Plasma · adapted", stops: ["#0d0887", "#7e03a8", "#cc4778", "#f89540", "#f0f921"] },
   { name: "Toxic", stops: ["#03120a", "#0b6b32", "#5df08a", "#f0ffe0", "#0a2a12"] },
-  { name: "Magma", stops: ["#000000", "#3b0a3f", "#c2185b", "#ff9e3d", "#fff2c9"] },
+  { name: "Inferno · adapted", stops: ["#000004", "#57106e", "#bc3754", "#f98e09", "#fcffa4"] },
   { name: "Nebula", stops: ["#05010f", "#3a1178", "#8b3fd4", "#f0a6ff", "#1a0533"] },
   { name: "Copper", stops: ["#0d0603", "#5c2b12", "#c9743a", "#ffd9a8", "#2a1408"] },
-  { name: "Abyss", stops: ["#000205", "#01243a", "#0a7ea3", "#9fe8f5", "#00060c"] },
-  { name: "Rose", stops: ["#12030a", "#6b1436", "#e0517e", "#ffd6e2", "#2b0714"] },
+  { name: "Magma · adapted", stops: ["#000004", "#51127c", "#b73779", "#fc8961", "#fcfdbf"] },
+  { name: "Cividis · adapted", stops: ["#00224e", "#434e6c", "#7d7c78", "#bcae6c", "#fee838"] },
   { name: "Mono", stops: ["#000000", "#3a3a3a", "#ffffff", "#4a4a4a", "#0d0d0d"] },
   { name: "Sunset", stops: ["#0b0221", "#5c1a5e", "#e0563f", "#ffc46b", "#fff4d6"] },
-  { name: "Forest", stops: ["#03100a", "#14432a", "#4f9e52", "#d8f0a8", "#0a2314"] },
-  { name: "Steel", stops: ["#04070a", "#243a4d", "#7d9bb5", "#e8f2fa", "#101a24"] },
-  { name: "Candy", stops: ["#170524", "#7a1f9e", "#f062c0", "#ffe6a8", "#3d0a52"] },
+  { name: "Turbo · adapted", stops: ["#30123b", "#28bbec", "#a4fc3c", "#fb7e21", "#7a0403"] },
+  { name: "Twilight · adapted", stops: ["#e2d9e2", "#7790b4", "#3e356b", "#60203f", "#bd5a56"] },
+  { name: "Spectral · adapted", stops: ["#9e0142", "#f46d43", "#ffffbf", "#66c2a5", "#5e4fa2"] },
+  { name: "Coolwarm · adapted", stops: ["#3b4cc0", "#8db0fe", "#dddcdc", "#f4987a", "#b40426"] },
+  { name: "Cubehelix · adapted", stops: ["#000000", "#1a354c", "#a07949", "#d3c1d9", "#ffffff"] },
 ];
 
 const clamp = (value: number, low: number, high: number) =>
@@ -265,7 +274,7 @@ export function decodeColors(code: string): ColorSettings | null {
     repeating:parts[22]===undefined?d.repeating:parts[22]!=='0',
     formula:clamp(number(parts[23],d.formula??0),0,FORMULAS.length-1),
     effect:clamp(number(parts[24],d.effect??0),0,EFFECTS.length-1),
-    capped:clamp(number(parts[25],d.capped??0),0,2),
+    capped:clamp(number(parts[25],d.capped??0),0,CAPPED.length-1),
     postAntialias:parts[26]===undefined?false:parts[26]==='1',
   });
 }

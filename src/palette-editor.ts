@@ -1,10 +1,11 @@
-import { PRESETS, FORMULAS, EFFECTS, validateColors, stopPositions, cycleFromSlider, cycleToSlider, type ColorSettings } from './logic/colorSettings';
+import { PRESETS, FORMULAS, EFFECTS, CAPPED, validateColors, stopPositions, cycleFromSlider, cycleToSlider, type ColorSettings } from './logic/colorSettings';
 
 type Stop={position:number;color:string;locked:boolean};
 export function paletteStops(c:ColorSettings):Stop[]{return c.stops.map((color,i)=>({color,position:stopPositions(c)[i],locked:c.locks?.[i]??false}));}
 export function withStops(c:ColorSettings,stops:Stop[]):ColorSettings{
   const sorted=stops.slice().sort((a,b)=>a.position-b.position);
-  return validateColors({...c,palette:5,stops:sorted.map(s=>s.color),positions:sorted.map(s=>s.position),locks:sorted.map(s=>s.locked)});
+  if(sorted.at(-1)?.position===1&&sorted.at(-1)?.color.toLowerCase()!==sorted[0].color.toLowerCase())sorted[sorted.length-1]={...sorted.at(-1)!,position:1-1e-6};
+  return validateColors({...c,palette:5,repeating:true,stops:sorted.map(s=>s.color),positions:sorted.map(s=>s.position),locks:sorted.map(s=>s.locked)});
 }
 function randomColor(hue:number,harmonious:boolean){
   if(!harmonious)return '#'+Math.floor(Math.random()*0x1000000).toString(16).padStart(6,'0');
@@ -32,6 +33,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   PRESETS.forEach((p,i)=>el<HTMLSelectElement>('palette').add(new Option(p.name,String(i))));
   FORMULAS.forEach((p,i)=>el<HTMLSelectElement>('color-formula').add(new Option(p,String(i))));
   EFFECTS.forEach((p,i)=>el<HTMLSelectElement>('color-effect').add(new Option(p,String(i))));
+  CAPPED.forEach((p,i)=>el<HTMLSelectElement>('capped-mode').add(new Option(p,String(i))));
   function sync(){
     // Persistence may synchronize controls while a captured drag is paused.
     // Keep that button alive until pointerup/cancel releases its capture.
@@ -54,11 +56,10 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     syncFields();
     if(restoreFocus)(strip.children[selected] as HTMLElement)?.focus();
     el<HTMLButtonElement>('palette-undo').disabled=!undo.length;el<HTMLButtonElement>('palette-redo').disabled=!redo.length;
-    el<HTMLInputElement>('palette-repeat').checked=c.repeating!==false;
     el<HTMLSelectElement>('color-formula').value=String(c.formula??0);el<HTMLSelectElement>('color-effect').value=String(c.effect??0);el<HTMLSelectElement>('capped-mode').value=String(c.capped??0);
     el<HTMLInputElement>('distance-mode').checked=c.mode===1;
     el<HTMLInputElement>('cycle').value=String(cycleToSlider(c.cycle));el('cycle-value').textContent=c.cycle<100?c.cycle.toFixed(1):Math.round(c.cycle).toString();
-    for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation']] as const)el<HTMLInputElement>(id).value=String(c[key]);
+    for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).value=String(c[key]);
     el<HTMLInputElement>('post-antialias').checked=c.postAntialias===true;
   }
   function syncFields(){const c=get(),s=paletteStops(c)[selected];el<HTMLInputElement>('stop-color').value=s.color;el<HTMLInputElement>('stop-color-swatch').value=s.color;el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
@@ -71,9 +72,8 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   el<HTMLInputElement>('stop-lock').onchange=e=>update(s=>{s[selected].locked=(e.target as HTMLInputElement).checked;return s;});
   el('stop-delete').onclick=()=>{if(get().stops.length>2)update(s=>s.filter((_,i)=>i!==selected));};
   el('palette-reverse').onclick=()=>update(s=>s.map(v=>({...v,position:1-v.position})));
-  el('palette-even').onclick=()=>update(s=>s.map((v,i)=>({...v,position:i/(get().repeating===false?s.length-1:s.length)})));
-  el<HTMLInputElement>('palette-repeat').onchange=e=>commit({...get(),repeating:(e.target as HTMLInputElement).checked});
-  el<HTMLSelectElement>('palette').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value==='')return;const p=PRESETS[Number(value)];commit({...get(),palette:5,stops:[...p.stops],positions:undefined,locks:undefined});};
+  el('palette-even').onclick=()=>update(s=>s.map((v,i)=>({...v,position:i/s.length})));
+  el<HTMLSelectElement>('palette').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value==='')return;const p=PRESETS[Number(value)];commit({...get(),palette:5,repeating:true,stops:[...p.stops],positions:undefined,locks:undefined});};
   for(const [id,all] of [['random-colors',false],['random-palette',true]] as const)el(id).onclick=()=>commit(randomizePalette(get(),all,el<HTMLSelectElement>('random-style').value==='harmonious'));
   el('palette-undo').onclick=()=>{const c=undo.pop();if(c){redo.push(validateColors(get()));commit(c,false);}};
   el('palette-redo').onclick=()=>{const c=redo.pop();if(c){undo.push(validateColors(get()));commit(c,false);}};
@@ -81,6 +81,6 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   el<HTMLInputElement>('distance-mode').onchange=e=>commit({...get(),mode:(e.target as HTMLInputElement).checked?1:0});
   el<HTMLInputElement>('post-antialias').onchange=e=>commit({...get(),postAntialias:(e.target as HTMLInputElement).checked});
   el<HTMLInputElement>('cycle').oninput=e=>{const value=cycleFromSlider(Number((e.target as HTMLInputElement).value));change({...get(),cycle:value});el('cycle-value').textContent=value<100?value.toFixed(1):Math.round(value).toString();};
-  for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation']] as const)el<HTMLInputElement>(id).oninput=e=>{change({...get(),[key]:Number((e.target as HTMLInputElement).value)});};
-  sync();return sync;
+  for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).oninput=e=>{change({...get(),[key]:Number((e.target as HTMLInputElement).value)});};
+  sync();return {sync,reset(){selected=0;dragging=false;undo.length=0;redo.length=0;closePicker();sync();}};
 }
