@@ -3,7 +3,7 @@ import { Camera, HOME, encodeView, decodeView, validateView } from '../src/state
 import { PLACES } from '../src/places';
 import Decimal from 'decimal.js';
 import {depthLabel,iterationFromSlider,iterationToSlider} from '../src/state';
-import {DEFAULT_COLORS,validateColors} from '../src/logic/colorSettings';
+import {DEFAULT_COLORS,FORMULAS,cycleFromSlider,cycleToSlider,decodeColors,encodeColors,needsEndpoints,validateColors} from '../src/logic/colorSettings';
 
 describe('exact view state',()=>{
   it('formats depth without overflow and maps continuous limits to exact integers',()=>{
@@ -16,6 +16,19 @@ describe('exact view state',()=>{
     const appearance=validateColors({...DEFAULT_COLORS,stops:['#123456','#abcdef'],positions:[.123,.789],locks:[true,false],effect:8,formula:4,capped:2,repeating:false});
     const v={...PLACES[4],appearance};expect(decodeView(encodeView(v))).toEqual(validateView(v));
     expect(decodeView(encodeView(HOME))).toEqual(HOME);
+  });
+  it('keeps released formula IDs and roundtrips all appended appearance fields',()=>{
+    expect(FORMULAS.slice(0,5)).toEqual(['Smooth escape','Classic iteration bands','Binary decomposition','Colour decomposition','Biomorphs']);
+    expect(FORMULAS).toHaveLength(15);
+    const c=validateColors({...DEFAULT_COLORS,cycle:512,formula:14,effect:10,capped:2,postAntialias:true,repeating:false,
+      positions:[0,.16,.42,.6425,.8575,1],locks:[true,false,true,false,false,true]});
+    expect(decodeColors(encodeColors(c))).toEqual(c);
+    for(const id of [2,3,4,5,6,7,8,9,10])expect(needsEndpoints({...c,formula:id,capped:0,effect:0})).toBe(true);
+    for(const id of [0,1,11,12,13,14])expect(needsEndpoints({...c,formula:id,capped:0,effect:0})).toBe(false);
+  });
+  it('maps colour spacing exponentially without losing endpoints',()=>{
+    for(const value of [8,64,512])expect(cycleFromSlider(cycleToSlider(value))).toBeCloseTo(value,10);
+    expect(cycleFromSlider(.5)).toBeCloseTo(64,10);
   });
   it('round trips every coordinate digit, Julia constant and span',()=>{
     const v={...PLACES[4],span:'2.812345678901234567890123456789e-50'};

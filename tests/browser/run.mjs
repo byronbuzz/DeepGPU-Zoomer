@@ -48,7 +48,7 @@ try{
   report.browser=context.browser().version();
   check('physical AMD adapter',report.adapter.vendor==='amd'&&report.adapter.fallback===false,report.adapter);
   for(const [place,name] of [[0,'mandelbrot-home'],[1,'mandelbrot-seahorse'],[2,'mandelbrot-6e-42'],[3,'mandelbrot-1e50'],[4,'julia-1e50']]){
-    await page.selectOption('#places',String(place));await compare(name);
+    await page.selectOption('#locations',`place:${place}`);await compare(name);
   }
   await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);const {HOME}=await import('/src/state.ts');a.testing.load({...HOME,family:'julia',x:'0'});});await compare('julia-home');
   // An already-escaped Julia point must be reported at iteration zero.
@@ -68,14 +68,16 @@ try{
     if(dx||dy)neighbours.push([x+dx,y+dy]);
   }
   await compare('mandelbrot-actual10000',neighbours);
-  await page.selectOption('#places','2');await settle();
+  await page.selectOption('#locations','place:2');await settle();
   const before=await status();await page.locator('#open-palette').click();await page.selectOption('#palette','2');await page.locator('#close-palette').click();await settle();const after=await status();
   check('palette reuses numeric field',after.fields===before.fields&&after.recolours>before.recolours,{before:before.fields,after:after.fields,beforeStats:before.stats,afterStats:after.stats});
-  await page.selectOption('#places','4');await settle();const exact=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
+  await page.selectOption('#locations','place:4');await settle();const exact=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});
   await page.locator('#location-name').fill('Deep Julia test');await page.locator('#save').click();await page.locator('#share').click();
-  await page.reload();await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;});await settle();
-  const restored=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});check('exact share reload',JSON.stringify(exact)===JSON.stringify(restored));
-  await page.selectOption('#places','0');await settle();await page.locator('#toggle').click();
+  const hash=await app(async()=>{const {encodeView}=await import('/src/state.ts');const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return encodeView(a.testing.snapshot());});
+  await page.goto(`${process.env.GPU_ZOOMER_URL || 'http://127.0.0.1:5183'}/?browser-suite=1#${hash}`);await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;});await settle();
+  const staged=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});check('exact share reload stages at Home',staged.span==='2.8'&&staged.iterations===1000&&await page.locator('#linked-location').isVisible());await page.locator('#open-linked-location').click();await settle();
+  const restored=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();});check('explicit link opening restores exact payload',JSON.stringify(exact)===JSON.stringify(restored));
+  await page.selectOption('#locations','place:0');await settle();await page.locator('#toggle').click();
   await page.mouse.move(220,240);await page.mouse.wheel(0,-30);await settle();
   check('short wheel settles without more input',(await status()).quality===1);
   await page.mouse.down();await page.waitForTimeout(35);await page.mouse.up();await settle();check('short hold release refines',(await status()).quality===1);
@@ -95,10 +97,10 @@ try{
   check('M restores the exact Mandelbrot camera',JSON.stringify(m)===JSON.stringify(await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();})));
   await page.locator('#toggle').click();
   // Stale family results must never become the final field after a rapid switch.
-  await page.selectOption('#places','2');await page.selectOption('#places','4');await settle();check('rapid switch completes latest family',(await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();})).family==='julia');
+  await page.selectOption('#locations','place:2');await page.selectOption('#locations','place:4');await settle();check('rapid switch completes latest family',(await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot();})).family==='julia');
   await page.setViewportSize({width:390,height:844});await settle();
   check('narrow layout has no horizontal overflow',await app(()=>document.documentElement.scrollWidth===innerWidth));await page.screenshot({path:path.join(output,'narrow.png')});
-  await page.setViewportSize({width:2560,height:1440});await page.selectOption('#places','2');await settle();
+  await page.setViewportSize({width:2560,height:1440});await page.selectOption('#locations','place:2');await settle();
   await page.locator('#toggle').click();await page.mouse.move(1190,720);await page.locator('#fractal').focus();
   await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);a.testing.resetTiming();});
   const span0=await app(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);return a.testing.snapshot().span;});const fields0=(await status()).fields;

@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
-    "test:browser": "node tests/browser/run.mjs"
+    "test:browser": "node tests/browser/run.mjs",
+    "test:upgrade": "node tests/browser/upgrade.mjs"
   },
   "dependencies": { "decimal.js": "10.6.0" },
   "devDependencies": {

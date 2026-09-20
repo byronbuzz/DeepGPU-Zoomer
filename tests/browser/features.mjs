@@ -5,13 +5,15 @@ export async function featureChecks(gpu,engine,Decimal,defaults){
   const {readBuffer}=await import('/src/gpu/device.ts');
   add('sample counters agree with a fresh exact field',stats.computedSamples===192*128&&stats.cappedRatio<=1,{stats,raw:Array.from(new Uint32Array(await readBuffer(gpu.device,engine.statsBuffer,48)))});
   const points=Array.from({length:192*128},(_,i)=>[i%192,Math.floor(i/192)]);
-  const fingerprints=[];
-  for(let formula=0;formula<5;formula++){
+  const fingerprints=[],formulaFingerprints=[];
+  for(let formula=0;formula<15;formula++){
     const result=await engine.render({...req,colors:{...defaults,formula}});
     const current=await engine.debugReadField();add(`formula ${formula} preserves escape counts`,current.every((v,i)=>i%2!==0||v===field[i]));
+    const formulaPixels=await engine.debugReadPixels(points);let formulaHash=2166136261;for(const p of formulaPixels)for(const b of p.slice(0,3))formulaHash=Math.imul(formulaHash^b,16777619)>>>0;formulaFingerprints.push(formulaHash);
     const recolour=await engine.render({...req,colors:{...defaults,formula,palette:5,offset:.13}});
     add(`formula ${formula} palette edits reuse scalars`,!recolour.computed&&recolour.computedSamples===0);
   }
+  add('all formula shader outputs are distinct',new Set(formulaFingerprints).size===15&&formulaFingerprints[0]!==formulaFingerprints[1],{formulaFingerprints});
   for(let effect=0;effect<=10;effect++){
     await engine.render({...req,colors:{...defaults,effect}});
     const pixels=await engine.debugReadPixels(points);let hash=2166136261;for(const p of pixels)for(const b of p.slice(0,3))hash=Math.imul(hash^b,16777619)>>>0;fingerprints.push(hash);
