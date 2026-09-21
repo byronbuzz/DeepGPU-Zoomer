@@ -59,6 +59,9 @@ export interface RenderRequest {
   juliaX?: Decimal;
   juliaY?: Decimal;
   isCurrent?: () => boolean;
+  /** Allows a numerically compatible request to finish after its presentation
+   * has been superseded. Publication remains owned by `isCurrent`. */
+  isCalculationCurrent?: () => boolean;
   /** Complex units per device pixel. */
   unitsPerPixel: Decimal;
   width: number;
@@ -324,6 +327,8 @@ export class WebGpuRenderer {
   private endpointBuffer:GPUBuffer|null=null;
   private endpointCapacity=0;
   private retainEndpoints=false;
+  private endpointDemand=false;
+  endpointChannelsRequired(){return this.retainEndpoints||this.endpointDemand;}
   private spareField: GPUBuffer | null = null;
   private spareCapacity = 0;
   private fieldView: FrameView | null = null;
@@ -1064,7 +1069,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   async render(request: RenderRequest): Promise<RenderStats> {
     let result: RenderStats;
-    do {
+    this.endpointDemand=needsEndpoints(request.colors)||request.colors.mode===1;
+    try{do {
       this.retarget=false;
       try{result=await this.renderTarget(request);}catch(error){
         this.referencePreparing=false;this.finalizing=false;this.cachedRequest='';this.fieldKey='';this.fieldComplete=false;
@@ -1077,7 +1083,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if (!this.retarget || this.abortRequested || request.isCurrent && !request.isCurrent()) return result;
       this.retainPartial();
       request={...this.currentView!,followView:true,isCurrent:request.isCurrent};
-    } while (true);
+    } while (true);}finally{this.endpointDemand=false;}
   }
 
   private async renderTarget(request: RenderRequest): Promise<RenderStats> {
@@ -1089,7 +1095,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const epoch = this.publicationEpoch;
     this.abortRequested=false;
     if(!Number.isInteger(request.maxIterations)||request.maxIterations<1||request.maxIterations>1_000_000)throw Error('Unsupported iteration limit (maximum 1000000).');
-    const originalCurrent = request.isCurrent;
+    const presentationCurrent=request.isCurrent;
+    const originalCurrent = request.isCalculationCurrent ?? presentationCurrent;
     request = { ...request, colors: { ...request.colors, stops: [...request.colors.stops] },
       isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
 
@@ -1427,7 +1434,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       // target useful bounded work, then follow the live camera. Releasing a
       // button changes neither this condition nor the outstanding queue.
       const live=this.currentView;
-      if (request.followView && live && (!this.sameView(request,live) || JSON.stringify(request.colors)!==JSON.stringify(live.colors)) &&
+      if (request.followView && live && !this.sameView(request,live) &&
           (performance.now()-targetStarted >= 64 || !this.pending.size)) {
         this.retarget=true; completed=false; break;
       }
@@ -1435,7 +1442,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!request.isCurrent!()||this.abortRequested) completed = false;
     if(completed&&(this.pending.size!==0||exactCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
     this.finalizing=completed;
-    let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined;
+    let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined,published=false;
     let counters:Uint32Array;
     try{
       counters=new Uint32Array(await checkedGpu(device,()=>{
@@ -1458,11 +1465,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // Coarse and reused visits are not unique pixels. The region partition
         // supplies exact coverage separately; cached recolours have zero visits.
         if(colors.mode!==2&&counters[5]+counters[6]!==submittedVisits)throw Error('GPU sample accounting did not match submitted work.');
-        this.commitHistory(request,candidate!);candidate=undefined;
-        this.lastFrame=frame;this.incomingFrame=null;
-        if(candidateAa){this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
-        this.antialiasFrame=colors.postAntialias?frame:null;
         this.fieldKey=fieldKey;this.fieldComplete=true;
+        const currentPresentation=(!presentationCurrent||presentationCurrent())&&
+          (!request.followView||!this.currentView||this.samePresentation(frame,this.currentView));
+        if(currentPresentation){
+          this.commitHistory(request,candidate!);candidate=undefined;
+          this.lastFrame=frame;published=true;
+          if(candidateAa){this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
+          this.antialiasFrame=colors.postAntialias?frame:null;
+        }
+        this.incomingFrame=null;
       }else{
         completed=false;this.cachedRequest='';
         if(epoch===this.publicationEpoch){this.fieldKey='';this.fieldComplete=false;}
@@ -1497,7 +1509,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       skipRatio: total > 0 ? skippedIterations / total : 0,
       cappedRatio: counters[5] > 0 ? counters[4] / counters[5] : 0,
     };
-    if (completed && request.isCurrent!()) {
+    if (completed && request.isCurrent!() && published) {
       this.cachedStats = result; this.cachedRequest = requestKey;
 
     }

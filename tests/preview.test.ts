@@ -3,14 +3,14 @@ import vm from 'node:vm';
 import ts from 'typescript';
 import Decimal from 'decimal.js';
 import {expect,it} from 'vitest';
-import {DEFAULT_COLORS} from '../src/logic/colorSettings';
+import {DEFAULT_COLORS,needsEndpoints,renderColors} from '../src/logic/colorSettings';
 const source=readFileSync(new URL('../src/main.ts',import.meta.url),'utf8');
 const fn=source.slice(source.indexOf('async function computeJuliaPreview()'),source.indexOf('\nfunction switchJuliaView()'));
 const js=ts.transpileModule(fn,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 for(const outcome of ['success','error','resize','close-reopen'])it(`only the latest preview settles display and busy state after stale ${outcome}`,async()=>{
   const elements=new Map<string,any>();const published:any[]=[];
   let finish!:(v:any)=>void,fail!:(e:any)=>void;
-  const box:any={Decimal,previewBusy:false,previewPending:true,previewEnabled:true,selectedJulia:{x:'0',y:'0'},gpuContext:{},previewEpoch:1,previewLifetime:0,
+  const box:any={Decimal,needsEndpoints,renderColors,previewBusy:false,previewPending:true,previewEnabled:true,selectedJulia:{x:'0',y:'0'},gpuContext:{},previewEpoch:1,previewLifetime:0,
     previewSize:{width:240,height:160},view:{family:'mandelbrot'},colors:DEFAULT_COLORS,previewCanvas:{width:240,height:160},previewRenderedEpoch:0,displayedJulia:{x:'-1',y:'0'},
     el(id:string){if(!elements.has(id))elements.set(id,{textContent:'previous',attrs:{'aria-busy':'true'},setAttribute(k:string,v:string){this.attrs[k]=v;}});return elements.get(id);},
     previewEngine:{render(req:any){box.req=req;return new Promise((resolve,reject)=>{finish=resolve;fail=reject;});},reproject(req:any){published.push(req);}}};

@@ -119,6 +119,8 @@ export const CAPPED=[
 export function stopPositions(c:ColorSettings){return c.positions??c.stops.map((_,i)=>i/(c.repeating===false?c.stops.length-1:c.stops.length));}
 const ENDPOINT_FORMULAS = new Set([2,3,4,5,6,7,8,9,10]);
 export function needsEndpoints(c:ColorSettings){return ENDPOINT_FORMULAS.has(c.formula??0)||c.effect===5||(c.capped??0)>0;}
+/** Renderer-visible appearance. Stop locks are editor metadata only. */
+export function renderColors(c:ColorSettings):ColorSettings{const {locks:_locks,...rendered}=c;return {...rendered,stops:[...rendered.stops]};}
 const CYCLE_MIN=8,CYCLE_MAX=4096;
 export function cycleFromSlider(value:number){return CYCLE_MIN*Math.pow(CYCLE_MAX/CYCLE_MIN,Math.max(0,Math.min(1,value)));}
 export function cycleToSlider(value:number){return Math.log(Math.max(CYCLE_MIN,Math.min(CYCLE_MAX,value))/CYCLE_MIN)/Math.log(CYCLE_MAX/CYCLE_MIN);}

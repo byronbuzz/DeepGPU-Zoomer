@@ -2,7 +2,7 @@ import './style.css';
 import Decimal from 'decimal.js';
 import { acquireGpu, backingSize, type GpuContext } from './gpu/device';
 import { WebGpuRenderer, type RenderRequest, type RenderStats } from './render/webgpu-renderer';
-import { DEFAULT_COLORS, needsEndpoints, validateColors } from './logic/colorSettings';
+import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './logic/colorSettings';
 import { Camera, HOME, validateView, encodeView, decodeView, depthLabel, effectiveIterations, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
 import { setupPanels } from './panels';
@@ -107,7 +107,8 @@ function measurePreview(){
   const rect=el('julia-preview-viewport').getBoundingClientRect();
   if(rect.width<=0||rect.height<=0)return;
   const dpr=devicePixelRatio||1;
-  const {width,height}=gpuContext?backingSize(rect.width,rect.height,dpr,gpuContext.device.limits,needsEndpoints(colors)?16:8):{width:Math.max(1,Math.round(rect.width*dpr)),height:Math.max(1,Math.round(rect.height*dpr))};
+  const endpointStorage=needsEndpoints(colors)||previewEngine?.endpointChannelsRequired?.();
+  const {width,height}=gpuContext?backingSize(rect.width,rect.height,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.max(1,Math.round(rect.width*dpr)),height:Math.max(1,Math.round(rect.height*dpr))};
   if(width===previewSize.width&&height===previewSize.height)return;
   previewSize={width,height};
   // Queue the latest geometry while the previous complete image stays visible.
@@ -140,12 +141,15 @@ async function computeJuliaPreview(){
   if(previewBusy||!previewPending||!previewEnabled||!selectedJulia||!gpuContext)return;
   previewBusy=true;previewPending=false;
   const epoch=previewEpoch,lifetime=previewLifetime,selected={...selectedJulia},size={...previewSize};
-  const current=()=>previewEnabled && view.family==='mandelbrot' && previewLifetime===lifetime && previewEpoch===epoch;
+    const sameTarget=()=>previewEnabled && view.family==='mandelbrot' && previewLifetime===lifetime && selectedJulia?.x===selected.x && selectedJulia.y===selected.y && previewSize.width===size.width && previewSize.height===size.height;
+    const current=()=>sameTarget() && previewEpoch===epoch;
   try{
     // One persistent small renderer, with its own fields/history/uniforms.
     if(!previewEngine){previewEngine=new WebGpuRenderer(gpuContext,previewCanvas);await previewEngine.init();}
     if(!current())return;
-    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(size.height),width:size.width,height:size.height,maxIterations:1000,colors:{...colors,mode:0,supersample:1},family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,publishPartial:false,isCurrent:current};
+    const requestedColors={...renderColors(colors),mode:0,supersample:1};
+    const calculationCurrent=()=>sameTarget()&&(!needsEndpoints({...colors,mode:0,supersample:1})||needsEndpoints(requestedColors)||!!previewEngine?.endpointChannelsRequired?.());
+    const req:RenderRequest={centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(3.2).div(size.height),width:size.width,height:size.height,maxIterations:1000,colors:requestedColors,family:'julia',juliaX:new Decimal(selected.x),juliaY:new Decimal(selected.y),useApprox:false,publishPartial:false,isCurrent:current,isCalculationCurrent:calculationCurrent};
     // Preserve the previous canvas until the complete replacement is ready.
     const result=await previewEngine.render(req);
     if(current()&&result.completed){
@@ -173,7 +177,7 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:{...colors},family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error)return;latchEffective(false);busy=true;dirty=false;const g=generation;
@@ -185,7 +189,7 @@ async function compute(){
   }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
   finally{busy=false;if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
-function resize(){measurePreview();const dpr=devicePixelRatio||1;const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,needsEndpoints(colors)||colors.mode===1?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return;canvas.width=width;canvas.height=height;dirty=true;freshness.textContent='Preparing current view';}
+function resize(){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;canvas.width=width;canvas.height=height;dirty=true;freshness.textContent='Preparing current view';return true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -254,7 +258,7 @@ el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSel
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
-const paletteController=setupPaletteEditor(()=>colors,c=>{colors=c;resize();generation++;engine?.abort();dirty=true;freshness.textContent='Preparing current view';if(previewEnabled)queuePreview();clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
+const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));colors=c;if(changed){const numericalChange=previous.mode!==c.mode||previous.supersample!==c.supersample||needsEndpoints(c)&&!engine?.endpointChannelsRequired();const resized=resize();if(numericalChange||resized){generation++;engine?.abort();}dirty=true;freshness.textContent='Preparing current view';if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
 syncAppearance=paletteController.sync;
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
