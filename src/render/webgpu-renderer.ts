@@ -68,7 +68,7 @@ export interface RenderRequest {
   height: number;
   maxIterations: number;
   colors: ColorSettings;
-  /** Development-only: set true to opt into unqualified BLA skips. */
+  /** Enables standard linear BLA wherever the selected method supports it. */
   useApprox?: boolean;
   /** Forces an iteration method instead of picking one from the zoom. */
   forceMethod?: Method;
@@ -207,6 +207,17 @@ interface ReferenceDemand {
   followView: boolean;
 }
 
+interface FieldDescriptor {
+  family: "mandelbrot" | "julia";
+  constant: string;
+  maxIterations: number;
+  mode: number;
+  grid: number;
+  method: Method;
+  useApprox: boolean;
+  retainEndpoints: boolean;
+}
+
 async function readTexturePoints(device:GPUDevice,texture:GPUTexture,size:{width:number;height:number},points:[number,number][]):Promise<number[][]>{
   const {width,height}=size,bytesPerRow=Math.ceil(width*4/256)*256;
   const staging=device.createBuffer({size:bytesPerRow*height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});let mapped=false;
@@ -216,9 +227,11 @@ async function readTexturePoints(device:GPUDevice,texture:GPUTexture,size:{width
 
 export interface WebGpuRenderer {
   debugReadOrbit(count:number):Promise<Float32Array>;
+  debugReferenceDecodeMismatches():number;
   debugReadPixels(points:[number,number][]):Promise<number[][]>;
   debugReadAntialiasPixels(points:[number,number][]):Promise<number[][]>;
   debugReadField():Promise<Float32Array>;
+  debugReadEndpoints():Promise<Float32Array>;
 }
 
 export class WebGpuRenderer {
@@ -231,6 +244,8 @@ export class WebGpuRenderer {
   private renderPipeline: GPUComputePipeline | null = null;
   private directPipeline: GPUComputePipeline | null = null;
   private approxPipeline: GPUComputePipeline | null = null;
+  private referenceDecodePipeline: GPUComputePipeline | null = null;
+  private referenceVerifyPipeline: GPUComputePipeline | null = null;
   private juliaPipeline: GPUComputePipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
   private retainPipeline: GPURenderPipeline | null = null;
@@ -268,6 +283,7 @@ export class WebGpuRenderer {
     height: number;
     colors: ColorSettings;
     maxIterations: number;
+    useApprox: boolean;
   } | null = null;
   private xformBuffer: GPUBuffer | null = null;
   private history: GPUTexture | null = null;
@@ -295,7 +311,7 @@ export class WebGpuRenderer {
   private determinedSpacing: Decimal | undefined;
   private determined = new CoverageRegions();
   private streamTargets = 0;
-  private latestRegion: {x:number;y:number;width:number;height:number} | null = null;
+  private latestRegion: {x:number;y:number;width:number;height:number;stride:number} | null = null;
   private exactCompletedSamples=0;
   private exactTotalSamples=0;
   private referencePreparing=false;
@@ -303,6 +319,9 @@ export class WebGpuRenderer {
   private calculationSubmissions=0;
   private orbitSubmissions=0;
   private antialiasPasses=0;
+  private appearanceSubmissions=0;
+  private appearancePublications=0;
+  private targetAllocations=0;
   private timing: GpuTiming;
   setProfiling(enabled: boolean) { this.timing.setEnabled(enabled); }
   performance() { return this.timing.snapshot(); }
@@ -311,10 +330,13 @@ export class WebGpuRenderer {
     const complete=!this.referencePreparing&&!!this.currentView&&this.isComplete(this.currentView)&&this.pending.size===0&&!this.incomingFrame&&!this.finalizing;
     const percentage=this.referencePreparing||!progressCurrent?null:complete&&this.exactTotalSamples?100:this.exactTotalSamples?Math.min(99,Math.floor(this.exactCompletedSamples/this.exactTotalSamples*100)):null;
     let fieldHash=2166136261;for(let i=0;i<this.fieldKey.length;i++){fieldHash^=this.fieldKey.charCodeAt(i);fieldHash=Math.imul(fieldHash,16777619);}
+    const displayed=this.incomingFrame??this.lastFrame;
+    const appearancePending=!!(this.currentView&&displayed&&this.sameView(displayed,this.currentView)&&!this.samePresentation(displayed,this.currentView));
     return { epoch: this.publicationEpoch, serial: this.partialSerial, fieldIdentity:(fieldHash>>>0).toString(16).padStart(8,'0'),
       regions: this.partialRegions, firstPublicationAt: this.firstPartialAt, lastPublicationAt: this.lastPartialAt,
       active: !!this.incomingFrame, complete, percentage, exactCompletedSamples:this.exactCompletedSamples, exactTotalSamples:this.exactTotalSamples,
       referencePreparing:this.referencePreparing, finalizing:this.finalizing, calculationSubmissions:this.calculationSubmissions, orbitSubmissions:this.orbitSubmissions, antialiasPasses:this.antialiasPasses,
+      appearancePending,appearanceSubmissions:this.appearanceSubmissions,appearancePublications:this.appearancePublications,targetAllocations:this.targetAllocations,
       referenceWorkerActive:this.referenceWorker.active,
       pending: this.pending.size, targets: this.streamTargets, latestRegion: this.latestRegion,
       width: this.fieldView?.width ?? 0, height: this.fieldView?.height ?? 0 };
@@ -337,6 +359,9 @@ export class WebGpuRenderer {
   private reuseUniform: GPUBuffer | null = null;
   private cachedStats: RenderStats | null = null;
   private cachedRequest = "";
+  private fieldStats: RenderStats | null = null;
+  private fieldDescriptor: FieldDescriptor | null = null;
+  private fieldUniforms: ArrayBuffer | null = null;
 
   /**
    * Identifies what is in `fieldBuffer`. Everything that changes the numbers
@@ -352,6 +377,7 @@ export class WebGpuRenderer {
   private statsBuffer: GPUBuffer;
   private orbitBuffer: GPUBuffer | null = null;
   private orbitCapacity = 0;
+  private referenceDecodeMismatches=0;
   private referenceWorker = new ReferenceWorkerClient();
   private pendingReferenceDemand: ReferenceDemand | null = null;
 
@@ -400,10 +426,12 @@ export class WebGpuRenderer {
       GPUBufferUsage.COPY_SRC
     );
     if(import.meta.env.DEV)Object.assign(this,{
-      debugReadOrbit:async(count:number)=>{if(!this.orbitBuffer)return new Float32Array(0);const n=Math.min(count,this.orbitCapacity),stride=20,raw=new Float32Array(await readBuffer(this.ctx.device,this.orbitBuffer,n*stride*4)),absolute=new Float32Array(n*6);for(let i=0;i<n;i++){const at=i*stride;absolute.set([raw[at],raw[at+1],raw[at+4],raw[at+5],raw[at+6],raw[at+9]],i*6);}return absolute;},
+      debugReadOrbit:async(count:number)=>{const raw=this.refSamples;if(!raw)return new Float32Array(0);const n=Math.min(count,this.refLength),stride=20,absolute=new Float32Array(n*6);for(let i=0;i<n;i++){const at=i*stride;absolute.set([raw[at],raw[at+1],raw[at+4],raw[at+5],raw[at+6],raw[at+9]],i*6);}return absolute;},
+      debugReferenceDecodeMismatches:()=>this.referenceDecodeMismatches,
       debugReadPixels:async(points:[number,number][])=>this.target?readTexturePoints(this.ctx.device,this.target,this.targetSize,points):[],
       debugReadAntialiasPixels:async(points:[number,number][])=>this.antialiasTexture?readTexturePoints(this.ctx.device,this.antialiasTexture,this.antialiasSize,points):[],
       debugReadField:async()=>this.fieldBuffer?new Float32Array(await readBuffer(this.ctx.device,this.fieldBuffer,this.targetSize.width*this.targetSize.height*8)):new Float32Array(),
+      debugReadEndpoints:async()=>this.endpointBuffer?new Float32Array(await readBuffer(this.ctx.device,this.endpointBuffer,this.targetSize.width*this.targetSize.height*16)):new Float32Array(),
     });
   }
 
@@ -414,6 +442,8 @@ export class WebGpuRenderer {
     this.reuseUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     const renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, wideSource].join("\n"), "perturbation");
+    this.referenceDecodePipeline=device.createComputePipeline({label:"reference-decode",layout:"auto",compute:{module:renderModule,entryPoint:"decodeReferenceOrbit"}});
+    if(import.meta.env.DEV)this.referenceVerifyPipeline=device.createComputePipeline({label:"reference-decode-verify",layout:"auto",compute:{module:renderModule,entryPoint:"verifyDecodedReferenceOrbit"}});
 
     // Explicit rather than "auto": the two entry points touch different
     // subsets of the bindings, and an auto layout would derive a different
@@ -426,7 +456,6 @@ export class WebGpuRenderer {
     const bindLayout = device.createBindGroupLayout({
       label: "perturbation",
       entries: [
-        storage("read-only-storage", 0),
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
         {
           binding: 2,
@@ -439,6 +468,7 @@ export class WebGpuRenderer {
         storage("storage", 6),
         storage("storage", 7),
         storage("storage", 8),
+        storage("storage", 9),
       ],
     });
     this.bindLayout = bindLayout;
@@ -591,8 +621,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     limbs: number
   ): Promise<{ length: number; escaped: boolean; ms: number; samples: Float32Array }> {
     const started = performance.now(), demand = this.referenceDemand(request, limbs);
-    const requestedBytes=(request.maxIterations+1)*20*Float32Array.BYTES_PER_ELEMENT;
-    if(requestedBytes>Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize)) {
+    const limit=Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize);
+    const rawBytes=(request.maxIterations+1)*20*Float32Array.BYTES_PER_ELEMENT;
+    const decodedBytes=(request.maxIterations+1)*24*Float32Array.BYTES_PER_ELEMENT;
+    if(rawBytes>limit||decodedBytes>limit) {
       throw new Error("The reference orbit exceeds this GPU's buffer capacity.");
     }
     this.pendingReferenceDemand = demand;
@@ -605,14 +637,41 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       }
       const samples = new Float32Array(orbit.buffer);
       if (samples.length !== orbit.length * 20) throw new Error("Reference worker returned an invalid sample buffer");
-      let target=this.orbitBuffer,replacement:GPUBuffer|null=null;
-      if(!target||this.orbitCapacity<orbit.length){
-        replacement=storageBuffer(this.ctx.device,orbit.length*20,"reference-orbit",GPUBufferUsage.COPY_SRC);
-        target=replacement;
-      }
-      try{this.ctx.device.queue.writeBuffer(target,0,samples);}
-      catch(error){replacement?.destroy();throw error;}
-      if(replacement){const previous=this.orbitBuffer;this.orbitBuffer=replacement;this.orbitCapacity=orbit.length;previous?.destroy();}
+      if(!this.referenceDecodePipeline)throw Error('Reference decode pipeline is unavailable.');
+      const device=this.ctx.device;
+      let raw:GPUBuffer|undefined,replacement:GPUBuffer|undefined,mismatches:GPUBuffer|undefined;
+      try{
+        const mismatchBytes=await checkedGpu(device,()=>{
+          raw=storageBuffer(device,orbit.length*20,"reference-orbit-raw");
+          replacement=storageBuffer(device,orbit.length*24,"reference-orbit-decoded",GPUBufferUsage.COPY_SRC);
+          device.queue.writeBuffer(raw,0,samples);
+          const encoder=device.createCommandEncoder({label:'decode-reference-orbit'});
+          const decode=encoder.beginComputePass({label:'decode-reference-orbit'});
+          decode.setPipeline(this.referenceDecodePipeline!);
+          decode.setBindGroup(0,device.createBindGroup({layout:this.referenceDecodePipeline!.getBindGroupLayout(0),entries:[
+            {binding:0,resource:{buffer:raw}},{binding:9,resource:{buffer:replacement}},
+          ]}));
+          decode.dispatchWorkgroups(Math.ceil(orbit.length/64));decode.end();
+          if(import.meta.env.DEV){
+            if(!this.referenceVerifyPipeline)throw Error('Reference verification pipeline is unavailable.');
+            mismatches=storageBuffer(device,1,'reference-decode-mismatches',GPUBufferUsage.COPY_SRC);
+            device.queue.writeBuffer(mismatches,0,new Uint32Array(1));
+            const verify=encoder.beginComputePass({label:'verify-reference-decode'});
+            verify.setPipeline(this.referenceVerifyPipeline);
+            verify.setBindGroup(0,device.createBindGroup({layout:this.referenceVerifyPipeline.getBindGroupLayout(0),entries:[
+              {binding:0,resource:{buffer:raw}},{binding:9,resource:{buffer:replacement}},{binding:10,resource:{buffer:mismatches}},
+            ]}));
+            verify.dispatchWorkgroups(Math.ceil(orbit.length/64));verify.end();
+          }
+          device.queue.submit([encoder.finish()]);
+          return mismatches?readBuffer(device,mismatches,4):device.queue.onSubmittedWorkDone().then(()=>new ArrayBuffer(0));
+        });
+        this.referenceDecodeMismatches=mismatchBytes.byteLength?new Uint32Array(mismatchBytes)[0]:0;
+        if(this.referenceDecodeMismatches)throw Error(`Reference decode mismatch in ${this.referenceDecodeMismatches} entries.`);
+        const currentLive=demand.followView?this.currentView??request:request;
+        if(this.pendingReferenceDemand!==demand||request.isCurrent&&!request.isCurrent()||!this.referenceDemandCompatible(demand,currentLive))throw new DOMException("Superseded reference","AbortError");
+        const previous=this.orbitBuffer;this.orbitBuffer=replacement!;replacement=undefined;this.orbitCapacity=orbit.length;previous?.destroy();
+      }finally{raw?.destroy();replacement?.destroy();mismatches?.destroy();}
       return { length: orbit.length, escaped: orbit.escaped, ms: performance.now() - started, samples };
     } finally {
       if (this.pendingReferenceDemand === demand) this.pendingReferenceDemand = null;
@@ -691,6 +750,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     });}catch(error){replacement?.destroy();throw error;}
     this.target?.destroy();this.target=replacement!;
     this.targetSize = { width, height };
+    this.targetAllocations++;
   }
 
   /**
@@ -802,12 +862,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private ensureOrbitCapacity(samples: number) {
     if (this.orbitCapacity >= samples && this.orbitBuffer) return;
-    if(samples*80>Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize))throw Error('This iteration limit exceeds this GPU’s reference buffer capacity.');
+    if(samples*96>Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize))throw Error('This iteration limit exceeds this GPU’s decoded-reference buffer capacity.');
     this.orbitBuffer?.destroy();
     this.orbitBuffer = storageBuffer(
       this.ctx.device,
-      samples * 20,
-      "orbit-samples",
+      samples * 24,
+      "reference-orbit-decoded",
       GPUBufferUsage.COPY_SRC
     );
     this.orbitCapacity = samples;
@@ -956,6 +1016,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
     this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
+    this.fieldStats=null;this.fieldDescriptor=null;this.fieldUniforms=null;
     this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
     this.abort();
   }
@@ -969,13 +1030,110 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const frame=this.lastFrame;
     return this.fieldComplete && !this.finalizing && this.historyValid && !!frame && !frame.proxy &&
       this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
+      frame.useApprox===(request.useApprox===true) &&
       (request.family!=="julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors)===JSON.stringify(request.colors) && (!request.colors.postAntialias||!!this.antialiasFrame);
   }
   private samePresentation(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>): frame is NonNullable<WebGpuRenderer["lastFrame"]> {
     return !!frame && frame.family === request.family && frame.maxIterations === request.maxIterations &&
+      frame.useApprox === (request.useApprox === true) &&
       (request.family !== "julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors) === JSON.stringify(request.colors);
+  }
+
+  private copyColors(colors: ColorSettings): ColorSettings {
+    return { ...colors, stops: [...colors.stops], positions: colors.positions ? [...colors.positions] : undefined };
+  }
+
+  /** Mutates one host-side uniform snapshot and returns its matching stop data. */
+  private fillAppearance(uniforms: ArrayBuffer, colors: ColorSettings, retainEndpoints: boolean) {
+    const f32=new Float32Array(uniforms),u32=new Uint32Array(uniforms);
+    const stopData=new Float32Array(MAX_STOPS*4);
+    colors.stops.slice(0,MAX_STOPS).forEach((stop,i)=>{
+      stopData.set(hexToRgb(stop),i*4);stopData[i*4+3]=stopPositions(colors)[i];
+    });
+    u32[84]=colors.formula??0;u32[85]=colors.effect??0;u32[86]=colors.capped??0;u32[87]=colors.repeating===false?0:1;u32[88]=retainEndpoints?1:0;
+    u32[9]=colors.palette;f32[10]=Math.max(1,colors.cycle);f32[11]=colors.offset;u32[12]=colors.mapping;u32[13]=colors.mirror?1:0;u32[14]=colors.smooth?1:0;
+    const interior=hexToRgb(colors.interior);f32[16]=interior[0];f32[17]=interior[1];f32[18]=interior[2];u32[19]=Math.max(1,Math.min(MAX_STOPS,colors.stops.length));
+    u32[22]=colors.mode;f32[23]=colors.colorDensity;f32[24]=colors.colorPhase;f32[25]=colors.slopeDepth;
+    const azimuth=colors.lightAngle*Math.PI/180,elevation=colors.lightElevation*Math.PI/180;
+    f32[28]=Math.cos(azimuth)*Math.cos(elevation);f32[29]=Math.sin(azimuth)*Math.cos(elevation);f32[30]=Math.sin(elevation);
+    f32[31]=colors.ambientLight;f32[32]=colors.diffuseStrength;f32[33]=colors.specularStrength;u32[34]=colors.slopeLighting?1:0;f32[36]=1/Math.max(1,colors.gamma);
+    return stopData;
+  }
+
+  private createRenderBind() {
+    return this.ctx.device.createBindGroup({
+      layout:this.bindLayout!,entries:[
+        {binding:1,resource:{buffer:this.uniformBuffer}},{binding:2,resource:this.target!.createView()},
+        {binding:3,resource:{buffer:this.stopsBuffer}},
+        {binding:4,resource:{buffer:this.laBuffer!}},{binding:5,resource:{buffer:this.laIndexBuffer!}},
+        {binding:6,resource:{buffer:this.statsBuffer}},{binding:7,resource:{buffer:this.fieldBuffer!}},
+        {binding:8,resource:{buffer:this.endpointBuffer!}},{binding:9,resource:{buffer:this.orbitBuffer!}},
+      ],
+    });
+  }
+
+  private encodeShadePass(encoder:GPUCommandEncoder,bind:GPUBindGroup,width:number,height:number,timingSamples:(TimingSample|undefined)[]){
+    const sample=this.timing.begin("shade");
+    const pass=encoder.beginComputePass({label:"shade-region",timestampWrites:this.timing.writes(sample)});
+    pass.setPipeline(this.shadePipeline!);pass.setBindGroup(0,bind);
+    pass.dispatchWorkgroups(Math.ceil(width/8),Math.ceil(height/8));pass.end();
+    this.timing.resolve(encoder,sample);timingSamples.push(sample);
+  }
+
+  private appearanceCompatible(base:RenderRequest,latest:RenderRequest,method:Method,grid:number,retainEndpoints:boolean){
+    const family=base.family??"mandelbrot",latestFamily=latest.family??"mandelbrot";
+    return this.sameView(base,latest)&&family===latestFamily&&base.maxIterations===latest.maxIterations&&
+      (base.useApprox===true)===(latest.useApprox===true)&&
+      (family!=="julia"||!!base.juliaX?.eq(latest.juliaX!)&&!!base.juliaY?.eq(latest.juliaY!))&&
+      base.colors.mode===latest.colors.mode&&grid===this.affordableGrid(Math.max(1,Math.min(3,latest.colors.supersample)),latest.width,latest.height)&&
+      method===(latest.forceMethod??methodForScale(latest.unitsPerPixel))&&(!needsEndpoints(latest.colors)||retainEndpoints);
+  }
+
+  private fieldSupportsAppearance(request:RenderRequest,method:Method,grid:number){
+    const descriptor=this.fieldDescriptor,view=this.fieldView,family=request.family??"mandelbrot";
+    const constant=family==="julia"?`${request.juliaX},${request.juliaY}`:"";
+    return !!(this.fieldComplete&&this.fieldUniforms&&this.fieldStats&&descriptor&&view&&this.target&&this.fieldBuffer&&this.endpointBuffer&&
+      this.sameView(view,request)&&descriptor.family===family&&descriptor.constant===constant&&descriptor.maxIterations===request.maxIterations&&
+      descriptor.mode===request.colors.mode&&descriptor.grid===grid&&descriptor.method===method&&request.colors.mode!==2&&
+      descriptor.useApprox===(request.useApprox===true)&&
+      (!needsEndpoints(request.colors)||descriptor.retainEndpoints));
+  }
+
+  /** Fast completed-field recolour: no orbit/table/resource setup or stats readback. */
+  private async recolorCompleted(request:RenderRequest,requestKey:string,method:Method,grid:number):Promise<RenderStats|null>{
+    if(!this.fieldSupportsAppearance(request,method,grid))return null;
+    const {device}=this.ctx,started=performance.now();
+    const colors=this.copyColors(request.colors),uniforms=this.fieldUniforms!.slice(0),u32=new Uint32Array(uniforms);
+    u32[26]=request.height;u32[35]=grid;u32[40]=0;u32[41]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;u32[55]=1;
+    const stops=this.fillAppearance(uniforms,colors,this.fieldDescriptor!.retainEndpoints),bind=this.createRenderBind();
+    let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined;
+    const timingSamples:(TimingSample|undefined)[]=[];
+    this.finalizing=true;
+    try{
+      candidate=this.candidateTexture(request.width,request.height);
+      if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);
+      await checkedGpu(device,()=>{
+        device.queue.writeBuffer(this.stopsBuffer,0,stops);device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+        const encoder=device.createCommandEncoder({label:"recolour-complete"});
+        this.encodeShadePass(encoder,bind,request.width,request.height,timingSamples);
+        encoder.copyTextureToTexture({texture:this.target!},{texture:candidate!},{width:request.width,height:request.height});
+        if(candidateAa)this.encodeAntialias(encoder,candidate!,candidateAa,timingSamples);
+        device.queue.submit([encoder.finish()]);timingSamples.forEach(sample=>this.timing.collect(sample));
+      });
+      this.appearanceSubmissions++;
+      const frame={family:request.family,juliaX:request.juliaX,juliaY:request.juliaY,centerX:request.centerX,centerY:request.centerY,
+        unitsPerPixel:request.unitsPerPixel,width:request.width,height:request.height,colors,maxIterations:request.maxIterations,useApprox:request.useApprox===true};
+      const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.currentView)&&this.samePresentation(frame,this.currentView));
+      if(!current||this.deviceLost){return {...this.fieldStats!,completed:false,computed:false,computedSamples:0,reusedSamples:0,renderMs:performance.now()-started};}
+      this.commitHistory({...request,colors},candidate);candidate=undefined;this.lastFrame=frame;this.historyValid=true;this.incomingFrame=null;
+      if(candidateAa){this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
+      this.antialiasFrame=colors.postAntialias?frame:null;this.fieldUniforms=uniforms;this.lastPartialAt=performance.now();this.appearancePublications++;
+      const result={...this.fieldStats!,completed:true,computed:false,computedSamples:0,reusedSamples:request.width*request.height,
+        orbitMs:0,pipelineWaitMs:0,tableMs:0,renderMs:performance.now()-started,skippedIterations:0,plainIterations:0,approxSteps:0,rebases:0,skipRatio:0};
+      this.cachedStats=result;this.cachedRequest=requestKey;return result;
+    }finally{candidate?.destroy();candidateAa?.destroy();this.finalizing=false;}
   }
 
   /** Captures only the completed, current 8-bit presentation image. */
@@ -1091,18 +1249,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const { device } = this.ctx;
     validateRenderSize(device.limits,request.width,request.height,needsEndpoints(request.colors)||request.colors.mode===1?16:8);
     if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
-    this.referencePreparing=true;this.finalizing=false;
+    this.referencePreparing=false;this.finalizing=false;
     const epoch = this.publicationEpoch;
     this.abortRequested=false;
     if(!Number.isInteger(request.maxIterations)||request.maxIterations<1||request.maxIterations>1_000_000)throw Error('Unsupported iteration limit (maximum 1000000).');
     const presentationCurrent=request.isCurrent;
     const originalCurrent = request.isCalculationCurrent ?? presentationCurrent;
-    request = { ...request, colors: { ...request.colors, stops: [...request.colors.stops] },
+    request = { ...request, colors: this.copyColors(request.colors),
       isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
 
-    const requestKey = [request.centerX, request.centerY, request.unitsPerPixel, request.width, request.height,
-      request.family, request.juliaX, request.juliaY, request.maxIterations, request.forceMethod, request.useApprox === true,
-      JSON.stringify(request.colors)].join("|");
+    const keyFor=(value:RenderRequest)=>[value.centerX,value.centerY,value.unitsPerPixel,value.width,value.height,
+      value.family,value.juliaX,value.juliaY,value.maxIterations,value.forceMethod,value.useApprox===true,
+      JSON.stringify(value.colors)].join("|");
+    let requestKey=keyFor(request);
     if (requestKey === this.cachedRequest && this.cachedStats && this.historyValid && request.isCurrent!()) {
       this.referencePreparing=false;this.exactTotalSamples=request.width*request.height;this.exactCompletedSamples=this.exactTotalSamples;
       return { ...this.cachedStats, computed: false, computedSamples: 0,
@@ -1114,6 +1273,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     const method = request.forceMethod ?? methodForScale(request.unitsPerPixel);
+    const initialGrid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
+    const recoloured=await this.recolorCompleted(request,requestKey,method,initialGrid);
+    if(recoloured)return recoloured;
+    this.referencePreparing=true;
     const wide = request.family === "julia" || method !== Method.Direct;
     const limbs = limbsForScale(request.unitsPerPixel, wide ? 96 : 48);
     Decimal.set({ precision: Math.max(Decimal.precision,Math.ceil((32 * (limbs - 1)) / 3.32) + 10) });
@@ -1191,22 +1354,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       request.centerY.minus(this.refY)
     );
 
-    const colors = request.colors;
-    const stopData = new Float32Array(MAX_STOPS * 4);
-    colors.stops.slice(0, MAX_STOPS).forEach((stop, i) => {
-      stopData.set(hexToRgb(stop), i * 4);
-      stopData[i * 4 + 3] = stopPositions(colors)[i];
-    });
-    device.queue.writeBuffer(this.stopsBuffer, 0, stopData);
+    let colors=this.copyColors(request.colors);
 
     // The field is two floats per sub-sample, so it grows with the square of
     // the sample grid: 3x3 at 4K would be a gigabyte and the allocation simply
     // fails. Drop sample counts that will not fit rather than die trying.
-    const grid = this.affordableGrid(
-      Math.max(1, Math.min(3, colors.supersample)),
-      request.width,
-      request.height
-    );
+    const grid=initialGrid;
 
     let previewStride=1;
     if(request.followView && !request.tileRows && colors.mode!==2 && grid===1) {
@@ -1240,42 +1393,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.endpointBuffer?.destroy();this.endpointBuffer=replacement!;this.endpointCapacity=endpointCount;
     }
     if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded endpoints','AbortError');
-    u32[84]=colors.formula??0;u32[85]=colors.effect??0;u32[86]=colors.capped??0;u32[87]=colors.repeating===false?0:1;u32[88]=this.retainEndpoints?1:0;
     u32[8] = this.refLength;
-    u32[9] = colors.palette;
-    f32[10] = Math.max(1, colors.cycle);
-    f32[11] = colors.offset;
-    u32[12] = colors.mapping;
-    u32[13] = colors.mirror ? 1 : 0;
-    u32[14] = colors.smooth ? 1 : 0;
-    // interior: vec3<f32> aligns to 16 bytes -> offset 64.
-    const interior = hexToRgb(colors.interior);
-    f32[16] = interior[0];
-    f32[17] = interior[1];
-    f32[18] = interior[2];
-    u32[19] = Math.max(1, Math.min(MAX_STOPS, colors.stops.length));
     const deltaBound = requiredDelta;
     const approximationLevels =
       request.useApprox !== true || method !== Method.Hdr || family === "julia" || colors.mode === 1 || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
     u32[20] = approximationLevels;
     u32[21] = BASE_STEP;
-    u32[22] = colors.mode;
-    f32[23] = colors.colorDensity;
-    f32[24] = colors.colorPhase;
-    f32[25] = colors.slopeDepth;
-    // lightDir: vec3<f32> aligns to 16 bytes -> offset 112.
-    const azimuth = (colors.lightAngle * Math.PI) / 180;
-    const elevation = (colors.lightElevation * Math.PI) / 180;
-    f32[28] = Math.cos(azimuth) * Math.cos(elevation);
-    f32[29] = Math.sin(azimuth) * Math.cos(elevation);
-    f32[30] = Math.sin(elevation);
-    f32[31] = colors.ambientLight;
-    f32[32] = colors.diffuseStrength;
-    f32[33] = colors.specularStrength;
-    u32[34] = colors.slopeLighting ? 1 : 0;
     u32[35] = grid;
     u32[26] = request.height; u32[54]=1; u32[55]=previewStride;
-    f32[36] = 1 / Math.max(1, colors.gamma);
     u32[37] = method;
     f32[38] = request.centerX.toNumber();
     f32[39] = request.centerY.toNumber();
@@ -1293,6 +1418,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         request.centerY.minus(this.refY).div(offsetPower), request.centerX, request.centerY,
         request.juliaX ?? new Decimal(0), request.juliaY ?? new Decimal(0)].forEach((value, i) => f32.set(splitQuad(value), 56 + i * 4));
     }
+    const stopData=this.fillAppearance(uniforms,colors,this.retainEndpoints);
+    device.queue.writeBuffer(this.stopsBuffer,0,stopData);
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(12));
 
@@ -1321,43 +1448,27 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       await checkedGpu(device,()=>this.moveField(request, request.width * request.height * grid * grid, sampleKey,
         grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid));
       if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded field','AbortError');
+      // A calculated anchor remains authoritative when refinement changes only
+      // sample density: sparse and dense visits use the same numerical policy.
       u32[41] = grid === 1 && colors.mode !== 2 ? 1 : 0;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     }
     this.exactTotalSamples=request.width*request.height;
     this.exactCompletedSamples=fieldStale?0:this.exactTotalSamples;
 
-    const bind = device.createBindGroup({
-      layout: this.bindLayout!,
-      entries: [
-        { binding: 0, resource: { buffer: this.orbitBuffer! } },
-        { binding: 1, resource: { buffer: this.uniformBuffer } },
-        { binding: 2, resource: this.target!.createView() },
-        { binding: 3, resource: { buffer: this.stopsBuffer } },
-        { binding: 4, resource: { buffer: this.laBuffer! } },
-        { binding: 5, resource: { buffer: this.laIndexBuffer! } },
-        { binding: 6, resource: { buffer: this.statsBuffer } },
-        { binding: 7, resource: { buffer: this.fieldBuffer! } },
-        { binding: 8, resource: { buffer: this.endpointBuffer! } },
-      ],
-    });
+    const bind=this.createRenderBind();
 
     const frame = {
       family: request.family, juliaX: request.juliaX, juliaY: request.juliaY,
       centerX: request.centerX, centerY: request.centerY,
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
-      colors: request.colors, maxIterations: request.maxIterations,
+      colors, maxIterations: request.maxIterations,
+      useApprox: request.useApprox===true,
     };
     const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false;
     let timingSamples: (TimingSample | undefined)[] = [];
     const collectTimings = () => { timingSamples.forEach(s => this.timing.collect(s)); timingSamples = []; };
-    const shade = (encoder: GPUCommandEncoder, width: number, height: number) => {
-      const sample = this.timing.begin("shade");
-      const pass = encoder.beginComputePass({ label: "shade-region", timestampWrites: this.timing.writes(sample) });
-      pass.setPipeline(this.shadePipeline!); pass.setBindGroup(0, bind);
-      pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8)); pass.end();
-      this.timing.resolve(encoder, sample); timingSamples.push(sample);
-    };
+    const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height,timingSamples);
     this.aborted = false;
     this.partialRegions = 0; this.firstPartialAt = 0;
     let completed = true, cpuReused = 0, submittedVisits=0;
@@ -1378,6 +1489,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!fieldStale) this.pending.reset(0,0);
     if (fieldStale) { this.pending.reset(request.width,request.height,previewStride,request.followView); this.determined=new CoverageRegions(); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
     const targetStarted=performance.now();
+    const serviceAppearance=()=>{
+      if(!request.followView)return true;
+      const latest=this.currentView;
+      if(!latest||frame.family===latest.family&&frame.maxIterations===latest.maxIterations&&
+        (latest.family!=="julia"||!!frame.juliaX?.eq(latest.juliaX!)&&!!frame.juliaY?.eq(latest.juliaY!))&&
+        JSON.stringify(frame.colors)===JSON.stringify(latest.colors))return true;
+      if(!this.sameView(request,latest))return true;
+      if(!this.appearanceCompatible(request,latest,method,grid,this.retainEndpoints))return false;
+      colors=this.copyColors(latest.colors);request={...request,colors};requestKey=keyFor(request);frame.colors=colors;
+      const latestStops=this.fillAppearance(uniforms,colors,this.retainEndpoints);
+      u32[26]=request.height;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;
+      device.queue.writeBuffer(this.stopsBuffer,0,latestStops);device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+      const encoder=device.createCommandEncoder({label:"shade-latest-appearance"});shade(encoder,request.width,request.height);
+      device.queue.submit([encoder.finish()]);collectTimings();this.appearanceSubmissions++;
+      if(progressive){this.incomingFrame=frame;this.lastPartialAt=performance.now();this.reproject(latest);this.appearancePublications++;}
+      return true;
+    };
     while (this.pending.size) {
       const minimum=Math.max(64,Math.floor(MIN_BATCH_SAMPLES*Math.min(1,10000/request.maxIterations)/64)*64);
       const budget = this.batchMsPerSample > 0 ?
@@ -1430,6 +1558,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if (!request.isCurrent!() || this.abortRequested) {
         completed = false; this.aborted = true; break;
       }
+      if(!serviceAppearance()){
+        this.retarget=true;completed=false;break;
+      }
       // A geometry change updates demand regardless of input state. Give each
       // target useful bounded work, then follow the live camera. Releasing a
       // button changes neither this condition nor the outstanding queue.
@@ -1440,6 +1571,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       }
     }
     if (!request.isCurrent!()||this.abortRequested) completed = false;
+    if(completed&&!serviceAppearance()){this.retarget=true;completed=false;}
     if(completed&&(this.pending.size!==0||exactCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
     this.finalizing=completed;
     let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined,published=false;
@@ -1509,6 +1641,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       skipRatio: total > 0 ? skippedIterations / total : 0,
       cappedRatio: counters[5] > 0 ? counters[4] / counters[5] : 0,
     };
+    if(completed&&this.fieldComplete){
+      this.fieldDescriptor={family,constant,maxIterations:request.maxIterations,mode:colors.mode,grid,method,useApprox:request.useApprox===true,retainEndpoints:this.retainEndpoints};
+      this.fieldUniforms=uniforms.slice(0);this.fieldStats=result;
+    }
     if (completed && request.isCurrent!() && published) {
       this.cachedStats = result; this.cachedRequest = requestKey;
 

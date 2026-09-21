@@ -18,7 +18,8 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
 
 ## Explore
 
-- Hold left/right mouse to zoom in/out, steering with the pointer. Shift-drag
+- Hold left/right mouse to zoom in/out, steering with the pointer. The default
+  zoom speed is 0.7x. Shift-drag
   or middle-drag pans; the wheel zooms. On the focused canvas, +/− zoom,
   arrow keys pan, and Esc stops motion.
 - J toggles a small Julia preview. While it is open, left-click/drag selects
@@ -66,7 +67,7 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   Coordinates, span, c, iteration limit and appearance round-trip without
   trimming digits. Old links use default appearance.
 
-Every page load starts at shallow Home (`10^0`, 1,000 iterations). It retains
+Every page load starts at shallow Home (`10^0`, 2,000 iterations). It retains
 saved locations, palette/appearance and panel preferences, but never restores a
 remembered deep camera or iteration budget automatically. A URL hash is parsed
 and staged without starting its calculation; Main shows **Open linked
@@ -88,17 +89,17 @@ history pixels. Each batch shades its own region, with one initial validity
 pass and one completed-image copy, rather than repeating full-image shading
 or copying for every update. Partial progress is not a completed field.
 
-One renderer-owned queue serves motion and rest at the exact requested pixel
+One renderer-owned queue serves motion and rest at the requested pixel
 spacing. It recursively splits pending rectangles at their midpoint. Zoom-in
 weights pointer detail alongside exposed or poorly resolved coverage. Spatial
 service persists across compatible retargets. Intermediate 8/4/2 sample strides
-compete locally with exact work; there is no whole-viewport stage barrier.
+compete locally with dense work; there is no whole-viewport stage barrier.
 Sparse actual target samples compete with dense work by
 visible density deficit and calculation cost. Adequate existing coverage
 suppresses sparse work; there is no mandatory whole-view preview stage.
 Sparse samples fill hard-edged display blocks only: the scalar slots between
 them remain unknown until calculated. The compositor prefers finer available
-source coverage, with exact current-view pixels authoritative at completion.
+source coverage, with resolved current-view pixels authoritative at completion.
 Priorities follow the live camera and current-target progress between GPU batches,
 with deterministic broad service so other visible gaps finish. Shading chooses
 the finest available aligned anchor. This adapts XaoS's documented dynamic
@@ -109,13 +110,14 @@ Releasing the mouse changes demand, without cancelling compatible pending work,
 changing the grid resolution or starting a separate quality stage. Matching
 complex coordinates retain their scalar samples through the existing GPU remap;
 off-grid retained imagery is presentation-only. Once the camera is unchanged,
-the same queue finishes every exact target pixel. Palette changes reuse scalars.
+the same queue resolves every target pixel. Palette changes reuse scalars.
 
-The footer's refinement percentage is conservative exact-tier progress for the
-current target: only completed dense target samples and proven exact reuse are
-credited. Sparse preview samples and overlapping presentation coverage are not
-summed. It can decrease or reset as camera demand changes and reaches 100% only
-after the current field and any optional final pass have drained.
+The footer's refinement percentage is conservative dense-tier progress for the
+current target: only resolved dense target samples and compatible retained
+samples are credited. Sparse preview samples and overlapping presentation
+coverage are not summed. It can decrease or reset as camera demand changes and
+reaches 100% only after the current sampling target and any optional final pass
+have drained. It is not a mathematical accuracy certificate.
 
 Advanced offers optional completed-image antialiasing, off by default. It is a
 single cached low-preset FXAA-style presentation pass over a completed fractal
@@ -131,7 +133,7 @@ Before retargeting a partial image, the hard-edge composite is retained as a
 display proxy, including its validity and sample density. One original completed source
 also remains available for broader coverage, including highly magnified coarse
 fallback where partial detail has holes. Proxies never populate numerical
-storage or establish exact completion. Priority uses a bounded conservative
+storage or establish target completion. Priority uses a bounded conservative
 collection of known rectangles and their spacing. Overlaps count only their
 finest density; discarded older hints may cause redundant priority, never false
 scalar validity. Proxies use an anchored presentation lattice: fractional pans do not repeatedly
@@ -142,17 +144,23 @@ samples do not disappear through byte-alpha rounding. The extra precision is
 for sub-byte sample-density metadata, not HDR display. Canvas presentation,
 completed images and PNG exports remain ordinary opaque 8-bit RGB.
 
-Measured expensive 64K-sample batches stalled presentation, so the queue starts
-at 16K samples and grows cheap batches using measured cost. Changes of numerical
-method, precision or iteration budget reset that estimate. Rectangle
-splitting can make an individual dispatch smaller. This trades some numerical
-throughput for responsiveness; eight milliseconds is a sizing target, not a
-GPU latency guarantee. Input state never selects a different batch policy.
+Measured expensive batches stalled presentation, so the numerical submission
+floor scales down from roughly 16K samples with the iteration cap; measured cost
+can grow batches toward an eight-millisecond target. Sparse preview density begins
+near 16K anchors. Changes of numerical method, precision or iteration budget reset
+that estimate. Rectangle splitting can make an individual dispatch smaller. This
+trades some numerical throughput for responsiveness; eight milliseconds is a
+sizing target, not a GPU latency guarantee. Input state does not select a different
+batch policy.
 The Julia preview can run between main-stream batches.
 Orbit pipelines compile
-asynchronously. Ordinary product rendering does not build or use BLA skips.
-Explicit development experiments can opt in; expanded experimental views rebuild
-the table's conservative offset bound while retaining the reference orbit.
+asynchronously. At deep Mandelbrot scales, every eligible sampling density uses
+one standard linear BLA table to skip reference ranges within its existing
+radius policy. Ordinary Wide recurrence is the local fallback when a skip is
+inapplicable, and changing density does not force recomputation of an already
+calculated sample. Julia, direct Mandelbrot and derivative-distance colouring
+do not use BLA. Expanded views rebuild the table's conservative offset bound
+while retaining the reference orbit.
 Statistics distinguish reference work, pipeline wait, optional table preparation,
 completed-field wall time and copied/computed samples.
 Wide perturbation carries the already decoded absolute reference sample across
@@ -204,13 +212,14 @@ These are sampled checks, not universal per-pixel certification. One original
 fixed-cap pixel independently escapes at 19688 while the unaccelerated GPU path
 reports 19679; this remains unresolved. Mandelbrot
 and Julia perturbation share QD-derived four-f32 mantissas for coordinates,
-reference transport, recurrence and rebasing. Julia keeps BLA disabled, and
-direct Mandelbrot retains its cheaper compensated-pair path.
-The older BLA path is disabled by default after demonstrated additional count
-and endpoint errors. It remains available only through explicit development
-opt-in for diagnostics; its bounded polynomial and pair coefficient transport
-remain unqualified approximations.
-Neither WGSL nor these tests establish universal error-free arithmetic.
+reference transport, recurrence and rebasing. When BLA is enabled, completed
+dense Mandelbrot fields and PNG export use the same linear approximation policy
+as navigation samples. Completion means the current sampling target is fully
+resolved under that selected policy, not that it matches the no-skip recurrence
+or an independent oracle. Julia keeps BLA disabled, derivative-distance
+colouring falls back to the no-skip recurrence, and direct Mandelbrot retains
+its cheaper compensated-pair path. Neither WGSL nor these tests establish
+universal error-free arithmetic.
 Precision grows through profiles up to
 256 u32 limbs; views beyond that range are rejected.
 
@@ -226,9 +235,15 @@ until coverage arrives. New detail may change pixels abruptly, with no blur
 to hide it. Deep fields can take seconds to refine at high resolution.
 The one-million cap is supported, not a speed promise. Work counters use paired
 words so high-cap totals do not wrap at 32 bits. Reference/table allocations
-check actual device capacity; optional experimental BLA preparation yields cooperatively and high-cap
+check actual device capacity; BLA preparation yields cooperatively and high-cap
 batches shrink. Cancellation still waits for an already submitted GPU batch.
 GPU loss requires a reload. There is no built-in recording or public deploy.
+
+Deferred follow-up remains intentionally outside this baseline: further
+colour-control response latency and status-flicker work; first-use endpoint and
+Distance Lighting regeneration; authoritative endpoint-comparison evidence
+(the experimental readback was all-zero and could not establish equality); and
+untested CPU-assistance candidates.
 
 ## Licensing
 

@@ -17,7 +17,7 @@ const settle=async()=>{const start=Date.now();for(;;){const s=await status();if(
 
 try{
   await page.goto(base);await page.waitForFunction(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;return !!a.testing?.engine;});await settle();
-  check('safe fixed Home startup',(await snapshot()).iterationMode==='fixed'&&(await snapshot()).iterations===1000);
+  check('safe fixed Home startup',(await snapshot()).iterationMode==='fixed'&&(await snapshot()).iterations===2000&&await page.locator('#speed').inputValue()==='0.7');
   check('edge-connected keyboard tabs',await page.locator('[role=tab]').count()===3&&await page.locator('.panel-heading,#back,#forward,#palette-panel,#open-palette').count()===0);
   await page.locator('#tab-main').focus();await page.keyboard.press('ArrowRight');
   check('tab keyboard navigation',await page.locator('#tab-colouring').getAttribute('aria-selected')==='true');
@@ -56,7 +56,7 @@ try{
   await page.locator('#fractal').focus();await page.keyboard.down('+');await page.waitForTimeout(2600);await page.keyboard.press('Escape');await page.keyboard.up('+');const dynamic=await settle();
   check('held dynamic zoom relatches and Escape settles the current cap',(await snapshot()).iterationMode==='dynamic'&&dynamic.effectiveLimit>1024&&dynamic.lastRevision===dynamic.revision&&dynamic.progress.percentage===100&&await page.locator('#iteration-detail').innerText().then(text=>text.includes(`Effective ${dynamic.effectiveLimit.toLocaleString()}`)),{effective:dynamic.effectiveLimit,revision:dynamic.revision});
   await page.locator('#full-reset').click();await settle();const reset=await snapshot();
-  check('full reset restores defaults and preserves saved locations',reset.iterationMode==='fixed'&&reset.span==='2.8'&&reset.appearance.postAntialias===false&&await page.locator('#locations option').filter({hasText:'Keep me'}).count()===1&&await page.locator('#tab-main').getAttribute('aria-selected')==='true',reset);
+  check('full reset restores defaults and preserves saved locations',reset.iterationMode==='fixed'&&reset.iterations===2000&&reset.span==='2.8'&&reset.appearance.postAntialias===false&&await page.locator('#speed').inputValue()==='0.7'&&await page.locator('#locations option').filter({hasText:'Keep me'}).count()===1&&await page.locator('#tab-main').getAttribute('aria-selected')==='true',reset);
   await page.screenshot({path:path.join(output,'reset-main.png')});
 }catch(error){errors.push(String(error));console.error(error);}finally{
   const report={checks,errors,browser:context.browser()?.version()};fs.writeFileSync(path.join(output,'results.json'),JSON.stringify(report,null,2));await context.close();

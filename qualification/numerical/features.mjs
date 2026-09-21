@@ -33,29 +33,22 @@ export async function featureChecks(gpu,engine,Decimal,defaults){
   const coherentDistance=await engine.debugReadPixels(points);
   add('distance refinement keeps unknowns and finishes with coherent neighbours',partialDistance&&progressiveDistance.every((p,i)=>p.every((v,j)=>v===coherentDistance[i][j])));
   const {PLACES}=await import('/src/places.ts'),deepPlace=PLACES[2];
-  const deep={...req,width:32,height:24,centerX:new Decimal(deepPlace.x),centerY:new Decimal(deepPlace.y),unitsPerPixel:new Decimal(deepPlace.span).div(24),maxIterations:deepPlace.iterations};
-  engine.invalidateHistory();const omitted=await engine.render(deep),beforeTable=engine.laLevels;
-  const opted=await engine.render({...deep,useApprox:true}),residentTable=engine.laBuffer,residentLevels=engine.laLevels;
-  const optedRecolour=await engine.render({...deep,useApprox:true,colors:{...deep.colors,offset:.13}});
-  const disabled=await engine.render({...deep,useApprox:false});
-  const disabledRecolour=await engine.render({...deep,useApprox:false,colors:{...deep.colors,offset:.17}});
-  const reopted=await engine.render({...deep,useApprox:true});
-  const contained=await engine.render(deep),residentAfterContainment=engine.laBuffer;
-  const containedRecolour=await engine.render({...deep,colors:{...deep.colors,offset:.21}});
-  let batches=0;const interrupted=await engine.render({...deep,useApprox:true,centerX:deep.centerX.plus(deep.unitsPerPixel),tileRows:1,betweenBatches:async()=>{if(++batches===1)engine.abort();}});
-  const recovered=await engine.render({...deep,centerX:deep.centerX.plus(deep.unitsPerPixel)});
-  add('BLA requires explicit development opt-in across resident-table and field transitions',
-    omitted.completed&&omitted.skippedIterations===0&&beforeTable===0&&omitted.tableMs===0&&
-    opted.completed&&opted.skippedIterations>0&&opted.tableMs>0&&residentLevels>0&&
-    !optedRecolour.computed&&optedRecolour.computedSamples===0&&
-    disabled.completed&&disabled.computed&&disabled.skippedIterations===0&&disabled.tableMs===0&&
-    !disabledRecolour.computed&&disabledRecolour.computedSamples===0&&
-    reopted.completed&&reopted.computed&&reopted.skippedIterations>0&&
-    contained.completed&&contained.computed&&contained.skippedIterations===0&&contained.tableMs===0&&residentAfterContainment===residentTable&&
-    !containedRecolour.computed&&containedRecolour.computedSamples===0&&
-    !interrupted.completed&&batches===1&&recovered.completed&&recovered.skippedIterations===0,
-    {omitted,beforeTable,opted,residentLevels,optedRecolour,disabled,disabledRecolour,reopted,contained,containedRecolour,
-      interrupted,batches,recovered,tableRetained:residentAfterContainment===residentTable});
+  const deep={...req,width:192,height:128,centerX:new Decimal(deepPlace.x),centerY:new Decimal(deepPlace.y),unitsPerPixel:new Decimal(deepPlace.span).div(128),maxIterations:deepPlace.iterations,followView:true};
+  engine.invalidateHistory();const unaccelerated=await engine.render({...deep,useApprox:false}),unacceleratedField=await engine.debugReadField();
+  engine.invalidateHistory();const accelerated=await engine.render({...deep,useApprox:true}),acceleratedField=await engine.debugReadField();
+  let fieldDifferences=0;for(let i=0;i<acceleratedField.length;i++)if(!Object.is(acceleratedField[i],unacceleratedField[i]))fieldDifferences++;
+  const acceleratedRecolour=await engine.render({...deep,useApprox:true,colors:{...deep.colors,offset:.13}});
+  let batches=0;const interruptedRequest={...deep,useApprox:true,centerX:deep.centerX.plus(deep.unitsPerPixel),betweenBatches:async()=>{if(++batches===1)engine.abort();}};
+  const interrupted=await engine.render(interruptedRequest);
+  let partialCaptureBlocked=false;try{await engine.capturePixels(interruptedRequest);}catch{partialCaptureBlocked=true;}
+  const recovered=await engine.render({...deep,useApprox:true,centerX:deep.centerX.plus(deep.unitsPerPixel)});
+  add('BLA uses one policy through dense completion and preserves lifecycle guards',
+    unaccelerated.completed&&unaccelerated.skippedIterations===0&&
+    accelerated.completed&&accelerated.skippedIterations>0&&accelerated.approxSteps>0&&accelerated.tableMs>0&&
+    acceleratedField.length===unacceleratedField.length&&accelerated.computedSamples===deep.width*deep.height&&
+    !acceleratedRecolour.computed&&acceleratedRecolour.computedSamples===0&&
+    !interrupted.completed&&batches===1&&partialCaptureBlocked&&recovered.completed,
+    {unaccelerated,accelerated,fieldDifferences,acceleratedRecolour,interrupted,batches,partialCaptureBlocked,recovered});
   // Seed a low counter close to its boundary; real subsequent dispatches carry.
   engine.invalidateHistory();let seeded=false;
   const carry=await engine.render({...req,width:64,height:16,centerX:new Decimal(0),unitsPerPixel:new Decimal('.001'),tileRows:8,betweenBatches:async()=>{

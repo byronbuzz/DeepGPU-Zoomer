@@ -1,6 +1,12 @@
 // Shared QD-derived transport and recurrence for sensitive perturbation orbits.
 // Coordinates, reference samples and rebased deltas retain all four words.
 struct Wide { x: vec4<f32>, y: vec4<f32>, e: i32 };
+struct DecodedReference { absolute: Wide, relative: Wide };
+
+// Each immutable raw reference sample is normalised once by
+// decodeReferenceOrbit. Pixel recurrences only load these decoded bits.
+@group(0) @binding(9) var<storage, read_write> decodedOrbit: array<DecodedReference>;
+@group(0) @binding(10) var<storage, read_write> decodeMismatches: atomic<u32>;
 
 fn wideNorm(a: Wide) -> Wide {
     let magnitude = max(abs(a.x.x), abs(a.y.x));
@@ -37,19 +43,52 @@ fn wideValue(a: Wide) -> vec2<f32> {
     return ldexp(vec2<f32>(a.x.x, a.y.x), vec2<i32>(a.e));
 }
 
-fn wideReference(index: u32, relative: bool) -> Wide {
+fn decodeRawReference(index: u32, relative: bool) -> Wide {
     let base = index * 20u + select(0u, 10u, relative);
-    let ex = i32(orbit[base + 4u]);
-    let ey = i32(orbit[base + 9u]);
+    let ex = i32(rawOrbit[base + 4u]);
+    let ey = i32(rawOrbit[base + 9u]);
     // The producer emits adjacent unsigned chunks; renormalize them into the
     // non-overlapping nearest-word expansion expected by QD arithmetic.
-    let x = qRenorm(vec4<f32>(orbit[base], orbit[base + 1u], orbit[base + 2u], orbit[base + 3u]), 0.0);
-    let y = qRenorm(vec4<f32>(orbit[base + 5u], orbit[base + 6u], orbit[base + 7u], orbit[base + 8u]), 0.0);
+    let x = qRenorm(vec4<f32>(rawOrbit[base], rawOrbit[base + 1u], rawOrbit[base + 2u], rawOrbit[base + 3u]), 0.0);
+    let y = qRenorm(vec4<f32>(rawOrbit[base + 5u], rawOrbit[base + 6u], rawOrbit[base + 7u], rawOrbit[base + 8u]), 0.0);
     let e = max(select(ex, -100000, x.x == 0.0), select(ey, -100000, y.x == 0.0));
     if (e == -100000) { return Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     return wideNorm(Wide(
         select(ldexp(x, vec4<i32>(max(-126, ex - e))), vec4<f32>(0.0), ex - e < -126),
         select(ldexp(y, vec4<i32>(max(-126, ey - e))), vec4<f32>(0.0), ey - e < -126), e));
+}
+
+fn wideReference(index: u32, relative: bool) -> Wide {
+    let decoded = decodedOrbit[index];
+    if (relative) { return decoded.relative; }
+    return decoded.absolute;
+}
+
+@compute @workgroup_size(64)
+fn decodeReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let index = gid.x;
+    if (index >= arrayLength(&decodedOrbit)) { return; }
+    decodedOrbit[index] = DecodedReference(
+        decodeRawReference(index, false),
+        decodeRawReference(index, true));
+}
+
+fn sameWideBits(a: Wide, b: Wide) -> bool {
+    return all(bitcast<vec4<u32>>(a.x) == bitcast<vec4<u32>>(b.x)) &&
+        all(bitcast<vec4<u32>>(a.y) == bitcast<vec4<u32>>(b.y)) && a.e == b.e;
+}
+
+// Development validation compares stored entries with the incumbent decoder
+// on the GPU, avoiding a second arithmetic implementation on the CPU.
+@compute @workgroup_size(64)
+fn verifyDecodedReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let index = gid.x;
+    if (index >= arrayLength(&decodedOrbit)) { return; }
+    let decoded = decodedOrbit[index];
+    if (!sameWideBits(decoded.absolute, decodeRawReference(index, false)) ||
+        !sameWideBits(decoded.relative, decodeRawReference(index, true))) {
+        atomicAdd(&decodeMismatches, 1u);
+    }
 }
 
 fn wideFromHdr(a: Hdr) -> Wide {
@@ -85,7 +124,8 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
 
     while (n < u.maxIterations && !escaped) {
         var span = 0u;
-        if (APPROX && !JULIA && !direct && (referenceIndex % u.laBaseStep) == 0u &&
+        if (APPROX && !JULIA && !direct && referenceIndex > 0u &&
+            ((referenceIndex - 1u) % u.laBaseStep) == 0u &&
             referenceIndex + u.laBaseStep < u.refLength &&
             n + u.laBaseStep <= u.maxIterations) {
             span = takeSkip(referenceIndex, &delta, &derivative, wantDerivative, injection, u.maxIterations - n);

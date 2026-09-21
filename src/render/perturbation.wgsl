@@ -72,7 +72,8 @@ struct Uniforms {
     retainEndpoints: u32,
 };
 
-@group(0) @binding(0) var<storage, read> orbit: array<f32>;   // four mantissa words + exponent per component
+// Raw worker output is consumed only by the one-time reference decode pass.
+@group(0) @binding(0) var<storage, read> rawOrbit: array<f32>;
 @group(0) @binding(1) var<uniform> u: Uniforms;
 @group(0) @binding(2) var output: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(3) var<storage, read> stops: array<vec4<f32>>;
@@ -222,32 +223,19 @@ fn wrapCoordinate(t: f32) -> f32 {
 // ------------------------------------------------- linear approximation steps
 
 const LA_NEVER: f32 = -1e29;
-/**
- * Safety margin, in log2, between a pixel's delta and a step's stated radius.
- *
- * At the radius itself the truncation error is only as small as the tolerance,
- * and marginal steps visibly shift escape counts. The margin is a pure win at
- * depth — deltas there sit tens of orders below any radius — and simply stops
- * shallow views taking the borderline steps they gain nothing from.
- */
-const LA_MARGIN_LOG2: f32 = 24.0;
 
 /**
- * A precomputed skip: the range's map truncated to second order,
- * `w_out = A*w + B*d + C*w^2 + D*w*d + E*d^2`, plus the entry radius it holds
- * for. The second-order terms are what let the radius be roughly the square
- * root of the first-order one instead of proportional to it.
+ * A standard linear BLA skip, `w_out = A*w + B*d`, plus its validity radius.
+ * The same eligibility policy applies at every sampling density. Ordinary
+ * Wide recurrence remains the local fallback when no skip is valid.
  */
 struct Skip {
     a: Hdr,
     b: Hdr,
-    c: Hdr,
-    d: Hdr,
-    e: Hdr,
     radiusLog2: f32,
 };
 
-const SKIP_FLOATS: u32 = 32u;
+const SKIP_FLOATS: u32 = 12u;
 
 fn loadCoefficient(base: u32, slot: u32) -> Hdr {
     let at = base + slot * 5u;
@@ -259,20 +247,13 @@ fn loadSkip(entry: u32) -> Skip {
     return Skip(
         loadCoefficient(base, 0u),
         loadCoefficient(base, 1u),
-        loadCoefficient(base, 2u),
-        loadCoefficient(base, 3u),
-        loadCoefficient(base, 4u),
-        la[base + 25u]
+        la[base + 10u]
     );
 }
 
-/// Applies the truncated polynomial.
+/// Applies the linear map for the precomputed range.
 fn applySkip(skip: Skip, w: Wide, d: Wide) -> Wide {
-    var out = wideAdd(wideMul(wideFromHdr(skip.a), w), wideMul(wideFromHdr(skip.b), d));
-    out = wideAdd(out, wideMul(wideFromHdr(skip.c), wideMul(w, w)));
-    out = wideAdd(out, wideMul(wideFromHdr(skip.d), wideMul(w, d)));
-    out = wideAdd(out, wideMul(wideFromHdr(skip.e), wideMul(d, d)));
-    return out;
+    return wideAdd(wideMul(wideFromHdr(skip.a), w), wideMul(wideFromHdr(skip.b), d));
 }
 
 /// log2 of |v|, for comparing against a step's validity radius.
@@ -304,7 +285,8 @@ fn takeSkip(
     // highest level that can possibly align here is fixed by the trailing zeros
     // of at / laBaseStep. Walking down from the top level every time wasted most
     // of its work on steps that were never aligned to begin with.
-    let unit = at / u.laBaseStep;
+    if (at == 0u) { return 0u; }
+    let unit = (at - 1u) / u.laBaseStep;
     var level: i32 = i32(u.laLevels) - 1;
     if (unit != 0u) {
         level = min(level, i32(countTrailingZeros(unit)));
@@ -317,12 +299,7 @@ fn takeSkip(
 
         if (index < count && (u.laBaseStep << u32(level)) <= remaining) {
             let skip = loadSkip(laIndex[u32(level)] + index);
-            // Safety margin: the delta must sit well below the radius, not just
-            // inside it. Right at the boundary the linear map is only as good
-            // as the tolerance, and marginal steps visibly shift escape counts.
-            // Deep views sit tens of orders below the radius, so they lose
-            // nothing; shallow views simply stop taking the marginal steps.
-            if (skip.radiusLog2 > LA_NEVER && dzLog2 + LA_MARGIN_LOG2 <= skip.radiusLog2) {
+            if (skip.radiusLog2 > LA_NEVER && dzLog2 <= skip.radiusLog2) {
                 *dz = applySkip(skip, *dz, delta0);
                 // The orbit derivative obeys the same linear recurrence with
                 // d = 1, so the very same A and B advance it over the range.
@@ -563,9 +540,11 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let row = gid.y * max(u.sampleStep, 1u) + u.rowOffset;
     let col = gid.x * max(u.sampleStep, 1u) + u.columnOffset;
     if (col >= min(size.x, u.columnLimit) || row >= min(size.y, u.rowLimit)) { return; }
-    // The remap pass retained this exact sample, including its escape value.
-    // Reuse is enabled only for the single-sample iteration field.
-    if (u.reuseField != 0u && field[fieldIndex(col, row)].y >= 0.0) {
+    // The remap pass may have retained a compatible sample. Sparse work must
+    // also leave any already determined anchor alone: regions can interleave,
+    // and later visits do not recompute a sample merely because density changed.
+    let determined = field[fieldIndex(col, row)].y >= 0.0;
+    if ((u.reuseField != 0u || u.sampleStep > 1u) && determined) {
         atomicAdd(&stats[6], 1u);
         return;
     }

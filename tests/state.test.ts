@@ -6,6 +6,9 @@ import {depthLabel,iterationFromSlider,iterationToSlider} from '../src/state';
 import {CAPPED,DEFAULT_COLORS,FORMULAS,PRESETS,cycleFromSlider,cycleToSlider,decodeColors,encodeColors,needsEndpoints,validateColors} from '../src/logic/colorSettings';
 
 describe('exact view state',()=>{
+  it('uses the released Home iteration default',()=>{
+    expect(HOME.iterations).toBe(2000);
+  });
   it('formats depth without overflow and maps continuous limits to exact integers',()=>{
     expect(depthLabel(new Decimal('2.8'))).toBe('10^0.00×');
     expect(depthLabel(new Decimal('2.8e-2000'))).toBe('10^2000.00×');

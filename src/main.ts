@@ -15,7 +15,7 @@ let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
 let effectiveLimit=HOME.iterations;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let fields=0, recolours=0, lastFresh=0, stats:RenderStats|undefined, completedQuality=0;
-let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=1, previousTime=0, statusTime=0;
+let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=.7, previousTime=0, statusTime=0;
 let lastDynamicCheck=0;
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
@@ -177,7 +177,7 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:view.family==='mandelbrot',interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error)return;latchEffective(false);busy=true;dirty=false;const g=generation;
@@ -210,7 +210,7 @@ function tick(time:number){
     if(time-statusTime>250){statusTime=time;const mean=frameTimes.reduce((a,b)=>a+b,0)/Math.max(1,frameTimes.length);cadence.textContent=`Presentation ${Math.round(1000/mean)||0} Hz`;
       const fresh=!busy && !dirty && !moving() && lastRevision===camera.revision && completedQuality===1;
       const progress=engine?.debugProgress();
-      const state=fresh?'Refined · 100%':progress?.finalizing?'Finishing':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:busy?'Computing':'Preview';
+      const state=fresh?'Refined · 100%':progress?.appearancePending?'Updating appearance':progress?.finalizing?'Finishing':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:busy?'Computing':'Preview';
       freshness.textContent=error?'Rendering stopped':`${state} · ${progress?.lastPublicationAt?Math.max(0,(time-progress.lastPublicationAt)/1000).toFixed(1)+'s since update':lastFresh?'Field ready':'first update pending'}`;
       depth.textContent=`${depthLabel(camera.span)} · ${effectiveLimit.toLocaleString()} iterations`;
       el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());
@@ -258,12 +258,12 @@ el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSel
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
-const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));colors=c;if(changed){const numericalChange=previous.mode!==c.mode||previous.supersample!==c.supersample||needsEndpoints(c)&&!engine?.endpointChannelsRequired();const resized=resize();if(numericalChange||resized){generation++;engine?.abort();}dirty=true;freshness.textContent='Preparing current view';if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
+const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));colors=c;if(changed){const numericalChange=previous.mode!==c.mode||previous.supersample!==c.supersample||needsEndpoints(c)&&!engine?.endpointChannelsRequired();if(numericalChange){resize();generation++;engine?.abort();freshness.textContent='Preparing current view';}else{lastInteraction=performance.now();freshness.textContent='Updating appearance';}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
 syncAppearance=paletteController.sync;
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
-  speed=1;el<HTMLInputElement>('speed').value='1';el('speed-value').textContent='1.0×';
+  speed=.7;el<HTMLInputElement>('speed').value='.7';el('speed-value').textContent='0.7×';
   el<HTMLInputElement>('location-name').value='';el<HTMLSelectElement>('random-style').value='harmonious';
   profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
   try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}
@@ -291,7 +291,7 @@ export const ready=(async()=>{
   load({...HOME,appearance:validateColors(rememberedAppearance)},false);
   el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');
   resize();requestAnimationFrame(tick);
-  try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
+  try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerEngine?:WebGpuRenderer}).__gpuZoomerEngine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
   catch(e){error=String(e);message(error);throw e;}
 })();
 // Development-only access exercises the displayed app and its real field.
@@ -303,3 +303,4 @@ export const testing = import.meta.env.DEV ? {
   status:()=>({busy,dirty,error,fields,recolours,effectiveLimit,lastRevision,revision:camera.revision,quality:completedQuality,stats,progress:engine?.debugProgress(),frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
   resetTiming(){frameTimes=[];frameCount=0;sessionStart=performance.now();},
 } : undefined;
+if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerTesting?:typeof testing}).__gpuZoomerTesting=testing;

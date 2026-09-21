@@ -1,55 +1,27 @@
 /**
- * Bilinear approximation, to second order.
+ * Standard bivariate linear approximation (BLA).
  *
- * The perturbation step is `w <- 2*X_k*w + w^2 + d`, linear in the delta `w`
- * and in the pixel offset `d` apart from that one quadratic term. Expanding a
- * whole range of iterations as a polynomial in `(w, d)` and truncating gives
+ * For one perturbation step
  *
- *     w_out = A*w + B*d + C*w^2 + D*w*d + E*d^2
+ *     w' = 2*X*w + w^2 + d
  *
- * Keeping only `A` and `B` is the usual "BLA" — bilinear in the two inputs —
- * and its validity ends where the neglected `w^2` starts to matter. Carrying
- * the second-order coefficients moves that boundary out by roughly the square
- * root of the tolerance, so far more pixels take far longer skips.
+ * omit the nonlinear term while it is below f32 unit roundoff:
  *
- * Per-iteration recurrences, from substituting the expansion into the step:
+ *     w' ~= A*w + B*d,  A = 2*X, B = 1, |w| < epsilon*|A|.
  *
- *     A' = 2X*A            B' = 2X*B + 1
- *     C' = 2X*C + A^2      D' = 2X*D + 2AB      E' = 2X*E + B^2
- *
- * Composing two ranges substitutes one polynomial into the other and drops
- * anything above second order; see `compose`.
- *
- * Everything carries an explicit binary exponent: `A` over a few thousand
- * iterations reaches 10^700 and would otherwise overflow to Infinity, while
- * the matching radius underflows to zero. Radii are stored as log2.
+ * Adjacent steps are composed with the standard local-validity rule. Every
+ * eligible sampling density uses this policy; the complete Wide recurrence is
+ * the local fallback whenever a skip is unavailable.
  */
 
-/** Iterations covered by a level-0 step. */
-export const BASE_STEP = 8;
-
-/**
- * How far below `2*|X|` the delta must stay at each iteration.
- *
- * With second-order terms the leading neglected term is cubic, so the same
- * tolerance buys a much larger radius than it did for the linear form.
- */
-const TOLERANCE = 2 ** -16;
-
-/**
- * Radius penalty per merge, in log2. Errors accumulate along a step, and a
- * merged step covers twice as many iterations as its halves.
- */
-const MERGE_PENALTY_LOG2 = 1;
-
+/** One reference iteration per level-0 entry. */
+export const BASE_STEP = 1;
+/** f32 unit roundoff used by the published local linearity test. */
+const EPSILON_LOG2 = -23;
 /** Sentinel log2-radius meaning "this step is never usable". */
 export const NEVER = -1e30;
-
-/**
- * Floats per packed entry: five complex coefficients as
- * (xHi, xLo, yHi, yLo, exponent), then radiusLog2 and padding.
- */
-export const ENTRY_FLOATS = 32;
+/** Two complex coefficients, radius, padding. */
+export const ENTRY_FLOATS = 12;
 
 export interface BlaTable {
   data: Float32Array;
@@ -57,22 +29,15 @@ export interface BlaTable {
   levelCounts: number[];
   levels: number;
   entryCount: number;
-  /** True when second-order coefficients are populated. */
-  quadratic: boolean;
 }
 
-/** A complex number as (x, y) * 2^e, mantissa normalised to [1, 2). */
-export interface Scaled {
-  x: number;
-  y: number;
-  e: number;
-}
+/** A complex number as (x, y) * 2^e, mantissa normalised near [1, 2). */
+export interface Scaled { x: number; y: number; e: number }
 
 export function normalise(x: number, y: number, e: number): Scaled {
   const magnitude = Math.max(Math.abs(x), Math.abs(y));
   if (magnitude === 0 || !Number.isFinite(magnitude)) return { x: 0, y: 0, e: 0 };
-  const shift = Math.floor(Math.log2(magnitude));
-  const scale = 2 ** -shift;
+  const shift = Math.floor(Math.log2(magnitude)), scale = 2 ** -shift;
   return { x: x * scale, y: y * scale, e: e + shift };
 }
 
@@ -94,269 +59,113 @@ export function add(a: Scaled, b: Scaled): Scaled {
   return normalise(a.x * scale + b.x, a.y * scale + b.y, b.e);
 }
 
-export function scale(a: Scaled, factor: number): Scaled {
-  return normalise(a.x * factor, a.y * factor, a.e);
-}
-
-export function log2Magnitude(v: Scaled): number {
-  const m = Math.hypot(v.x, v.y);
-  return m === 0 ? -Infinity : v.e + Math.log2(m);
+export function log2Magnitude(value: Scaled): number {
+  const magnitude = Math.hypot(value.x, value.y);
+  return magnitude === 0 ? -Infinity : value.e + Math.log2(magnitude);
 }
 
 const ONE: Scaled = { x: 1, y: 0, e: 0 };
-const ZERO: Scaled = { x: 0, y: 0, e: 0 };
 
-/** One skip: the truncated polynomial plus the entry radius it is valid for. */
-export interface Step {
-  a: Scaled;
-  b: Scaled;
-  c: Scaled;
-  d: Scaled;
-  e: Scaled;
-  radiusLog2: number;
-}
+export interface Step { a: Scaled; b: Scaled; radiusLog2: number }
 
-/**
- * Substitutes `first` into `second`, keeping terms up to second order.
- *
- * With `w1 = A1*w + B1*d + C1*w^2 + D1*w*d + E1*d^2`, the composite is
- * `A2*w1 + B2*d + C2*w1^2 + D2*w1*d + E2*d^2`, and `w1^2` only contributes at
- * second order through its own linear part.
- */
-export function compose(first: Step, second: Step): Omit<Step, "radiusLog2"> {
-  const a1 = first.a;
-  const b1 = first.b;
-  const a2 = second.a;
-  const c2 = second.c;
-  const d2 = second.d;
-
-  return {
-    a: multiply(a2, a1),
-    b: add(multiply(a2, b1), second.b),
-    // C = A2*C1 + C2*A1^2
-    c: add(multiply(a2, first.c), multiply(c2, multiply(a1, a1))),
-    // D = A2*D1 + 2*C2*A1*B1 + D2*A1
-    d: add(
-      add(multiply(a2, first.d), scale(multiply(c2, multiply(a1, b1)), 2)),
-      multiply(d2, a1)
-    ),
-    // E = A2*E1 + C2*B1^2 + D2*B1 + E2
-    e: add(
-      add(multiply(a2, first.e), multiply(c2, multiply(b1, b1))),
-      add(multiply(d2, b1), second.e)
-    ),
-  };
+/** Compose first then second: A=A2*A1, B=A2*B1+B2. */
+export function compose(first: Step, second: Step): Pick<Step, "a" | "b"> {
+  return { a: multiply(second.a, first.a), b: add(multiply(second.a, first.b), second.b) };
 }
 
 export interface BuildOptions {
   maxLevels?: number;
-  /** Legacy reduced samples or the renderer's full four-word reference samples. */
+  /** Legacy reduced samples or the renderer's four-word reference samples. */
   sampleWords?: 6 | 20;
-  /** Set false to drop the second-order terms, for A/B comparison. */
-  quadratic?: boolean;
 }
 
-/**
- * Builds the skip table from reference orbit samples.
- *
- * @param orbit 6-word reduced samples, or 20-word full samples with sampleWords:20
- * @param length valid sample count
- * @param maxDelta largest |d| any pixel will use, so radii can account for the
- *   terms `d` injects without knowing the pixel
- */
 function* buildBlaSteps(
   orbit: Float32Array,
   length: number,
   maxDelta: number,
-  options: BuildOptions = {}
-): Generator<void,BlaTable> {
-  const maxLevels = options.maxLevels ?? 14;
-  const quadratic = options.quadratic ?? true;
-
-  // Reference samples are O(1), so plain doubles hold them; only the products
-  // above need exponents.
-  const count = Math.max(0, length - 1);
-  const refX = new Float64Array(count + 1);
-  const refY = new Float64Array(count + 1);
-  for (let i = 0; i <= count; i++) {
-    if(i%8192===0)yield;
+  options: BuildOptions = {},
+): Generator<void, BlaTable> {
+  // Reference index zero has X=0, so its perturbation step contains only the
+  // nonlinear w^2 term plus d and cannot be represented by a linear BLA.
+  // Store entries for reference indices 1..length-2; the shader uses the same
+  // index-1 alignment at every merged level.
+  const count = Math.max(0, length - 2);
+  const refX = new Float64Array(count), refY = new Float64Array(count);
+  for (let i = 0; i < count; i++) {
+    if (i % 8192 === 0) yield;
     if (options.sampleWords === 20) {
-      // Let all transported chunks contribute to double rounding. Reducing to
-      // the leading pair first loses bits that affect long accelerated orbits.
-      const at = i * 20;
+      const at = (i + 1) * 20;
       refX[i] = (orbit[at] + orbit[at + 1] + orbit[at + 2] + orbit[at + 3]) * 2 ** orbit[at + 4];
       refY[i] = (orbit[at + 5] + orbit[at + 6] + orbit[at + 7] + orbit[at + 8]) * 2 ** orbit[at + 9];
     } else {
-      refX[i] = (orbit[i * 6 + 0] + orbit[i * 6 + 1]) * 2 ** orbit[i * 6 + 2];
-      refY[i] = (orbit[i * 6 + 3] + orbit[i * 6 + 4]) * 2 ** orbit[i * 6 + 5];
+      const at = (i + 1) * 6;
+      refX[i] = (orbit[at] + orbit[at + 1]) * 2 ** orbit[at + 2];
+      refY[i] = (orbit[at + 3] + orbit[at + 4]) * 2 ** orbit[at + 5];
     }
   }
 
   const maxDeltaLog2 = maxDelta > 0 ? Math.log2(maxDelta) : -Infinity;
-  const toleranceLog2 = Math.log2(TOLERANCE);
-  const levels: Step[][] = [];
-
-  // ---- level 0 -------------------------------------------------------------
-  const level0Count = Math.floor(count / BASE_STEP);
-  const level0: Step[] = [];
-
-  for (let s = 0; s < level0Count; s++) {
-    if(s%1024===0)yield;
-    const start = s * BASE_STEP;
-    let a = ONE;
-    let b = ZERO;
-    let c = ZERO;
-    let d = ZERO;
-    let e = ZERO;
-
-    // Linearity has to hold at *every* iteration, not just on entry. At step k
-    // the travelling delta is A_k*w + B_k*d (+ higher order), so require the
-    // first neglected term to stay below tolerance * |2*X_k|.
-    //
-    // Without second-order terms the neglected term is quadratic and the bound
-    // is on |w| directly. With them it is cubic, so the same tolerance permits
-    // an entry radius larger by roughly 1/sqrt(tolerance).
-    let radiusLog2 = Infinity;
-
-    for (let k = 0; k < BASE_STEP; k++) {
-      const twoXValue = Math.hypot(2 * refX[start + k], 2 * refY[start + k]);
-      if (twoXValue === 0) {
-        radiusLog2 = NEVER;
-        break;
-      }
-
-      // Bound on the travelling delta |w_k| at this iteration.
-      //
-      // Truncating at first order leaves |w_k|^2 against the retained
-      // |2*X_k*w_k|, so |w_k| <= tolerance * |2*X_k|. Truncating at second
-      // order leaves |w_k|^3, so |w_k| <= sqrt(tolerance * |2*X_k|) — the same
-      // tolerance, but a square root larger.
-      const linearBound = toleranceLog2 + Math.log2(twoXValue);
-      const budgetLog2 = quadratic ? linearBound / 2 : linearBound;
-
-      // Part of that budget is already spent by the B_k*d term, which exists
-      // no matter how small the entry delta is.
-      const injectedLog2 = log2Magnitude(b) + maxDeltaLog2;
-      if (injectedLog2 >= budgetLog2) {
-        radiusLog2 = NEVER;
-        break;
-      }
-      const headroomLog2 =
-        injectedLog2 === -Infinity
-          ? budgetLog2
-          : budgetLog2 + Math.log2(1 - 2 ** (injectedLog2 - budgetLog2));
-
-      // w_k = A_k * w, so divide through by |A_k|.
-      radiusLog2 = Math.min(radiusLog2, headroomLog2 - log2Magnitude(a));
-
-      const twoX = normalise(2 * refX[start + k], 2 * refY[start + k], 0);
-      // Second-order updates use the *previous* A and B, so compute them first.
-      const nextC = add(multiply(twoX, c), multiply(a, a));
-      const nextD = add(multiply(twoX, d), scale(multiply(a, b), 2));
-      const nextE = add(multiply(twoX, e), multiply(b, b));
-      a = multiply(twoX, a);
-      b = add(multiply(twoX, b), ONE);
-      if (quadratic) {
-        c = nextC;
-        d = nextD;
-        e = nextE;
-      }
-    }
-
-    level0.push({
-      a,
-      b,
-      c,
-      d,
-      e,
-      radiusLog2: Number.isFinite(radiusLog2) ? radiusLog2 : NEVER,
-    });
+  const levels: Step[][] = [[]];
+  for (let i = 0; i < count; i++) {
+    if (i % 4096 === 0) yield;
+    const a = normalise(2 * refX[i], 2 * refY[i], 0);
+    const magnitude = log2Magnitude(a);
+    levels[0].push({ a, b: ONE, radiusLog2: Number.isFinite(magnitude) ? magnitude + EPSILON_LOG2 : NEVER });
   }
-  levels.push(level0);
 
-  // ---- merge pairs ---------------------------------------------------------
+  const maxLevels = options.maxLevels ?? 21;
   for (let level = 1; level < maxLevels; level++) {
-    const previous = levels[level - 1];
-    const mergedCount = Math.floor(previous.length / 2);
+    const previous = levels[level - 1], mergedCount = Math.floor(previous.length / 2);
     if (mergedCount < 1) break;
-
     const merged: Step[] = [];
-    for (let s = 0; s < mergedCount; s++) {
-      if(s%1024===0)yield;
-      const first = previous[2 * s];
-      const second = previous[2 * s + 1];
-      const composed = compose(first, second);
-
-      // Entering the second half the delta has become |A1*w + B1*d|, which has
-      // to land inside the second radius, worst case over the largest |d|.
-      const b1dLog2 = log2Magnitude(first.b) + maxDeltaLog2;
+    for (let i = 0; i < mergedCount; i++) {
+      if (i % 2048 === 0) yield;
+      const first = previous[2 * i], second = previous[2 * i + 1];
+      const injectedLog2 = log2Magnitude(first.b) + maxDeltaLog2;
       let radiusLog2 = NEVER;
-      if (b1dLog2 < second.radiusLog2) {
-        const headroomLog2 =
-          second.radiusLog2 + Math.log2(1 - 2 ** (b1dLog2 - second.radiusLog2));
-        const mapped = headroomLog2 - log2Magnitude(first.a);
-        radiusLog2 = Math.min(first.radiusLog2, mapped) - MERGE_PENALTY_LOG2;
+      if (injectedLog2 < second.radiusLog2) {
+        const remaining = second.radiusLog2 + Math.log2(1 - 2 ** (injectedLog2 - second.radiusLog2));
+        radiusLog2 = Math.min(first.radiusLog2, remaining - log2Magnitude(first.a));
       }
       if (!Number.isFinite(radiusLog2)) radiusLog2 = NEVER;
-
-      merged.push({ ...composed, radiusLog2 });
+      merged.push({ ...compose(first, second), radiusLog2 });
     }
     levels.push(merged);
   }
 
-  // ---- pack ----------------------------------------------------------------
-  let entryCount = 0;
-  for (const level of levels) entryCount += level.length;
-
+  const entryCount = levels.reduce((sum, level) => sum + level.length, 0);
   const data = new Float32Array(Math.max(1, entryCount) * ENTRY_FLOATS);
-  const levelOffsets: number[] = [];
-  const levelCounts: number[] = [];
+  const levelOffsets: number[] = [], levelCounts: number[] = [];
   let offset = 0;
-
   for (const level of levels) {
-    levelOffsets.push(offset);
-    levelCounts.push(level.length);
-    for(let index=0;index<level.length;index++) {
-      if(index%4096===0)yield;
-      const step=level[index];
-      const target = (offset + index) * ENTRY_FLOATS;
-      const put = (slot: number, v: Scaled) => {
-        data[target + slot * 5] = v.x;
-        data[target + slot * 5 + 1] = v.x - Math.fround(v.x);
-        data[target + slot * 5 + 2] = v.y;
-        data[target + slot * 5 + 3] = v.y - Math.fround(v.y);
-        data[target + slot * 5 + 4] = v.e;
+    levelOffsets.push(offset); levelCounts.push(level.length);
+    for (let index = 0; index < level.length; index++) {
+      if (index % 4096 === 0) yield;
+      const target = (offset + index) * ENTRY_FLOATS, step = level[index];
+      const put = (slot: number, value: Scaled) => {
+        data[target + slot * 5] = value.x;
+        data[target + slot * 5 + 1] = value.x - Math.fround(value.x);
+        data[target + slot * 5 + 2] = value.y;
+        data[target + slot * 5 + 3] = value.y - Math.fround(value.y);
+        data[target + slot * 5 + 4] = value.e;
       };
-      put(0, step.a);
-      put(1, step.b);
-      put(2, step.c);
-      put(3, step.d);
-      put(4, step.e);
-      data[target + 25] = step.radiusLog2;
+      put(0, step.a); put(1, step.b); data[target + 10] = step.radiusLog2;
     }
     offset += level.length;
   }
-
-  return {
-    data,
-    levelOffsets,
-    levelCounts,
-    levels: levels.length,
-    entryCount,
-    quadratic,
-  };
+  return { data, levelOffsets, levelCounts, levels: levels.length, entryCount };
 }
 
-export function buildBla(orbit:Float32Array,length:number,maxDelta:number,options:BuildOptions={}):BlaTable {
-  const steps=buildBlaSteps(orbit,length,maxDelta,options);
-  for(;;){const next=steps.next();if(next.done)return next.value;}
-}
-export async function buildBlaAsync(orbit:Float32Array,length:number,maxDelta:number,checkpoint:()=>Promise<void>,options:BuildOptions={}):Promise<BlaTable> {
-  const steps=buildBlaSteps(orbit,length,maxDelta,options);
-  for(;;){const next=steps.next();if(next.done)return next.value;await checkpoint();}
+export function buildBla(orbit: Float32Array, length: number, maxDelta: number, options: BuildOptions = {}): BlaTable {
+  const steps = buildBlaSteps(orbit, length, maxDelta, options);
+  for (;;) { const next = steps.next(); if (next.done) return next.value; }
 }
 
-/** Reads a packed entry back, for tests and the CPU mirror. */
+export async function buildBlaAsync(orbit: Float32Array, length: number, maxDelta: number, checkpoint: () => Promise<void>, options: BuildOptions = {}): Promise<BlaTable> {
+  const steps = buildBlaSteps(orbit, length, maxDelta, options);
+  for (;;) { const next = steps.next(); if (next.done) return next.value; await checkpoint(); }
+}
+
 export function readStep(table: BlaTable, level: number, index: number): Step {
   const base = (table.levelOffsets[level] + index) * ENTRY_FLOATS;
   const get = (slot: number): Scaled => ({
@@ -364,29 +173,13 @@ export function readStep(table: BlaTable, level: number, index: number): Step {
     y: table.data[base + slot * 5 + 2] + table.data[base + slot * 5 + 3],
     e: table.data[base + slot * 5 + 4],
   });
-  return {
-    a: get(0),
-    b: get(1),
-    c: get(2),
-    d: get(3),
-    e: get(4),
-    radiusLog2: table.data[base + 25],
-  };
+  return { a: get(0), b: get(1), radiusLog2: table.data[base + 10] };
 }
 
-/** CPU mirror of the shader's skip, for tests. */
 export function applyStep(step: Step, w: Scaled, delta: Scaled): Scaled {
-  let out = add(multiply(step.a, w), multiply(step.b, delta));
-  out = add(out, multiply(step.c, multiply(w, w)));
-  out = add(out, scale(multiply(step.d, multiply(w, delta)), 1));
-  out = add(out, multiply(step.e, multiply(delta, delta)));
-  return out;
+  return add(multiply(step.a, w), multiply(step.b, delta));
 }
 
-export function stepRadiusLog2(
-  table: BlaTable,
-  level: number,
-  index: number
-): number {
-  return table.data[(table.levelOffsets[level] + index) * ENTRY_FLOATS + 25];
+export function stepRadiusLog2(table: BlaTable, level: number, index: number): number {
+  return table.data[(table.levelOffsets[level] + index) * ENTRY_FLOATS + 10];
 }
