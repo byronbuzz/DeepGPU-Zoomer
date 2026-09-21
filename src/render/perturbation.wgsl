@@ -293,7 +293,9 @@ fn takeSkip(
     }
 
     loop {
-        if (level < 0) { break; }
+        // A one-iteration BLA does not eliminate an iteration; use the ordinary
+        // Wide recurrence instead and reserve BLA application for spans >= 2.
+        if (level < 1) { break; }
         let count = laIndex[u.laLevels + u32(level)];
         let index = unit >> u32(level);
 
