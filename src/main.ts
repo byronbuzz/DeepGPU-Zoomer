@@ -210,7 +210,8 @@ function tick(time:number){
     if(time-statusTime>250){statusTime=time;const mean=frameTimes.reduce((a,b)=>a+b,0)/Math.max(1,frameTimes.length);cadence.textContent=`Presentation ${Math.round(1000/mean)||0} Hz`;
       const fresh=!busy && !dirty && !moving() && lastRevision===camera.revision && completedQuality===1;
       const progress=engine?.debugProgress();
-      const state=fresh?'Refined · 100%':progress?.appearancePending?'Updating appearance':progress?.finalizing?'Finishing':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:busy?'Computing':'Preview';
+      const exact=progress?.exactCompletedSamples===progress?.exactTotalSamples;
+      const state=fresh?(exact?'Refined · 100%':'Resolved from retained detail · 100%'):progress?.appearancePending?'Updating appearance':progress?.finalizing?'Finishing':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:busy?'Computing':'Preview';
       freshness.textContent=error?'Rendering stopped':`${state} · ${progress?.lastPublicationAt?Math.max(0,(time-progress.lastPublicationAt)/1000).toFixed(1)+'s since update':lastFresh?'Field ready':'first update pending'}`;
       depth.textContent=`${depthLabel(camera.span)} · ${effectiveLimit.toLocaleString()} iterations`;
       el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());

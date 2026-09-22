@@ -17,7 +17,7 @@ import wideSource from "./wide.wgsl?raw";
 import reuseSource from "./reuse.wgsl?raw";
 import antialiasSource from "./antialias.wgsl?raw";
 export const ANTIALIAS_SHADER=antialiasSource;
-import { createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
+import { createSampleGridAnchor, planRetainedView, sampleGridCoarsen, sampleGridRemap, type SampleGridAnchor, type SampleGridCoarsen, type SampleGridRemap } from "./sample-grid";
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
 import { splitQuad } from "../arithmetic/quad";
@@ -91,6 +91,8 @@ export interface RenderStats {
   computed: boolean;
   computedSamples: number;
   reusedSamples: number;
+  /** Nearby values reconstructed once from a denser authoritative field. */
+  reconstructedSamples: number;
   sampleWidth: number;
   sampleHeight: number;
   limbs: number;
@@ -282,6 +284,7 @@ export class WebGpuRenderer {
   /** Geometry and density of the retained history image. */
   private lastFrame: {
     proxy?: boolean;
+    reconstructed?: boolean;
     covered?: {x:number;y:number;width:number;height:number};
     coveredSpacing?: Decimal;
     coveredRegions?: {x:number;y:number;width:number;height:number;spacing:Decimal}[];
@@ -312,6 +315,7 @@ export class WebGpuRenderer {
   private lastPartialAt = 0;
   private fieldComplete = false;
   private reuseMapping: SampleGridRemap | null = null;
+  private reuseCoarsen: SampleGridCoarsen | null = null;
   private reusableView: FrameView | null = null;
   private reusableComplete = false;
   private batchMsPerSample = 0;
@@ -325,6 +329,7 @@ export class WebGpuRenderer {
   private streamTargets = 0;
   private latestRegion: {x:number;y:number;width:number;height:number;stride:number} | null = null;
   private exactCompletedSamples=0;
+  private resolvedCompletedSamples=0;
   private exactTotalSamples=0;
   private referencePreparing=false;
   private finalizing=false;
@@ -340,13 +345,14 @@ export class WebGpuRenderer {
   debugProgress() {
     const progressCurrent=!!(this.currentView&&this.fieldView&&this.sameView(this.fieldView,this.currentView));
     const complete=!this.referencePreparing&&!!this.currentView&&this.isComplete(this.currentView)&&this.pending.size===0&&!this.incomingFrame&&!this.finalizing;
-    const percentage=this.referencePreparing||!progressCurrent?null:complete&&this.exactTotalSamples?100:this.exactTotalSamples?Math.min(99,Math.floor(this.exactCompletedSamples/this.exactTotalSamples*100)):null;
+    const percentage=this.referencePreparing||!progressCurrent?null:complete&&this.exactTotalSamples?100:this.exactTotalSamples?Math.min(99,Math.floor(this.resolvedCompletedSamples/this.exactTotalSamples*100)):null;
     let fieldHash=2166136261;for(let i=0;i<this.fieldKey.length;i++){fieldHash^=this.fieldKey.charCodeAt(i);fieldHash=Math.imul(fieldHash,16777619);}
     const displayed=this.incomingFrame??this.lastFrame;
     const appearancePending=!!(this.currentView&&displayed&&this.sameView(displayed,this.currentView)&&!this.samePresentation(displayed,this.currentView));
     return { epoch: this.publicationEpoch, serial: this.partialSerial, fieldIdentity:(fieldHash>>>0).toString(16).padStart(8,'0'),
       regions: this.partialRegions, firstPublicationAt: this.firstPartialAt, lastPublicationAt: this.lastPartialAt,
-      active: !!this.incomingFrame, complete, percentage, exactCompletedSamples:this.exactCompletedSamples, exactTotalSamples:this.exactTotalSamples,
+      active: !!this.incomingFrame, complete, percentage, exactCompletedSamples:this.exactCompletedSamples,
+      resolvedCompletedSamples:this.resolvedCompletedSamples, exactTotalSamples:this.exactTotalSamples,
       referencePreparing:this.referencePreparing, finalizing:this.finalizing, calculationSubmissions:this.calculationSubmissions, orbitSubmissions:this.orbitSubmissions, antialiasPasses:this.antialiasPasses,
       appearancePending,appearanceSubmissions:this.appearanceSubmissions,appearancePublications:this.appearancePublications,targetAllocations:this.targetAllocations,
       referenceWorkerActive:this.referenceWorker.active,
@@ -365,6 +371,12 @@ export class WebGpuRenderer {
   endpointChannelsRequired(){return this.retainEndpoints||this.endpointDemand;}
   private spareField: GPUBuffer | null = null;
   private spareCapacity = 0;
+  private anchorField: GPUBuffer | null = null;
+  private anchorCapacity = 0;
+  private anchorView: FrameView | null = null;
+  private anchorSampleKey = "";
+  private fieldAllExact = false;
+  private fieldReconstructed = false;
   private fieldView: FrameView | null = null;
   private sampleKey = "";
   private reusePipeline: GPUComputePipeline | null = null;
@@ -452,7 +464,7 @@ export class WebGpuRenderer {
     const { device } = this.ctx;
     const reuseModule = await compileShader(device, reuseSource, "sample-reuse");
     this.reusePipeline = device.createComputePipeline({ layout: "auto", compute: { module: reuseModule, entryPoint: "remap" } });
-    this.reuseUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.reuseUniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     const renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, wideSource].join("\n"), "perturbation");
     this.referenceDecodePipeline=device.createComputePipeline({label:"reference-decode",layout:"auto",compute:{module:renderModule,entryPoint:"decodeReferenceOrbit"}});
@@ -834,11 +846,28 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private moveField(request: RenderRequest, samples: number, key: string, reuse: boolean, grid = 1): boolean {
-    const previous = this.fieldBuffer, previousCapacity = this.fieldCapacity;
-    const mapping = reuse && previous && this.fieldView && this.sampleKey === key
-      ? sampleGridRemap(this.fieldView, request) : null;
-    this.reuseMapping = mapping; this.reusableView = this.fieldView; this.reusableComplete = this.fieldComplete;
-    this.fieldComplete = false;
+    let previous = this.fieldBuffer, previousCapacity = this.fieldCapacity;
+    const previousView=this.fieldView,previousKey=this.sampleKey,previousReconstructed=this.fieldReconstructed,previousComplete=this.fieldComplete;
+    // Only a wholly exact completed field can replace the dense anchor.
+    // Reconstructed destinations rotate through the ordinary spare instead.
+    if(reuse&&previous&&this.fieldComplete&&this.fieldAllExact&&this.fieldView&&this.sampleKey===key){
+      const oldAnchor=this.anchorField,oldCapacity=this.anchorCapacity;
+      this.anchorField=previous;this.anchorCapacity=previousCapacity;this.anchorView=this.fieldView;this.anchorSampleKey=this.sampleKey;
+      previous=null;previousCapacity=0;
+      if(oldAnchor&&oldAnchor!==this.anchorField){
+        if(!this.spareField||oldCapacity>this.spareCapacity){this.spareField?.destroy();this.spareField=oldAnchor;this.spareCapacity=oldCapacity;}
+        else oldAnchor.destroy();
+      }
+    }
+    const partialMapping=reuse&&previous&&previousView&&previousKey===key&&!previousReconstructed?sampleGridRemap(previousView,request):null;
+    const anchorCompatible=reuse&&this.anchorField&&this.anchorView&&this.anchorSampleKey===key;
+    const anchorMapping=anchorCompatible?sampleGridRemap(this.anchorView!,request):null;
+    const source=partialMapping?previous:anchorCompatible?this.anchorField:null;
+    const sourceView=partialMapping?previousView:anchorCompatible?this.anchorView:null;
+    const mapping=partialMapping??anchorMapping;
+    const coarsen=!mapping&&anchorCompatible?sampleGridCoarsen(this.anchorView!,request):null;
+    this.reuseMapping = mapping;this.reuseCoarsen=coarsen;this.reusableView = sourceView;this.reusableComplete = partialMapping?previousComplete:!!source;
+    this.fieldComplete = false;this.fieldReconstructed=!!coarsen;
     if (!this.spareField || this.spareCapacity < samples) {
       this.spareField?.destroy();
       this.spareField = storageBuffer(this.ctx.device, samples * 2, "sample-field", GPUBufferUsage.COPY_SRC);
@@ -848,16 +877,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.spareField = previous; this.spareCapacity = previousCapacity;
     {
       const device = this.ctx.device;
-      device.queue.writeBuffer(this.reuseUniform!, 0, new Int32Array([
-        mapping ? this.fieldView!.width : 0, mapping ? this.fieldView!.height : 0,
+      const reuseData=new ArrayBuffer(48),reuseI32=new Int32Array(reuseData),reuseF32=new Float32Array(reuseData),reuseU32=new Uint32Array(reuseData);
+      reuseI32.set([
+        sourceView?.width ?? 0, sourceView?.height ?? 0,
         request.width * grid, request.height * grid,
         mapping?.offsetX ?? 0, mapping?.offsetY ?? 0, mapping?.step ?? 1, mapping?.denominator ?? 1,
-      ]));
+      ]);
+      reuseF32[8]=coarsen?.offsetX??0;reuseF32[9]=coarsen?.offsetY??0;reuseF32[10]=coarsen?.step??1;reuseU32[11]=coarsen?1:0;
+      device.queue.writeBuffer(this.reuseUniform!, 0, reuseData);
       const encoder = device.createCommandEncoder({ label: "retain-samples" });
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.reusePipeline!);
       pass.setBindGroup(0, device.createBindGroup({ layout: this.reusePipeline!.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: previous ?? this.orbitBuffer! } },
+        { binding: 0, resource: { buffer: source ?? this.orbitBuffer! } },
         { binding: 1, resource: { buffer: this.fieldBuffer } },
         { binding: 2, resource: { buffer: this.reuseUniform! } },
       ] }));
@@ -867,7 +899,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.fieldView = { centerX: request.centerX, centerY: request.centerY,
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height };
     this.sampleKey = key;
-    return !!mapping;
+    return !!mapping||!!coarsen;
   }
 
   private ensureOrbitCapacity(samples: number) {
@@ -1026,8 +1058,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
     this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
+    this.anchorField?.destroy();this.anchorField=null;this.anchorCapacity=0;this.anchorView=null;this.anchorSampleKey="";this.fieldAllExact=false;this.fieldReconstructed=false;this.reuseCoarsen=null;
     this.fieldStats=null;this.fieldDescriptor=null;this.fieldUniforms=null;
-    this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
+    this.exactCompletedSamples=0;this.resolvedCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
     this.abort();
   }
   private sameView(a: FrameView, b: FrameView) {
@@ -1134,7 +1167,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       });
       this.appearanceSubmissions++;
       const frame={family:request.family,juliaX:request.juliaX,juliaY:request.juliaY,centerX:request.centerX,centerY:request.centerY,
-        unitsPerPixel:request.unitsPerPixel,width:request.width,height:request.height,colors,maxIterations:request.maxIterations,useApprox:request.useApprox===true};
+        unitsPerPixel:request.unitsPerPixel,width:request.width,height:request.height,colors,maxIterations:request.maxIterations,useApprox:request.useApprox===true,
+        reconstructed:(this.fieldStats?.reconstructedSamples??0)>0};
       const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.currentView)&&this.samePresentation(frame,this.currentView));
       if(!current||this.deviceLost){return {...this.fieldStats!,completed:false,computed:false,computedSamples:0,reusedSamples:0,renderMs:performance.now()-started};}
       this.commitHistory({...request,colors},candidate);candidate=undefined;this.lastFrame=frame;this.historyValid=true;this.incomingFrame=null;
@@ -1221,15 +1255,29 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       coveredRegions:retainedCoverage.rectangles.map(r=>({...r,spacing:retained.unitsPerPixel.times(r.spacing??1)}))}; this.historyValid=true; this.incomingFrame=null;
   }
 
+  private coarsenCoverage(request:RenderRequest){
+    const c=this.reuseCoarsen;if(!c)return null;
+    let x=Math.max(0,Math.ceil((-.5-c.offsetX)/c.step)),y=Math.max(0,Math.ceil((-.5-c.offsetY)/c.step));
+    let right=Math.min(request.width,Math.floor((c.oldWidth-.5-c.offsetX)/c.step)+1),bottom=Math.min(request.height,Math.floor((c.oldHeight-.5-c.offsetY)/c.step)+1);
+    while(x<right&&c.offsetX+x*c.step<=-.5)x++;while(y<bottom&&c.offsetY+y*c.step<=-.5)y++;
+    while(right>x&&c.offsetX+(right-1)*c.step>=c.oldWidth-.5)right--;
+    while(bottom>y&&c.offsetY+(bottom-1)*c.step>=c.oldHeight-.5)bottom--;
+    return right>x&&bottom>y?{x,y,width:right-x,height:bottom-y}:null;
+  }
+
   private regionDemand(request: RenderRequest): Demand {
     const live = request.followView ? this.currentView ?? request : request;
     const m = reprojectionFor(request,live);
     const focus = live.focus ?? {x:.5,y:.5};
     const covered = [this.historyValid ? this.lastFrame : null,this.coverageFrame].flatMap(frame => {
-      if (!this.samePresentation(frame,request)) return [];
+      if (!this.samePresentation(frame,request)||frame.reconstructed) return [];
       return this.coverageIn(frame,request).map(r=>({...r,spacing:r.spacing.div(request.unitsPerPixel).toNumber()}));
     });
     covered.push(...this.determined.rectangles.map(r=>({...r,spacing:r.spacing??1})));
+    const coarseCoverage=this.coarsenCoverage(request);
+    if(coarseCoverage&&this.anchorView){
+      covered.push({...coarseCoverage,spacing:this.anchorView.unitsPerPixel.div(request.unitsPerPixel).toNumber()});
+    }
     const hints=new CoverageRegions();for(const c of covered)hints.add(c);
     return {x:((m?.offsetX??0)+focus.x*(m?.scaleX??1))*request.width,
       y:((m?.offsetY??0)+focus.y*(m?.scaleY??1))*request.height,zoom:live.zoom??0,covered:hints.rectangles};
@@ -1467,6 +1515,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     this.exactTotalSamples=request.width*request.height;
     this.exactCompletedSamples=fieldStale?0:this.exactTotalSamples;
+    this.resolvedCompletedSamples=fieldStale?0:this.exactTotalSamples;
 
     const bind=this.createRenderBind();
 
@@ -1475,7 +1524,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       centerX: request.centerX, centerY: request.centerY,
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
       colors, maxIterations: request.maxIterations,
-      useApprox: request.useApprox===true,
+      useApprox: request.useApprox===true,reconstructed:false,
     };
     const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false;
     let timingSamples: (TimingSample | undefined)[] = [];
@@ -1483,8 +1532,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height,timingSamples);
     this.aborted = false;
     this.partialRegions = 0; this.firstPartialAt = 0;
-    let completed = true, cpuReused = 0, submittedVisits=0;
-    let exactCoverage=fieldStale?0:request.width*request.height;
+    const coarseCoverage=fieldStale?this.coarsenCoverage(request):null;
+    const reconstructedTotal=coarseCoverage?coarseCoverage.width*coarseCoverage.height:0;
+    let completed = true, cpuReused = 0, cpuReconstructed=reconstructedTotal, submittedVisits=0;
+    let exactCoverage=fieldStale?0:request.width*request.height,resolvedCoverage=fieldStale?reconstructedTotal:exactCoverage;
+    this.exactCompletedSamples=exactCoverage;this.resolvedCompletedSamples=resolvedCoverage;
     u32[40] = 0; u32[42] = 0; u32[43] = request.width;
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     if (fieldStale) {
@@ -1527,11 +1579,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const width=region.width, rows=region.height;
       this.latestRegion=region;
       const m = this.reuseMapping, old = this.reusableView;
-      const fullyKnown = this.reusableComplete && m && old && m.denominator === 1 &&
+      const exactlyKnown = this.reusableComplete && m && old && m.denominator === 1 &&
         m.offsetX + region.x * m.step >= 0 && m.offsetY + region.y * m.step >= 0 &&
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
         m.offsetY + (region.y + rows - 1) * m.step < old.height;
-      if (fullyKnown) { if(region.stride===1){cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;} continue; }
+      const coarse=this.reuseCoarsen;
+      const reconstructedKnown=!!(this.reusableComplete&&coarse&&
+        coarse.offsetX+region.x*coarse.step>-.5&&coarse.offsetY+region.y*coarse.step>-.5&&
+        coarse.offsetX+(region.x+width-1)*coarse.step<coarse.oldWidth-.5&&
+        coarse.offsetY+(region.y+rows-1)*coarse.step<coarse.oldHeight-.5);
+      if (exactlyKnown||reconstructedKnown) { if(region.stride===1&&exactlyKnown){const count=width*rows;cpuReused+=count;resolvedCoverage+=count;exactCoverage+=count;this.exactCompletedSamples=exactCoverage;this.resolvedCompletedSamples=resolvedCoverage;} continue; }
       u32[54]=region.stride; u32[26]=region.y+rows;
       u32[40] = region.y; u32[42] = region.x; u32[43] = region.x + width;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
@@ -1561,7 +1618,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.reproject(this.currentView ?? request);
       }
       await device.queue.onSubmittedWorkDone();
-      if(region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
+      if(region.stride===1){
+        let reconstructedOverlap=0;
+        if(coarseCoverage){const overlapWidth=Math.max(0,Math.min(region.x+width,coarseCoverage.x+coarseCoverage.width)-Math.max(region.x,coarseCoverage.x)),overlapHeight=Math.max(0,Math.min(region.y+rows,coarseCoverage.y+coarseCoverage.height)-Math.max(region.y,coarseCoverage.y));reconstructedOverlap=overlapWidth*overlapHeight;}
+        const fresh=width*rows-reconstructedOverlap;exactCoverage+=fresh;resolvedCoverage+=fresh;this.exactCompletedSamples=exactCoverage;this.resolvedCompletedSamples=resolvedCoverage;
+      }
       const elapsed = performance.now() - batchStarted;
       const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
       this.batchMsPerSample = this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
@@ -1584,7 +1645,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     if (!request.isCurrent!()||this.abortRequested) completed = false;
     if(completed&&!serviceAppearance()){this.retarget=true;completed=false;}
-    if(completed&&(this.pending.size!==0||exactCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
+    if(completed&&(this.pending.size!==0||resolvedCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
     this.finalizing=completed;
     let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined,published=false;
     let counters:Uint32Array;
@@ -1609,7 +1670,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // Coarse and reused visits are not unique pixels. The region partition
         // supplies exact coverage separately; cached recolours have zero visits.
         if(colors.mode!==2&&counters[5]+counters[6]!==submittedVisits)throw Error('GPU sample accounting did not match submitted work.');
-        this.fieldKey=fieldKey;this.fieldComplete=true;
+        this.fieldKey=fieldKey;this.fieldComplete=true;this.fieldAllExact=exactCoverage===request.width*request.height;
+        this.fieldReconstructed=!this.fieldAllExact;frame.reconstructed=this.fieldReconstructed;
         const currentPresentation=(!presentationCurrent||presentationCurrent())&&
           (!request.followView||!this.currentView||this.samePresentation(frame,this.currentView));
         if(currentPresentation){
@@ -1636,6 +1698,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const result: RenderStats = {
       completed, computed: fieldStale,
       computedSamples: counters[5], reusedSamples: counters[6] + cpuReused,
+      reconstructedSamples:cpuReconstructed,
       sampleWidth: request.width, sampleHeight: request.height,
       limbs,
       decimalDigits: Math.floor((32 * (limbs - 1)) / 3.32),
