@@ -5,7 +5,7 @@
  *
  *     w' = 2*X*w + w^2 + d
  *
- * omit the nonlinear term while it is below f32 unit roundoff:
+ * omit the nonlinear term while it is below the selected local tolerance:
  *
  *     w' ~= A*w + B*d,  A = 2*X, B = 1, |w| < epsilon*|A|.
  *
@@ -16,8 +16,8 @@
 
 /** One reference iteration per level-0 entry. */
 export const BASE_STEP = 1;
-/** f32 unit roundoff used by the published local linearity test. */
-const EPSILON_LOG2 = -23;
+/** Empirical local tolerance selected for the accepted quality/performance tradeoff. */
+const EPSILON_LOG2 = -21;
 /** Sentinel log2-radius meaning "this step is never usable". */
 export const NEVER = -1e30;
 /** Two complex coefficients, radius, padding. */
