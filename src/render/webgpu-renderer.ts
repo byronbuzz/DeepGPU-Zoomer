@@ -1322,7 +1322,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.refSamples = orbit.samples; this.refValid = true;
         drift = new Decimal(0); orbitMs = orbit.ms;
         this.tableMs = 0; this.laLevels=0; this.laHasUsableMultiStep=false; this.tableMaxDelta=-1;
-        if (family === "mandelbrot" && request.useApprox===true && request.colors.mode===0) await this.buildApproxTable(request);
+        if (family === "mandelbrot" && request.useApprox===true && request.colors.mode!==2) await this.buildApproxTable(request);
       } catch (error) {
         this.referencePreparing=false;
         throw error;
@@ -1332,7 +1332,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Conversely, a table with no usable multi-step entry can become useful
     // when the same orbit is viewed through a narrower domain.
     const requiredDelta = request.unitsPerPixel.times(Math.hypot(request.width, request.height) / 2).plus(drift).toNumber();
-    if (method !== Method.Direct && family === "mandelbrot" && request.useApprox === true && request.colors.mode === 0 &&
+    if (method !== Method.Direct && family === "mandelbrot" && request.useApprox === true && request.colors.mode !== 2 &&
         (requiredDelta > this.tableMaxDelta * (1 + 1e-12) ||
          !this.laHasUsableMultiStep && requiredDelta < this.tableMaxDelta * (1 - 1e-12))) {
       await this.buildApproxTable(request);
@@ -1400,7 +1400,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     u32[8] = this.refLength;
     const deltaBound = requiredDelta;
     const approximationLevels =
-      request.useApprox !== true || method === Method.Direct || family === "julia" || colors.mode === 1 ||
+      request.useApprox !== true || method === Method.Direct || family === "julia" || colors.mode === 2 ||
       !this.laHasUsableMultiStep || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
     u32[20] = approximationLevels;
     u32[21] = BASE_STEP;
