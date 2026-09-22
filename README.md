@@ -257,10 +257,14 @@ without another orbit recurrence. Palette-only edits and re-enabling an already
 prepared effect still recolour without recurrence. The controls toggle is an
 accessible hamburger; it and the footer remain visible while controls are hidden.
 
-Julia BLA remains unresolved and is not in main: the default-bound probe missed
-6 of 49 independently checked points, and tighter bounds still failed targeted
-checks against the independent oracle. Its limited pass flag is not acceptance;
-patches and raw evidence are in `F:\Coding\Temp\GPU-Zoomer-3-julia-bla-20260923\RESULT.md`.
+Julia BLA remains isolated, not in main. The default-bound probe missed 6 of 49
+independently checked points, but exact oracle mismatches alone are not a
+practical fidelity veto. At the tighter -40 bound, four fresh 960×640 spiral
+renders gave a 23.6% mean wall gain (including preparation), with 1.012% changed
+pixels and the visible spiral intact. This is one view and GPU; it does not
+qualify capped regions or other appearances. Patches and raw evidence are in
+`F:\Coding\Temp\GPU-Zoomer-3-julia-practical-20260923\RESULT.md` and the
+earlier `F:\Coding\Temp\GPU-Zoomer-3-julia-bla-20260923\RESULT.md`.
 Use the Codex in-app browser for testing; do not launch an external or headless
 browser. Candidate builds must write outside the directory served on 5183: a
 source revision or unchanged listener does not establish the served bundle.

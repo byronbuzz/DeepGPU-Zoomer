@@ -14,7 +14,7 @@ const canvas=el<HTMLCanvasElement>('fractal');
 const camera=new Camera();
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
-let fields=0, recolours=0, stats:RenderStats|undefined, completedQuality=0, preparingColourData=false;
+let fields=0, recolours=0, stats:RenderStats|undefined, completedQuality=0, preparingColourData=false, colourDataTarget=0;
 let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=.8, previousTime=0, statusTime=0;
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
@@ -45,7 +45,12 @@ function message(text:string,transient=false){
   },3000);
 }
 function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString(),appearance:validateColors(colors)};}
-function preparing(){freshness.textContent=`${preparingColourData?'Refined · 100% · Preparing colour data':'Preparing current view'} · ${refinementTime.text(performance.now())}`;}
+function colourPreparationLabel(progress=engine?.debugProgress()){
+  const started=progress&&progress.targets>colourDataTarget&&progress.exactTotalSamples>0&&
+    (progress.pending>0||progress.finalizing||progress.exactCompletedSamples<progress.exactTotalSamples);
+  return `Refined · 100% · Preparing colour data${started&&progress?.percentage!==null?` · ${progress?.percentage}%`:''}`;
+}
+function preparing(){freshness.textContent=`${preparingColourData?colourPreparationLabel():'Preparing current view'} · ${refinementTime.text(performance.now())}`;}
 function syncIterationLabel(){
   el('iteration-value').textContent=view.iterations.toLocaleString();
 }
@@ -203,7 +208,7 @@ function tick(time:number){
       const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
       const fresh=!busy && !dirty && !moving() && !numericalPending;
       const progress=engine?.debugProgress();
-      const state=!numericalPending?`Refined · 100%${preparingColourData?' · Preparing colour data':''}`:progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
+      const state=!numericalPending?preparingColourData?colourPreparationLabel(progress):'Refined · 100%':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
       freshness.textContent=`${error?'Rendering stopped':state} · ${refinementTime.text(time)}`;
       depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
       el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());
@@ -250,7 +255,7 @@ el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSel
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
-const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));const completedBefore=currentFieldComplete()||preparingColourData;colors=c;if(changed){const missingData=previous.mode!==c.mode||needsEndpoints(c)&&!engine?.endpointChannelsRequired();const numericalChange=missingData||previous.supersample!==c.supersample;if(numericalChange){const resized=resize(false);preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample;if(!preparingColourData)completedQuality=0;generation++;engine?.abort();preparing();}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);});
+const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));const completedBefore=currentFieldComplete()||preparingColourData;colors=c;if(changed){const missingData=previous.mode!==c.mode||needsEndpoints(c)&&!engine?.endpointChannelsRequired();const numericalChange=missingData||previous.supersample!==c.supersample;if(numericalChange){const wasPreparing=preparingColourData,previousTarget=colourDataTarget,currentTarget=engine?.debugProgress().targets??0;const resized=resize(false);preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample;if(preparingColourData)colourDataTarget=wasPreparing&&previous.mode===c.mode?previousTarget:currentTarget;if(!preparingColourData)completedQuality=0;generation++;engine?.abort();preparing();}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);});
 syncAppearance=paletteController.sync;
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
