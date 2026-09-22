@@ -372,6 +372,11 @@ fn emptySample() -> Sample {
     return Sample(false, 0u, vec2<f32>(0.0), 0.0, 0.0, 0u, 0u, 0u, 0.0, 0u);
 }
 
+fn sameHdrBits(a: Hdr, b: Hdr) -> bool {
+    return all(bitcast<vec2<u32>>(a.m) == bitcast<vec2<u32>>(b.m)) &&
+        all(bitcast<vec2<u32>>(a.lo) == bitcast<vec2<u32>>(b.lo)) && a.e == b.e;
+}
+
 /// Direct z <- z^2 + c in plain f32.
 ///
 /// Perturbation only pays when |delta| << |z|. Zoomed out that is false, the
@@ -379,9 +384,10 @@ fn emptySample() -> Sample {
 /// arbitrary-precision reference orbit the view cannot even resolve. Iterating
 /// c directly is both simpler and much faster, and f32 has precision to spare
 /// until the pixel spacing approaches its resolution near |c| ~ 1.
-fn iterateDirect(c0: Hdr, wantDerivative: bool) -> Sample {
+fn iterateDirect(c0: Hdr, wantDerivative: bool, detectCycle: bool) -> Sample {
     var z = hdrZero(); var c = c0; var deriv = hdrZero();
     var n = 0u; var z2 = dot(hdrValue(z),hdrValue(z)); var escaped = z2 > ESCAPE_R2;
+    var cycleCheckpoint = hdrZero(); var cyclePower = 0u; var cycleLength = 0u;
     while (n < u.maxIterations && !escaped) {
         if (wantDerivative) {
             deriv = hdrMul(deriv,hdrMulPlain(z,vec2<f32>(2.0,0.0)));
@@ -389,6 +395,18 @@ fn iterateDirect(c0: Hdr, wantDerivative: bool) -> Sample {
         }
         z = hdrAdd(hdrMul(z,z),c); n += 1u;
         z2 = dot(hdrValue(z),hdrValue(z)); escaped = z2 > ESCAPE_R2;
+        if (detectCycle && !escaped) {
+            if (cyclePower == 0u) {
+                if (n >= 64u) { cycleCheckpoint = z; cyclePower = 1u; }
+            } else {
+                cycleLength += 1u;
+                if (sameHdrBits(z, cycleCheckpoint)) { break; }
+                if (cycleLength == cyclePower) {
+                    cycleCheckpoint = z; cycleLength = 0u;
+                    cyclePower = min(cyclePower << 1u, u.maxIterations);
+                }
+            }
+        }
     }
     return Sample(escaped,n,hdrValue(z),z2,hdrLog2(deriv),0u,0u,0u,hdrLog2(z),0u);
 }
@@ -397,11 +415,12 @@ fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     if (DIRECT) {
         let offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
         let c = hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset);
-        if (!JULIA && u.mode == 0u && u.retainEndpoints == 0u && u.cappedPattern == 0u &&
+        let allowInteriorShortcut = !JULIA && u.mode == 0u && u.retainEndpoints == 0u && u.cappedPattern == 0u;
+        if (allowInteriorShortcut &&
             analyticMandelbrotInterior(wideFromHdr(c))) {
             return emptySample();
         }
-        return iterateDirect(c,wantDerivative);
+        return iterateDirect(c,wantDerivative,allowInteriorShortcut);
     }
     return iterateWide(pixel,wantDerivative);
 }
