@@ -396,7 +396,12 @@ fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     if (JULIA) { return iterateWide(pixel, wantDerivative); }
     if (DIRECT) {
         let offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
-        return iterateDirect(hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset),wantDerivative);
+        let c = hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset);
+        if (!JULIA && u.mode == 0u && u.retainEndpoints == 0u && u.cappedPattern == 0u &&
+            analyticMandelbrotInterior(wideFromHdr(c))) {
+            return emptySample();
+        }
+        return iterateDirect(c,wantDerivative);
     }
     return iterateWide(pixel,wantDerivative);
 }
