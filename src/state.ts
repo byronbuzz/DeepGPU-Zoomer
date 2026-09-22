@@ -5,14 +5,15 @@ export type Family = 'mandelbrot' | 'julia';
 export type IterationMode = 'fixed'|'dynamic';
 export interface SavedView { family: Family; x: string; y: string; span: string; jx: string; jy: string; iterations: number; iterationMode?:IterationMode; appearance?: ColorSettings }
 export const MAX_ITERATIONS=1_000_000;
-export function iterationFromSlider(value:number){return Math.round(32*Math.pow(MAX_ITERATIONS/32,value));}
-export function iterationToSlider(value:number){return Math.log(value/32)/Math.log(MAX_ITERATIONS/32);}
+export function iterationFromSlider(value:number){return Math.round(Math.pow(MAX_ITERATIONS,Math.max(0,Math.min(1,value))));}
+export function iterationToSlider(value:number){return Math.log(Math.max(1,Math.min(MAX_ITERATIONS,value)))/Math.log(MAX_ITERATIONS);}
 export function depthLabel(span:Decimal){const ratio=new Decimal(2.8).div(span);return `10^${(ratio.e+Math.log10(Number(ratio.toExponential(14).split('e')[0]))).toFixed(2)}×`;}
 export const HOME: SavedView = {family:'mandelbrot',x:'-0.6',y:'0',span:'2.8',jx:'-0.8',jy:'0.156',iterations:2000,iterationMode:'fixed'};
 /** Bounded variable-detail policy: +50 iterations per completed zoom decade. */
 export function effectiveIterations(base:number,span:Decimal,mode:IterationMode='fixed'){
   if(mode==='fixed')return base;
   const decades=Math.max(0,Math.floor(new Decimal(HOME.span).div(span).logarithm(10).toNumber()));
+  if(decades===0)return base;
   return Math.min(MAX_ITERATIONS,Math.ceil((base+50*decades)/32)*32);
 }
 export function validateView(value: unknown): SavedView {
@@ -25,7 +26,7 @@ export function validateView(value: unknown): SavedView {
   // 256 u32 limbs provide 8160 fractional bits. Leave room for pixels and
   // the orbit guard precision before allocating decimal camera arithmetic.
   if(new Decimal(v.span).e < -2400) throw Error('This view exceeds the current GPU precision profiles');
-  if(!Number.isInteger(v.iterations)||v.iterations<32||v.iterations>MAX_ITERATIONS) throw Error('Iteration limit must be 32–1000000');
+  if(!Number.isInteger(v.iterations)||v.iterations<1||v.iterations>MAX_ITERATIONS) throw Error('Iteration limit must be 1–1000000');
   for(const k of ['x','y','jx','jy'] as const) if(new Decimal(v[k]).abs().gt(16)) throw Error('Coordinates must be within ±16');
   const iterationMode:IterationMode=v.iterationMode==='dynamic'?'dynamic':'fixed';
   return {family:v.family,x:v.x,y:v.y,span:v.span,jx:v.jx,jy:v.jy,iterations:v.iterations,iterationMode,...(v.appearance?{appearance:validateColors(v.appearance)}:{})};
