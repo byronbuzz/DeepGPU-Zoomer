@@ -19,7 +19,7 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
 ## Explore
 
 - Hold left/right mouse to zoom in/out, steering with the pointer. The default
-  zoom speed is 0.7x. Shift-drag
+  zoom speed is 0.8x. Shift-drag
   or middle-drag pans; the wheel zooms. On the focused canvas, +/− zoom,
   arrow keys pan, and Esc stops motion.
 - J toggles a small Julia preview. While it is open, left-click/drag selects
@@ -37,13 +37,11 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   and iteration limit. The preview follows its displayed size and device pixel
   ratio, subject to GPU capacity, and uses its own
   1,000-iteration limit, independent of the main viewport's limit.
-- The iteration slider is logarithmic from 32 to 1,000,000. Fixed mode is the
-  backward-compatible default. Dynamic mode adds 50 iterations per completed
-  zoom decade from Home, rounds upward to 32 and clamps at 1,000,000. The UI
-  shows base and effective limits; the effective limit is latched between
-  admitted jobs so in-flight work keeps one stable identity. This is a bounded
-  variable-detail policy, not an equal-quality speed claim. Depth uses `10^50.37×` notation without
-  converting the full magnification to a JavaScript number.
+- The iteration slider is logarithmic from 1 to 1,000,000 and always sets a
+  fixed limit. Old links that specify dynamic mode retain their explicit
+  iteration limit but no longer enable depth-based increases. Depth uses
+  `10^50.37×` notation without converting the full magnification to a
+  JavaScript number.
 - Palette stops are dragged directly and adjusted with Left/Right. Clicking a
   stop opens a nonmodal anchored RGB picker; valid hex or swatch edits recolour
   immediately. New palette edits are seamless repeating gradients and retain
@@ -67,7 +65,7 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   Coordinates, span, c, iteration limit and appearance round-trip without
   trimming digits. Old links use default appearance.
 
-Every page load starts at shallow Home (`10^0`, 2,000 iterations). It retains
+Every page load starts at shallow Home (`10^0`, 5,000 iterations). It retains
 saved locations, palette/appearance and panel preferences, but never restores a
 remembered deep camera or iteration budget automatically. A URL hash is parsed
 and staged without starting its calculation; Main shows **Open linked
@@ -239,11 +237,84 @@ check actual device capacity; BLA preparation yields cooperatively and high-cap
 batches shrink. Cancellation still waits for an already submitted GPU batch.
 GPU loss requires a reload. There is no built-in recording or public deploy.
 
-Deferred follow-up remains intentionally outside this baseline: further
-colour-control response latency and status-flicker work; first-use endpoint and
-Distance Lighting regeneration; authoritative endpoint-comparison evidence
-(the experimental readback was all-zero and could not establish equality); and
-untested CPU-assistance candidates.
+## Accepted follow-up, 23 September 2026
+
+The current release starts from `f3885de`. The isolated 5184 focus experiment
+(`5f9b5c1`) was rejected and is retained only as history. This release changes
+scheduler turn allocation to four pointer, two distributed and two oldest turns
+per eight; its numerical policies, missing-resolution scoring, batching and
+submission path remain the stable ones. The footer shows stationary refinement
+time and stays visible when the control panel is hidden. Colour spacing reaches
+16,384; iteration limits are fixed from 1 to 1,000,000, with Home at 5,000.
+
+The next numerical target is Julia BLA for deep main-view refinement while
+keeping preview and morph interaction responsive. Then investigate apparent
+regeneration on first use of effects and lighting before continuous colour
+slider latency. Existing-data colour-control response takes precedence while
+adjusting; numerical progress must survive. Investigate the critical path and
+remove unnecessary work without a separate final-quality fractal calculation
+pass. Never reinstate the rejected zoom-out numerical-field cache or the 5184
+scheduler architecture. Retain accepted numerical and BLA gains.
+
+Further candidates require evidence before adoption: workgroup, subgroup,
+register, temporary-storage and submission efficiencies; redundant spatial
+dispatch, boundary/solid filling and adaptive subdivision; a retained-image
+row/column experiment; shared series-prefix jumps beyond BLA including their
+preparation cost; independent CPU/GPU preparation or pixel overlap, perhaps
+WASM f64/SIMD rather than idle-core parallelism; periodicity beyond Direct,
+reference choice beyond the domain-bound fix, and arithmetic cheaper than the
+accepted two-word BLA jump. Park tolerance loosening, logarithm/comparator
+rewrites, the three-step alignment bridge, wholesale arithmetic replacement,
+and another broad profiler campaign. No fixed 10–15% presentation reserve has
+been established.
+
+The later Stop action must halt orbit work and optional colour-data preparation,
+freeze time and keep the image visible. Existing-data appearance edits should
+still work. Missing-data appearance edits must retain the prior valid image
+until Refresh, navigation or a numerical change; navigation restarts work.
+Refresh should restart the exact current view while retaining the old image.
+Replace the main Julia Preview/Return buttons with Refresh/Stop only when this
+interaction is implemented; J/M remain Julia shortcuts with another
+discoverable mouse/touch route. Investigate preparing missing effect data after
+visual 100% only if inexpensive: retain 100% and frozen time with a separate
+Preparing colour data status, let Stop halt it, and prioritize navigation.
+
+Approved later UI work: editable combined location selector/name with exact
+locations and links retained, and collision confirmation; reorganize Colouring
+as Preset, Edit Palette, Lighting, Colour spacing, Palette offset, Hue rotation,
+then formula/effect/capped selectors. Hue rotation affects the whole output
+including capped/effect colours without mutating palette points; presets reset
+rotation, individual palette edits preserve it. More formula/effect ideas need
+their exact approved list recovered first. Exclude solarised, duotone, halftone
+dots, crosshatch, histogram colouring and unapproved gcollombet features.
+Remove the specified “final”, “adapted”, and “XaoS adapted” label fragments and
+the capped-samples explanation. Replace Hide controls with a hamburger and
+use helpful hover-only tooltips. Keep status and the hamburger visible with
+controls hidden and do not change Julia preview visibility. Put panel opacity
+first in Advanced, then antialiasing; clarify Vertical span and remove Reset
+panel layout. A hard-right palette point and light-distance control were
+cancelled.
+
+Approved rotation is for the main fractal only, with a −180° to +180° slider,
+no numerical angle field, CTRL+circular drag, SHIFT pan, centre pivot, zero
+reset, and angle retained in locations and exact links. Rotation is navigation.
+Fullscreen is independent of panel visibility; Escape exits without resetting
+the view. Later antialiasing should be sharper, post-image only, after
+completion, with no extra fractal calculation. PNG should export only the
+fractal, with Current viewport, Monitor size and 2× Monitor size as true render
+sizes, retaining view, rotation, palette and AA. Palette-offset animation was
+discussed but not accepted as a requirement.
+
+The supplied extreme minibrot fixture has no confirmed mode or Julia constant.
+Do not treat it as a Julia BLA benchmark without clarification, change its
+signs, or start an unbounded extreme render by default. The supplied strings
+are preserved exactly:
+
+```text
+real: 0.747702709800511938677751194679951319751517984123356800029955785208167644444157656204818392389452328656750204117267778516081822213518192597153358754704375802032457281379095368784237552018288630140584008517944711273258989195162368
+imaginary: 0.0726794346032732975587095198367621143952225859816777610262290490332383495948353245238954438160097885662712500585131971636074018247078694504465727984279787749804571891146232401034066596968505351404825154179221317994167287582546606
+Vertical Span: 7.43268908108426967144683224931870442656439030102003759253629056509268800548072466732357585049928883110527821380512455933576726465936251829303857402392150455973853776948664012767390892121313198148693756459499152306639282336394391e-143
+```
 
 ## Licensing
 

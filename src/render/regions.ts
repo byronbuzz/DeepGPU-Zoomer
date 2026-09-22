@@ -36,6 +36,9 @@ function disjointDeficit(r:Region,covered:Demand['covered']){
 export function coverageDeficit(r:Region,covered:Demand['covered']){
   return disjointDeficit(r,disjointCoverage(covered));
 }
+export function schedulerService(turn:number,distributed:boolean,rows=false):'pointer'|'distributed'|'oldest'{
+  return turn%4===0?'oldest':distributed&&turn%2===0&&!rows?'distributed':'pointer';
+}
 
 /** Bounded, conservative presentation coverage; never establishes scalar validity. */
 export class CoverageRegions {
@@ -86,12 +89,13 @@ export class PendingRegions {
     this.coverage=disjointCoverage(demand.covered);
     this.pending=this.pending.filter(r=>r.stride===1 || this.deficit(r,demand)>0);
     if (!this.pending.length) return;
-    // A regular oldest turn prevents a moving focus from starving other gaps.
-    const oldest = ++this.turns % 8 === 0;
+    // Two oldest turns per eight prevent a moving focus from starving gaps.
+    const service=schedulerService(++this.turns,this.distributed,!!rows);
+    const oldest=service==='oldest';
     // Deterministic spatial service survives compatible retargets. The pointer
     // retains alternate turns; broad refinement is never gated on a full stage.
-    if(this.distributed&&this.turns%2===0&&!rows){
-      const k=(this.turns/2-1)%16;
+    if(service==='distributed'){
+      const k=((this.turns-2)/4)%16;
       const x=((k&1)<<1)|((k>>2)&1), y=(((k>>1)&1)<<1)|((k>>3)&1);
       demand={...demand,x:(x+.5)*this.width/4,y:(y+.5)*this.height/4};
     }

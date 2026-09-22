@@ -1,8 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { PendingRegions, coverageDeficit, type Demand } from '../../src/render/regions';
+import { PendingRegions, coverageDeficit, schedulerService, type Demand } from '../../src/render/regions';
 
 const demand: Demand = {x:180,y:80,zoom:1,covered:[]};
 describe('exact pending regions',()=>{
+  it('allocates eight turns 4 pointer, 2 distributed, 2 oldest',()=>{
+    expect(Array.from({length:8},(_,i)=>schedulerService(i+1,true))).toEqual([
+      'pointer','distributed','pointer','oldest','pointer','distributed','pointer','oldest',
+    ]);
+  });
   it('reaches an off-centre focus before the far corner and responds to a new focus',()=>{
     const queue=new PendingRegions(); queue.reset(256,256);
     const first=queue.take(1024,demand)!;

@@ -21,9 +21,8 @@
       <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
       <label>Location name<input id="location-name" maxlength="80" placeholder="Untitled location"></label>
       <div class="row"><button id="save">Save location</button><button id="share">Copy exact link</button></div>
-      <label>Zoom speed <output id="speed-value">0.7×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="0.7"></label>
-      <label>Iteration mode<select id="iteration-mode"><option value="fixed">Fixed</option><option value="dynamic">Dynamic · depth based</option></select></label>
-      <label>Iteration limit <output id="iteration-value">2,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
+      <label>Zoom speed <output id="speed-value">0.8×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="0.8"></label>
+      <label>Iteration limit <output id="iteration-value">5,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
       <p id="iteration-detail" class="help compact">Fixed limit.</p>
       <button id="screenshot" disabled>Save PNG</button>
       <p class="help">Hold left / right to zoom in / out. Shift-drag to pan. Wheel, + / − and arrows also work. J previews Julia; M opens or returns. Esc stops motion.</p>
@@ -75,7 +74,7 @@
     <p class="preview-help">Left-drag on Mandelbrot to select c. Drag this panel’s bottom-right corner to resize.</p>
     <button id="julia-promote" disabled aria-keyshortcuts="M">Open Julia · M</button>
   </section>
-  <footer><span id="cadence">Starting WebGPU…</span><span id="freshness">Preparing first field</span><span id="depth"></span></footer>
+  <footer><span id="freshness">Preparing first field · Time taken: 00:00.00</span><span id="depth"></span></footer>
   <div id="message" role="status" aria-live="polite"></div>
   <script type="module" src="/src/main.ts"></script>
 </body></html>

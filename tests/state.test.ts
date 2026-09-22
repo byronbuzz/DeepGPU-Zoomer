@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Camera, HOME, encodeView, decodeView, effectiveIterations, validateView } from '../src/state';
+import { Camera, HOME, encodeView, decodeView, validateView } from '../src/state';
 import { PLACES } from '../src/places';
 import Decimal from 'decimal.js';
 import {depthLabel,iterationFromSlider,iterationToSlider} from '../src/state';
@@ -7,26 +7,25 @@ import {CAPPED,DEFAULT_COLORS,FORMULAS,PRESETS,cycleFromSlider,cycleToSlider,dec
 
 describe('exact view state',()=>{
   it('uses the released Home iteration default',()=>{
-    expect(HOME.iterations).toBe(2000);
+    expect(HOME.iterations).toBe(5000);
   });
   it('formats depth without overflow and maps continuous limits to exact integers',()=>{
     expect(depthLabel(new Decimal('2.8'))).toBe('10^0.00×');
     expect(depthLabel(new Decimal('2.8e-2000'))).toBe('10^2000.00×');
-    for(const n of [32,1000,100000,1000000]){expect(iterationFromSlider(iterationToSlider(n))).toBe(n);expect(validateView({...HOME,iterations:n}).iterations).toBe(n);}
+    for(const n of [1,32,1000,100000,1000000]){expect(iterationFromSlider(iterationToSlider(n))).toBe(n);expect(validateView({...HOME,iterations:n}).iterations).toBe(n);}
     expect(()=>validateView({...HOME,iterations:1000001})).toThrow();
   });
   it('roundtrips appearance and accepts old links without appearance',()=>{
     const appearance=validateColors({...DEFAULT_COLORS,stops:['#123456','#abcdef'],positions:[.123,.789],locks:[true,false],effect:8,formula:4,capped:2,repeating:false});
     const v={...PLACES[4],appearance};expect(decodeView(encodeView(v))).toEqual(validateView(v));
     expect(decodeView(encodeView(HOME))).toEqual(HOME);
-    expect(validateView({...HOME,iterationMode:undefined}).iterationMode).toBe('fixed');
-    expect(decodeView(encodeView({...HOME,iterationMode:'dynamic'})).iterationMode).toBe('dynamic');
+    const legacy={...HOME,iterationMode:'dynamic'};
+    expect(decodeView(encodeView(legacy))).toEqual(HOME);
   });
-  it('keeps fixed limits exact and bounds the documented dynamic depth policy',()=>{
-    expect(effectiveIterations(1000,new Decimal('2.8'),'fixed')).toBe(1000);
-    expect(effectiveIterations(1000,new Decimal('2.8'),'dynamic')).toBe(1024);
-    expect(effectiveIterations(1000,new Decimal('2.8e-2'),'dynamic')).toBe(1120);
-    expect(effectiveIterations(1_000_000,new Decimal('2.8e-2000'),'dynamic')).toBe(1_000_000);
+  it('preserves an explicitly saved limit while discarding obsolete dynamic mode',()=>{
+    const old={...HOME,iterations:2173,iterationMode:'dynamic'};
+    expect(validateView(old)).toEqual({...HOME,iterations:2173});
+    expect(iterationFromSlider(0)).toBe(1);
   });
   it('keeps released formula IDs and roundtrips all appended appearance fields',()=>{
     expect(FORMULAS.slice(0,5)).toEqual(['Smooth escape','Classic iteration bands','Binary decomposition','Colour decomposition','Biomorphs']);
@@ -42,7 +41,7 @@ describe('exact view state',()=>{
   });
   it('maps colour spacing exponentially without losing endpoints',()=>{
     expect(DEFAULT_COLORS.cycle).toBe(64);
-    for(const value of [8,32,64,256,512,1024,4096]){
+    for(const value of [8,32,64,256,512,1024,4096,16384]){
       expect(cycleFromSlider(cycleToSlider(value))).toBeCloseTo(value,10);
       expect(decodeColors(encodeColors({...DEFAULT_COLORS,cycle:value}))?.cycle).toBe(value);
     }
