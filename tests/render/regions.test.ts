@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PendingRegions, coverageDeficit, positionalWeight, type Demand } from '../../src/render/regions';
+import { PendingRegions, coverageDeficit, type Demand } from '../../src/render/regions';
 
 const demand: Demand = {x:180,y:80,zoom:1,covered:[]};
 describe('exact pending regions',()=>{
@@ -25,23 +25,23 @@ describe('exact pending regions',()=>{
       expect(magnified.take(16384,{...demand,zoom,covered:[{...covered[0],spacing:100}]})!.stride).toBe(4);
     }
   });
-  it('keeps a small remaining coverage gap eligible',()=>{
+  it('keeps focus eligible when only a small coverage gap remains',()=>{
     const queue=new PendingRegions();queue.reset(512,512,4);
-    const next=queue.take(16384,{...demand,covered:[{x:0,y:0,width:510,height:512}]})!;
-    expect(next.x+next.width).toBeGreaterThan(510);
+    expect(queue.take(16384,{...demand,covered:[{x:0,y:0,width:510,height:512}]})!.stride).toBe(1);
   });
   it('integrates overlapping densities without inventing known area',()=>{
     const r={x:0,y:0,width:100,height:100,stride:1,order:0};
     expect(coverageDeficit(r,[{...r,width:50},{...r,width:50},{...r,width:50}])).toBe(.5);
     expect(coverageDeficit(r,[{...r,spacing:4},{...r,width:50,spacing:2},{...r,width:25,spacing:1}])).toBe(.5);
   });
-  it('uses explicit bounded weights for inward, hover and outward demand',()=>{
-    const r={x:448,y:448,width:128,height:128,stride:1,order:0},base={...demand,x:512,y:512};
-    expect(positionalWeight(r,{...base,zoom:3},1024,1024)).toBeCloseTo(8,10);
-    expect(positionalWeight(r,{...base,zoom:0},1024,1024)).toBeCloseTo(1.25,10);
-    expect(positionalWeight(r,{...base,zoom:-3},1024,1024)).toBeCloseTo(1/3,10);
-    const edge={...r,x:0,y:0};expect(positionalWeight(edge,{...base,zoom:3},1024,1024)).toBeGreaterThan(1);
-    expect(positionalWeight(edge,{...base,zoom:3},1024,1024)).toBeLessThan(8);
+  it('services different spatial strata across compatible retargets',()=>{
+    const queue=new PendingRegions(),positions=new Set<string>();
+    for(let i=0;i<32;i++){
+      queue.reset(1024,1024,16,true);
+      const r=queue.take(1024,{...demand,covered:[{x:0,y:0,width:1024,height:1024,spacing:16}]})!;
+      positions.add(`${r.x},${r.y}`);
+    }
+    expect(positions.size).toBeGreaterThan(8);
   });
   it('keeps subdivided sparse work aligned to its actual shading anchors',()=>{
     const queue=new PendingRegions();queue.reset(1024,768,16);
@@ -66,9 +66,9 @@ describe('exact pending regions',()=>{
     const next=queue.take(1024,{x:16,y:128,zoom,covered:[{x:0,y:0,width:224,height:256}]})!;
     expect(next.x).toBeGreaterThanOrEqual(224);
   });
-  it('does not invent missing benefit when the view is already covered',()=>{
+  it('does not prefer an already covered edge on zoom-out',()=>{
     const queue=new PendingRegions(); queue.reset(256,256);
     const next=queue.take(1024,{...demand,zoom:-1,covered:[{x:0,y:0,width:256,height:256}]})!;
-    expect(next.stride).toBe(1);
+    expect(next.x<=180&&next.x+next.width>180&&next.y<=80&&next.y+next.height>80).toBe(true);
   });
 });

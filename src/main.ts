@@ -15,8 +15,7 @@ let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
 let effectiveLimit=HOME.iterations;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let fields=0, recolours=0, lastFresh=0, stats:RenderStats|undefined, completedQuality=0;
-let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, dragging=false, speed=.7, pointerWeight=1, previousTime=0, statusTime=0;
-let zoomRate=0,wheelEventTime=0;
+let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=.7, previousTime=0, statusTime=0;
 let lastDynamicCheck=0;
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
@@ -58,7 +57,7 @@ function syncIterationLabel(){
   el('iteration-value').textContent=dynamic?effectiveLimit.toLocaleString():view.iterations.toLocaleString();
   el('iteration-detail').textContent=dynamic?`Effective ${effectiveLimit.toLocaleString()} · base ${view.iterations.toLocaleString()} · +50 per completed zoom decade, rounded to 32.`:'Fixed limit.';
 }
-function stop(){direction=0;zoomRate=0;dragging=false;selecting=false;keys.clear();}
+function stop(){direction=0;wheelDirection=0;dragging=false;selecting=false;keys.clear();}
 function syncPlace(){
   const matches=(p:SavedView)=>p.family===view.family && p.iterations===view.iterations && (p.iterationMode??'fixed')===(view.iterationMode??'fixed') && camera.x.eq(p.x) && camera.y.eq(p.y) && camera.span.eq(p.span) && (view.family==='mandelbrot'||new Decimal(view.jx).eq(p.jx)&&new Decimal(view.jy).eq(p.jy));
   const index=PLACES.findIndex(matches),savedIndex=saved.findIndex(item=>matches(item.view));
@@ -178,7 +177,7 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:view.family==='mandelbrot',interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:performance.now()-lastInteraction<180?zoomRate:0,pointerWeight,isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:view.family==='mandelbrot',interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error)return;latchEffective(false);busy=true;dirty=false;const g=generation;
@@ -196,7 +195,7 @@ function tick(time:number){
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
   if(!document.hidden){
     const zoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
-    if(zoom && dt){zoomRate=zoom*speed;camera.zoom(-zoomRate*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);changed();}
+    if(zoom && dt){camera.zoom(-zoom*speed*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);changed();}
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);changed();}
     if((zoom||dx||dy)&&view.iterationMode==='dynamic'&&time-lastDynamicCheck>=500){lastDynamicCheck=time;latchEffective();}
@@ -227,12 +226,12 @@ function tick(time:number){
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
 canvas.addEventListener('pointerdown',e=>{if(e.button>2)return;canvas.focus();canvas.setPointerCapture(e.pointerId);pointer={x:e.clientX,y:e.clientY};
   if(previewEnabled && view.family==='mandelbrot' && e.button===0){e.preventDefault();stop();selecting=true;selectJuliaAtPointer();return;}
-  dragging=e.shiftKey||e.button===1;direction=dragging?0:e.button===2?-1:1;changed();});
+  wheelDirection=0;dragging=e.shiftKey||e.button===1;direction=dragging?0:e.button===2?-1:1;changed();});
 canvas.addEventListener('pointermove',e=>{if(selecting){pointer={x:e.clientX,y:e.clientY};selectJuliaAtPointer();return;}if(dragging){camera.pan(e.clientX-pointer.x,e.clientY-pointer.y,innerHeight);changed();}pointer={x:e.clientX,y:e.clientY};});
 function endPointer(e:PointerEvent){if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);if(selecting){stop();return;}stop();latchEffective();persist();}
 canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();latchEffective();persist();});
-canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1),logFactor=Math.max(-1,Math.min(1,delta*.002))*speed,now=performance.now();const elapsed=Math.max(1/240,Math.min(.18,(now-(wheelEventTime||previousTime))/1000));wheelEventTime=now;zoomRate=-logFactor/elapsed;camera.zoom(logFactor,pointer.x,pointer.y,innerWidth,innerHeight);changed();clearTimeout(wheelSave);wheelSave=setTimeout(()=>{latchEffective();persist();},250);},{passive:false});
-canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();latchEffective();persist();return;}if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();keys.add(e.key);changed();}});
+canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);changed();clearTimeout(wheelSave);wheelSave=setTimeout(()=>{latchEffective();persist();},250);},{passive:false});
+canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();latchEffective();persist();return;}if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;keys.add(e.key);changed();}});
 canvas.addEventListener('keyup',e=>{if(!keys.delete(e.key))return;latchEffective();persist();});
 document.addEventListener('keydown',e=>{
   if(e.repeat||e.ctrlKey||e.metaKey||e.altKey||(e.target instanceof HTMLElement && (e.target.isContentEditable||e.target.closest('input,textarea,select'))))return;
@@ -247,7 +246,6 @@ el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(Strin
 el('return').onclick=switchJuliaView;
 el('reset').onclick=()=>load({...HOME,appearance:validateColors(colors)});
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
-el<HTMLInputElement>('pointer-weight').oninput=e=>{pointerWeight=Number((e.target as HTMLInputElement).value);el('pointer-weight-value').textContent=pointerWeight.toFixed(2)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
 el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
 el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
@@ -266,7 +264,6 @@ el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
   speed=.7;el<HTMLInputElement>('speed').value='.7';el('speed-value').textContent='0.7×';
-  pointerWeight=1;el<HTMLInputElement>('pointer-weight').value='1';el('pointer-weight-value').textContent='1.00×';
   el<HTMLInputElement>('location-name').value='';el<HTMLSelectElement>('random-style').value='harmonious';
   profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
   try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}

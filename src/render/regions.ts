@@ -2,10 +2,8 @@
 export interface Region { x: number; y: number; width: number; height: number; order: number; stride: number }
 export interface Demand {
   x: number; y: number;
-  /** Signed log-span speed per second: positive inward, negative outward. */
+  /** Positive inward, negative outward; pan is represented by exposed bounds. */
   zoom: number;
-  /** User multiplier for the signed positional exponent; 0 disables it. */
-  pointerWeight?: number;
   covered: { x: number; y: number; width: number; height: number; spacing?: number }[];
 }
 /** Flatten once per selection, so every candidate uses the same weighted union. */
@@ -39,17 +37,6 @@ export function coverageDeficit(r:Region,covered:Demand['covered']){
   return disjointDeficit(r,disjointCoverage(covered));
 }
 
-/** Bounded viewport-wide exponential preference. Scheduling multiplies the
- * missing-resolution benefit by this position-and-speed weight. */
-export function positionalWeight(r:Region,d:Demand,width:number,height:number){
-  const cx=r.x+r.width/2,cy=r.y+r.height/2;
-  const distance=Math.min(1,Math.hypot((cx-d.x)/Math.max(1,width),(cy-d.y)/Math.max(1,height))/Math.SQRT2);
-  const speed=Math.min(1,Math.abs(d.zoom)/3);
-  const strength=d.zoom>0?Math.log(2)+speed*Math.log(4):d.zoom<0?-(Math.log(1.5)+speed*Math.log(2)):Math.log(1.25);
-  const scalar=Math.max(0,Math.min(4,d.pointerWeight??1));
-  return Math.exp(strength*scalar*(1-distance));
-}
-
 /** Bounded, conservative presentation coverage; never establishes scalar validity. */
 export class CoverageRegions {
   rectangles: Demand['covered']=[];
@@ -67,10 +54,12 @@ export class PendingRegions {
   private turns = 0;
   private width=0;
   private height=0;
+  private distributed=false;
   private deficits=new Map<Region,number>();
   private coverage:Demand['covered']=[];
   reset(width: number, height: number, previewStride=1, compatible=false) {
     this.width=width;this.height=height;
+    this.distributed=previewStride>1;
     this.pending = width && height ? [{ x: 0, y: 0, width, height, order: 0, stride: 1 }] : [];
     if(!compatible)this.turns=0;
     for(let stride=2;width&&height&&stride<=previewStride;stride*=2)
@@ -83,11 +72,14 @@ export class PendingRegions {
     return value;
   }
   private score(r: Region, d: Demand) {
+    const dx = Math.max(r.x - d.x, 0, d.x - r.x - r.width + 1);
+    const dy = Math.max(r.y - d.y, 0, d.y - r.y - r.height + 1);
     const deficit=this.deficit(r,d);
     // Sparse samples cover stride squared pixels per calculation, but only
     // improve linear resolution by stride. Use that conservative cost benefit.
-    const benefit=deficit*4*(r.stride>1?Math.sqrt(r.stride):1);
-    return benefit*positionalWeight(r,d,this.width,this.height);
+    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + .5 / (1 + Math.hypot(dx,dy) / 64);
+    const focusWeight=this.distributed&&this.turns%2===1?4:1;
+    return deficit * 4 + focusWeight / (1 + Math.hypot(dx,dy) / 64);
   }
   take(budget: number, demand: Demand, rows?: number): Region | undefined {
     this.deficits.clear();
@@ -96,6 +88,13 @@ export class PendingRegions {
     if (!this.pending.length) return;
     // A regular oldest turn prevents a moving focus from starving other gaps.
     const oldest = ++this.turns % 8 === 0;
+    // Deterministic spatial service survives compatible retargets. The pointer
+    // retains alternate turns; broad refinement is never gated on a full stage.
+    if(this.distributed&&this.turns%2===0&&!rows){
+      const k=(this.turns/2-1)%16;
+      const x=((k&1)<<1)|((k>>2)&1), y=(((k>>1)&1)<<1)|((k>>3)&1);
+      demand={...demand,x:(x+.5)*this.width/4,y:(y+.5)*this.height/4};
+    }
     let index = 0;
     for (let i=1; i<this.pending.length; i++) {
       if (oldest ? this.pending[i].order < this.pending[index].order :

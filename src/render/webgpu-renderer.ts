@@ -84,8 +84,6 @@ export interface RenderRequest {
   publishPartial?: boolean;
   focus?: { x: number; y: number };
   zoom?: number;
-  /** Live scheduling-only scalar; excluded from numerical and presentation identity. */
-  pointerWeight?: number;
 }
 
 export interface RenderStats {
@@ -1234,7 +1232,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     covered.push(...this.determined.rectangles.map(r=>({...r,spacing:r.spacing??1})));
     const hints=new CoverageRegions();for(const c of covered)hints.add(c);
     return {x:((m?.offsetX??0)+focus.x*(m?.scaleX??1))*request.width,
-      y:((m?.offsetY??0)+focus.y*(m?.scaleY??1))*request.height,zoom:live.zoom??0,pointerWeight:live.pointerWeight??1,covered:hints.rectangles};
+      y:((m?.offsetY??0)+focus.y*(m?.scaleY??1))*request.height,zoom:live.zoom??0,covered:hints.rectangles};
   }
 
   async render(request: RenderRequest): Promise<RenderStats> {
