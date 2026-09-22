@@ -239,13 +239,22 @@ GPU loss requires a reload. There is no built-in recording or public deploy.
 
 ## Accepted follow-up, 23 September 2026
 
-The current release starts from `f3885de`. The isolated 5184 focus experiment
-(`5f9b5c1`) was rejected and is retained only as history. This release changes
-scheduler turn allocation to four pointer, two distributed and two oldest turns
+The first status/fixed-controls release is `f1247acc`, based on `f3885de`. The
+isolated 5184 focus experiment (`5f9b5c1`) was rejected and is retained only as
+history. This release changes scheduler turn allocation to four pointer, two
+distributed and two oldest turns
 per eight; its numerical policies, missing-resolution scoring, batching and
 submission path remain the stable ones. The footer shows stationary refinement
 time and stays visible when the control panel is hidden. Colour spacing reaches
 16,384; iteration limits are fixed from 1 to 1,000,000, with Home at 5,000.
+
+Julia BLA remains unresolved and is not in main: the default-bound probe missed
+6 of 49 independently checked points, and tighter bounds still failed targeted
+checks against the independent oracle. Its limited pass flag is not acceptance;
+patches and raw evidence are in `F:\Coding\Temp\GPU-Zoomer-3-julia-bla-20260923\RESULT.md`.
+Use the Codex in-app browser for testing; do not launch an external or headless
+browser. Candidate builds must write outside the directory served on 5183: a
+source revision or unchanged listener does not establish the served bundle.
 
 The next numerical target is Julia BLA for deep main-view refinement while
 keeping preview and morph interaction responsive. Then investigate apparent
