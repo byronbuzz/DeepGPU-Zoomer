@@ -1321,7 +1321,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       JSON.stringify(value.colors)].join("|");
     let requestKey=keyFor(request);
     if (requestKey === this.cachedRequest && this.cachedStats && this.historyValid && request.isCurrent!()) {
-      this.referencePreparing=false;this.exactTotalSamples=request.width*request.height;this.exactCompletedSamples=this.exactTotalSamples;
+      this.referencePreparing=false;this.exactTotalSamples=request.width*request.height;
+      const reconstructed=Math.min(this.exactTotalSamples,this.cachedStats.reconstructedSamples??0);
+      this.exactCompletedSamples=this.exactTotalSamples-reconstructed;this.resolvedCompletedSamples=this.exactTotalSamples;
       return { ...this.cachedStats, computed: false, computedSamples: 0,
         reusedSamples: request.width * request.height, orbitMs: 0, pipelineWaitMs: 0, tableMs: 0, renderMs: 0,
         skippedIterations:0,plainIterations:0,approxSteps:0,rebases:0,skipRatio:0 };
