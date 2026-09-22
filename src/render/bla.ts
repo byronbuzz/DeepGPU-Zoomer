@@ -79,6 +79,7 @@ export function compose(first: Step, second: Step): Pick<Step, "a" | "b"> {
 
 export interface BuildOptions {
   maxLevels?: number;
+  epsilonLog2?: number;
   /** Legacy reduced samples or the renderer's four-word reference samples. */
   sampleWords?: 6 | 20;
 }
@@ -114,7 +115,7 @@ function* buildBlaSteps(
     if (i % 4096 === 0) yield;
     const a = normalise(2 * refX[i], 2 * refY[i], 0);
     const magnitude = log2Magnitude(a);
-    levels[0].push({ a, b: ONE, radiusLog2: Number.isFinite(magnitude) ? magnitude + EPSILON_LOG2 : NEVER });
+    levels[0].push({ a, b: ONE, radiusLog2: Number.isFinite(magnitude) ? magnitude + (options.epsilonLog2 ?? EPSILON_LOG2) : NEVER });
   }
 
   const maxLevels = options.maxLevels ?? 21;

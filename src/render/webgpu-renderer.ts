@@ -189,6 +189,13 @@ export function referenceViewportRadius(
   return Decimal.hypot(x, y).toNumber();
 }
 
+export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height">, refX: Decimal, refY: Decimal): number {
+  return family === "julia" ? 0 : referenceViewportRadius(request, refX, refY);
+}
+export function approximationEligible(family: "mandelbrot" | "julia", mode: number): boolean {
+  return family === "julia" ? mode === 0 : mode !== 2;
+}
+
 function splitExponent(value: Decimal): { mantissa: number; exponent: number } {
   if (value.isZero()) return { mantissa: 0, exponent: 0 };
   const exponent = binaryExponent(value);
@@ -286,6 +293,7 @@ export class WebGpuRenderer {
   private referenceDecodePipeline: GPUComputePipeline | null = null;
   private referenceVerifyPipeline: GPUComputePipeline | null = null;
   private juliaPipeline: GPUComputePipeline | null = null;
+  private juliaApproxPipeline: GPUComputePipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
   private retainPipeline: GPURenderPipeline | null = null;
   private retainFloatPipeline: GPURenderPipeline | null = null;
@@ -527,6 +535,11 @@ export class WebGpuRenderer {
       layout: pipelineLayout,
       compute: { module: renderModule, entryPoint: "compute", constants: { JULIA: 1 } },
     });
+    this.juliaApproxPipeline = device.createComputePipeline({
+      label: "julia-approximation-compute",
+      layout: pipelineLayout,
+      compute: { module: renderModule, entryPoint: "compute", constants: { JULIA: 1, APPROX: 1 } },
+    });
     this.shadePipeline = device.createComputePipeline({
       label: "perturbation-shade",
       layout: pipelineLayout,
@@ -725,7 +738,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const { device } = this.ctx;
     const started = performance.now();
 
-    const maxDelta = referenceViewportRadius(request, this.refX, this.refY);
+    const maxDelta = approximationDeltaBound(request.family ?? "mandelbrot", request, this.refX, this.refY);
 
     const samples = this.refSamples;
     if (!samples || samples.length !== this.refLength * 20) {
@@ -734,7 +747,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const table = await buildBlaAsync(samples, this.refLength, maxDelta, async()=>{
       await yieldToEvents();
       if(this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException("Superseded table","AbortError");
-    }, { sampleWords: 20 });
+    }, { sampleWords: 20, epsilonLog2: request.family === "julia" ? -40 : undefined });
     if(table.data.byteLength>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('The approximation table exceeds this GPU’s buffer capacity.');
     this.tableMaxDelta = maxDelta;
 
@@ -1431,7 +1444,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.refSamples = orbit.samples; this.refValid = true;
         drift = new Decimal(0); orbitMs = orbit.ms;
         this.tableMs = 0; this.laLevels=0; this.laHasUsableMultiStep=false; this.tableMaxDelta=-1;
-        if (family === "mandelbrot" && request.useApprox===true && request.colors.mode!==2) await this.buildApproxTable(request);
+        if (request.useApprox===true && approximationEligible(family, request.colors.mode)) await this.buildApproxTable(request);
       } catch (error) {
         this.referencePreparing=false;
         throw error;
@@ -1440,8 +1453,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Reversal/overscan can need a larger delta domain without a new orbit.
     // Conversely, a table with no usable multi-step entry can become useful
     // when the same orbit is viewed through a narrower domain.
-    const requiredDelta = referenceViewportRadius(request, this.refX, this.refY);
-    if (method !== Method.Direct && family === "mandelbrot" && request.useApprox === true && request.colors.mode !== 2 &&
+    const requiredDelta = approximationDeltaBound(family, request, this.refX, this.refY);
+    if (method !== Method.Direct && request.useApprox === true && approximationEligible(family, request.colors.mode) &&
         (requiredDelta > this.tableMaxDelta * (1 + 1e-12) ||
          !this.laHasUsableMultiStep && requiredDelta < this.tableMaxDelta * (1 - 1e-12))) {
       await this.buildApproxTable(request);
@@ -1509,7 +1522,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     u32[8] = this.refLength;
     const deltaBound = requiredDelta;
     const approximationLevels =
-      request.useApprox !== true || method === Method.Direct || family === "julia" || colors.mode === 2 ||
+      request.useApprox !== true || method === Method.Direct || !approximationEligible(family, colors.mode) ||
       !this.laHasUsableMultiStep || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
     u32[20] = approximationLevels;
     u32[21] = BASE_STEP;
@@ -1627,7 +1640,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const encoder = device.createCommandEncoder({ label: "calculate-region" });
       const sample = this.timing.begin("calculate");
       const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
-      pass.setPipeline(family === "julia" ? this.juliaPipeline! : method === Method.Direct ? this.directPipeline! :
+      pass.setPipeline(family === "julia" ? approximationLevels > 0 ? this.juliaApproxPipeline! : this.juliaPipeline! : method === Method.Direct ? this.directPipeline! :
         approximationLevels > 0 ? this.approxPipeline! : this.renderPipeline);
       pass.setBindGroup(0, bind);
       pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 8)); pass.end();

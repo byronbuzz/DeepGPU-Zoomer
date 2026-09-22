@@ -153,6 +153,8 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
         Wide(vec4<f32>(fromCentre.x, 0.0, 0.0, 0.0), vec4<f32>(fromCentre.y, 0.0, 0.0, 0.0), 0));
     let direct = JULIA && u.method == 0u;
     let injection = wideAdd(pixelDelta, wideNorm(Wide(u.wideOffsetX, u.wideOffsetY, u.offsetExponent)));
+    var parameterDelta = injection;
+    if (JULIA) { parameterDelta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     var delta = injection;
     if (!JULIA) { delta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     var z = wideAdd(wideNorm(Wide(u.wideCentreX, u.wideCentreY, 0)), pixelDelta);
@@ -181,11 +183,11 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
 
     while (n < u.maxIterations && !escaped) {
         var span = 0u;
-        if (APPROX && !JULIA && !direct && referenceIndex > 0u &&
+        if (APPROX && (!JULIA || u.mode == 0u) && !direct && referenceIndex > 0u &&
             ((referenceIndex - 1u) % u.laBaseStep) == 0u &&
             referenceIndex + u.laBaseStep < u.refLength &&
             n + u.laBaseStep <= u.maxIterations) {
-            span = takeSkip(referenceIndex, &delta, &derivative, wantDerivative, injection, u.maxIterations - n);
+            span = takeSkip(referenceIndex, &delta, &derivative, wantDerivative, parameterDelta, u.maxIterations - n);
         }
         if (span > 0u) {
             referenceIndex += span;

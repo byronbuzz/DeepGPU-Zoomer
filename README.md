@@ -156,9 +156,10 @@ asynchronously. At deep Mandelbrot scales, every eligible sampling density uses
 one standard linear BLA table to skip reference ranges within its existing
 radius policy. Ordinary Wide recurrence is the local fallback when a skip is
 inapplicable, and changing density does not force recomputation of an already
-calculated sample. Julia, direct Mandelbrot and derivative-distance colouring
-do not use BLA. Expanded views rebuild the table's conservative offset bound
-while retaining the reference orbit.
+calculated sample. Deep main-view Julia iteration colouring uses a separate
+-40-bound BLA table; its preview, derivative-distance and per-iteration
+diagnostic modes, and direct Mandelbrot, do not use BLA. Expanded Mandelbrot
+views rebuild the table's conservative offset bound while retaining the orbit.
 Statistics distinguish reference work, pipeline wait, optional table preparation,
 completed-field wall time and copied/computed samples.
 Wide perturbation carries the already decoded absolute reference sample across
@@ -211,12 +212,12 @@ fixed-cap pixel independently escapes at 19688 while the unaccelerated GPU path
 reports 19679; this remains unresolved. Mandelbrot
 and Julia perturbation share QD-derived four-f32 mantissas for coordinates,
 reference transport, recurrence and rebasing. When BLA is enabled, completed
-dense Mandelbrot fields and PNG export use the same linear approximation policy
-as navigation samples. Completion means the current sampling target is fully
-resolved under that selected policy, not that it matches the no-skip recurrence
-or an independent oracle. Julia keeps BLA disabled, derivative-distance
-colouring falls back to the no-skip recurrence, and direct Mandelbrot retains
-its cheaper compensated-pair path. Neither WGSL nor these tests establish
+dense Mandelbrot or eligible Julia fields and PNG export use the same linear
+approximation policy as navigation samples. Completion means the current
+sampling target is fully resolved under that selected policy, not that it
+matches the no-skip recurrence or an independent oracle. Julia preview,
+derivative-distance and per-iteration diagnostic modes fall back to no skips;
+direct Mandelbrot retains its cheaper compensated-pair path. Neither WGSL nor these tests establish
 universal error-free arithmetic.
 Precision grows through profiles up to
 256 u32 limbs; views beyond that range are rejected.
@@ -257,20 +258,23 @@ without another orbit recurrence. Palette-only edits and re-enabling an already
 prepared effect still recolour without recurrence. The controls toggle is an
 accessible hamburger; it and the footer remain visible while controls are hidden.
 
-Julia BLA remains isolated, not in main. The default-bound probe missed 6 of 49
-independently checked points, but exact oracle mismatches alone are not a
-practical fidelity veto. At the tighter -40 bound, four fresh 960×640 spiral
-renders gave a 23.6% mean wall gain (including preparation), with 1.012% changed
-pixels and the visible spiral intact. This is one view and GPU; it does not
-qualify capped regions or other appearances. Patches and raw evidence are in
+Julia BLA is now enabled for eligible main-view iteration colouring. The same
+practical acceptance criterion applies to both fractal families: repeated
+bounded wall benefit, intact visible structure and no observed escape/capped
+classification changes, not exact raw iteration equality. The historical
+default-bound Julia probe missed 6 of 49 independently checked points. At the
+tighter -40 bound, four fresh 960×640 spiral renders gave a 23.6% mean wall
+gain (including preparation), with 1.012% changed pixels and the visible
+spiral intact. This view had no capped samples; other views, GPUs and
+endpoint-dependent appearances remain unqualified. Patches and raw evidence are in
 `F:\Coding\Temp\GPU-Zoomer-3-julia-practical-20260923\RESULT.md` and the
 earlier `F:\Coding\Temp\GPU-Zoomer-3-julia-bla-20260923\RESULT.md`.
 Use the Codex in-app browser for testing; do not launch an external or headless
 browser. Candidate builds must write outside the directory served on 5183: a
 source revision or unchanged listener does not establish the served bundle.
 
-The next numerical target is Julia BLA for deep main-view refinement while
-keeping preview and morph interaction responsive. Then investigate continuous
+The next Julia numerical follow-up is broader BLA qualification while keeping
+preview and morph interaction responsive. Then investigate continuous
 colour slider latency. Existing-data colour-control response takes precedence
 while adjusting; numerical progress must survive. Investigate the critical path
 and remove unnecessary work without a separate final-quality fractal calculation

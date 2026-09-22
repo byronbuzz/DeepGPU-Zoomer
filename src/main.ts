@@ -174,7 +174,7 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:view.family==='mandelbrot',interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error)return;busy=true;dirty=false;const g=generation;

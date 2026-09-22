@@ -71,6 +71,15 @@ describe("standard linear BLA", () => {
     expect(first.b).toEqual({ x: 1, y: 0, e: 0 });
   });
 
+  it("keeps the Julia radius override separate from the default policy", () => {
+    const orbit = new Float32Array(3 * 20);
+    orbit[20] = 0.5;
+    const standard = buildBla(orbit, 3, 0, { sampleWords: 20 });
+    const julia = buildBla(orbit, 3, 0, { sampleWords: 20, epsilonLog2: -40 });
+    expect(readStep(standard, 0, 0).radiusLog2).toBe(-21);
+    expect(readStep(julia, 0, 0).radiusLog2).toBe(-40);
+  });
+
   it("distinguishes a table with no shader-usable multi-step entries", () => {
     const orbit = new Float32Array(65 * 6);
     for (let i = 0; i < 65; i++) orbit[i * 6] = 0.3;
