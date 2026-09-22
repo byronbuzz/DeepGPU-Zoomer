@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 import { describe, expect, it } from "vitest";
-import { createSampleGridAnchor, planRetainedView, sampleGridCoarsen, sampleGridRemap } from "../../src/render/sample-grid";
+import { createSampleGridAnchor, planRetainedView, sampleGridRemap } from "../../src/render/sample-grid";
 import type { FrameView } from "../../src/render/reprojection";
 
 const frame = (spacing = "1", x = "0", y = "0", width = 65, height = 49): FrameView => ({
@@ -61,17 +61,5 @@ describe("stable sample grids", () => {
     expect(sampleGridRemap(frame(), frame("1", "1e20"))).toBeNull();
     expect(sampleGridRemap(frame(), frame("2147483648"))).toBeNull();
     expect(sampleGridRemap(frame(), frame("1073741824"))).toBeNull();
-  });
-  it("plans arbitrary outward sampling directly from the original dense anchor",()=>{
-    const precision=Decimal.precision;Decimal.set({precision:100});
-    try{
-      const old=frame("1e-52","-0.527503118643534610789746402444915337566745947811707285339875197003203011","0.075912178352287867071814194826348046366422194847978022539732593449186891",192,128);
-      const next={...old,centerX:old.centerX.plus("0.37e-52"),unitsPerPixel:new Decimal("1.07e-52")};
-      const map=sampleGridCoarsen(old,next)!;expect(map).not.toBeNull();expect(map.step).toBeCloseTo(1.07,6);
-      expect(sampleGridCoarsen(next,old)).toBeNull();
-      const oldAnchor=createSampleGridAnchor(old),nextAnchor=createSampleGridAnchor(next),x=80,source=Math.round(map.offsetX+x*map.step);
-      const sourceX=oldAnchor.originX.plus(old.unitsPerPixel.times(source)),targetX=nextAnchor.originX.plus(next.unitsPerPixel.times(x));
-      expect(sourceX.minus(targetX).abs().lte(old.unitsPerPixel.div(2))).toBe(true);
-    }finally{Decimal.set({precision});}
   });
 });

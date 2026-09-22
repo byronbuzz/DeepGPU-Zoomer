@@ -108,21 +108,16 @@ resolution priority principles without its line-reallocation engine.
 Camera changes retarget the same calculation process after bounded useful work.
 Releasing the mouse changes demand, without cancelling compatible pending work,
 changing the grid resolution or starting a separate quality stage. Matching
-complex coordinates retain their scalar samples through the existing GPU remap.
-When ordinary colouring zooms out, one completed denser numerical field may
-also resolve nearby coarser samples without another orbit evaluation. Those
-values are identified as retained detail rather than exact new pixel-centre
-samples, and are always reconstructed from the original dense anchor, never
-from another reconstruction. Palette changes reuse them. Distance lighting and
-endpoint-dependent formulas retain their exact-computation path.
+complex coordinates retain their scalar samples through the existing GPU remap;
+off-grid retained imagery is presentation-only. Once the camera is unchanged,
+the same queue resolves every target pixel. Palette changes reuse scalars.
 
 The footer's refinement percentage is conservative dense-tier progress for the
 current target: only resolved dense target samples and compatible retained
 samples are credited. Sparse preview samples and overlapping presentation
 coverage are not summed. It can decrease or reset as camera demand changes and
-reaches 100% only after no further orbit work or optional final pass remains.
-Exact and retained-detail counts stay distinct; 100% is not a mathematical
-accuracy certificate.
+reaches 100% only after the current sampling target and any optional final pass
+have drained. It is not a mathematical accuracy certificate.
 
 Advanced offers optional completed-image antialiasing, off by default. It is a
 single cached low-preset FXAA-style presentation pass over a completed fractal

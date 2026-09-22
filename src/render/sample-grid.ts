@@ -16,16 +16,6 @@ export interface SampleGridRemap {
   denominator: number;
 }
 
-/** A denser completed field sampled onto a coarser target. The selected source
- * value is nearby, not the exact value at the destination pixel centre. */
-export interface SampleGridCoarsen {
-  offsetX: number;
-  offsetY: number;
-  step: number;
-  oldWidth: number;
-  oldHeight: number;
-}
-
 // Coordinate planning needs exact sums of the finite decimal inputs, including
 // cancellation at depth. Use a local constructor, without changing app precision.
 function coordinateDecimal(values: Decimal[], extra = 0): typeof Decimal {
@@ -107,20 +97,4 @@ export function sampleGridRemap(previous: FrameView, next: FrameView): SampleGri
     offsetY + (next.height - 1) * step];
   if (!values.every(value => Number.isSafeInteger(value) && value >= -2147483648 && value <= 2147483647)) return null;
   return { offsetX, offsetY, step, denominator };
-}
-
-/** Plans one non-recursive nearest-source lookup from a denser anchor field.
- * Decimal arithmetic establishes the mapping before screen-sized indices are
- * converted to Number for the GPU. */
-export function sampleGridCoarsen(previous: FrameView, next: FrameView): SampleGridCoarsen | null {
-  if (previous.unitsPerPixel.lte(0) || next.unitsPerPixel.lte(previous.unitsPerPixel)) return null;
-  const D = coordinateDecimal([previous.centerX, previous.centerY, previous.unitsPerPixel,
-    next.centerX, next.centerY, next.unitsPerPixel]);
-  const old = createSampleGridAnchor(previous), target = createSampleGridAnchor(next);
-  const step = new D(next.unitsPerPixel).div(previous.unitsPerPixel);
-  const offsetX = new D(target.originX).minus(old.originX).div(previous.unitsPerPixel);
-  const offsetY = new D(old.originY).minus(target.originY).div(previous.unitsPerPixel);
-  const values=[step,offsetX,offsetY,offsetX.plus(step.times(next.width-1)),offsetY.plus(step.times(next.height-1))].map(v=>v.toNumber());
-  if(!values.every(Number.isFinite)||values.some(v=>Math.abs(v)>16_777_216))return null;
-  return {step:Math.fround(values[0]),offsetX:Math.fround(values[1]),offsetY:Math.fround(values[2]),oldWidth:previous.width,oldHeight:previous.height};
 }
