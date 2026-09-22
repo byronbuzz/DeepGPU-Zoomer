@@ -15,7 +15,7 @@ let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
 let effectiveLimit=HOME.iterations;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let fields=0, recolours=0, lastFresh=0, stats:RenderStats|undefined, completedQuality=0;
-let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, dragging=false, speed=.7, previousTime=0, statusTime=0;
+let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, dragging=false, speed=.7, pointerWeight=1, previousTime=0, statusTime=0;
 let zoomRate=0,wheelEventTime=0;
 let lastDynamicCheck=0;
 let juliaReturn:SavedView|null=null;
@@ -178,7 +178,7 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:view.family==='mandelbrot',interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:performance.now()-lastInteraction<180?zoomRate:0,isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:effectiveLimit,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:view.family==='mandelbrot',interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:performance.now()-lastInteraction<180?zoomRate:0,pointerWeight,isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error)return;latchEffective(false);busy=true;dirty=false;const g=generation;
@@ -247,6 +247,7 @@ el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(Strin
 el('return').onclick=switchJuliaView;
 el('reset').onclick=()=>load({...HOME,appearance:validateColors(colors)});
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
+el<HTMLInputElement>('pointer-weight').oninput=e=>{pointerWeight=Number((e.target as HTMLInputElement).value);el('pointer-weight-value').textContent=pointerWeight.toFixed(2)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
 el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
 el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
@@ -265,6 +266,7 @@ el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
   speed=.7;el<HTMLInputElement>('speed').value='.7';el('speed-value').textContent='0.7×';
+  pointerWeight=1;el<HTMLInputElement>('pointer-weight').value='1';el('pointer-weight-value').textContent='1.00×';
   el<HTMLInputElement>('location-name').value='';el<HTMLSelectElement>('random-style').value='harmonious';
   profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
   try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}

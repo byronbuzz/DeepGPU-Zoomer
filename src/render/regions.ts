@@ -4,6 +4,8 @@ export interface Demand {
   x: number; y: number;
   /** Signed log-span speed per second: positive inward, negative outward. */
   zoom: number;
+  /** User multiplier for the signed positional exponent; 0 disables it. */
+  pointerWeight?: number;
   covered: { x: number; y: number; width: number; height: number; spacing?: number }[];
 }
 /** Flatten once per selection, so every candidate uses the same weighted union. */
@@ -44,7 +46,8 @@ export function positionalWeight(r:Region,d:Demand,width:number,height:number){
   const distance=Math.min(1,Math.hypot((cx-d.x)/Math.max(1,width),(cy-d.y)/Math.max(1,height))/Math.SQRT2);
   const speed=Math.min(1,Math.abs(d.zoom)/3);
   const strength=d.zoom>0?Math.log(2)+speed*Math.log(4):d.zoom<0?-(Math.log(1.5)+speed*Math.log(2)):Math.log(1.25);
-  return Math.exp(strength*(1-distance));
+  const scalar=Math.max(0,Math.min(4,d.pointerWeight??1));
+  return Math.exp(strength*scalar*(1-distance));
 }
 
 /** Bounded, conservative presentation coverage; never establishes scalar validity. */
