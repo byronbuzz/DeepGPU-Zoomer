@@ -252,8 +252,14 @@ fn loadSkip(entry: u32) -> Skip {
 }
 
 /// Applies the linear map for the precomputed range.
+// Intentionally narrow only the BLA affine operands from Wide to Hdr; the
+// ordinary recurrence, rebase and escape paths retain full Wide arithmetic.
+fn hdrFromWide(value: Wide) -> Hdr {
+    return Hdr(vec2<f32>(value.x.x, value.y.x), vec2<f32>(value.x.y, value.y.y), value.e);
+}
+
 fn applySkip(skip: Skip, w: Wide, d: Wide) -> Wide {
-    return wideAdd(wideMul(wideFromHdr(skip.a), w), wideMul(wideFromHdr(skip.b), d));
+    return wideFromHdr(hdrAdd(hdrMul(skip.a, hdrFromWide(w)), hdrMul(skip.b, hdrFromWide(d))));
 }
 
 /// log2 of |v|, for comparing against a step's validity radius.
