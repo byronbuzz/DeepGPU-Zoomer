@@ -14,7 +14,7 @@ const canvas=el<HTMLCanvasElement>('fractal');
 const camera=new Camera();
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
-let fields=0, recolours=0, stats:RenderStats|undefined, completedQuality=0;
+let fields=0, recolours=0, stats:RenderStats|undefined, completedQuality=0, preparingColourData=false;
 let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=.8, previousTime=0, statusTime=0;
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
@@ -45,7 +45,7 @@ function message(text:string,transient=false){
   },3000);
 }
 function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString(),appearance:validateColors(colors)};}
-function preparing(){freshness.textContent=`Preparing current view · ${refinementTime.text(performance.now())}`;}
+function preparing(){freshness.textContent=`${preparingColourData?'Refined · 100% · Preparing colour data':'Preparing current view'} · ${refinementTime.text(performance.now())}`;}
 function syncIterationLabel(){
   el('iteration-value').textContent=view.iterations.toLocaleString();
 }
@@ -70,7 +70,7 @@ function syncControls(){
   syncAppearance();
 }
 function load(next:SavedView,record=true){
-  const valid=validateView(next);stop();view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
+  const valid=validateView(next);stop();preparingColourData=false;view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
   if(view.family==='julia')setPreview(false);
   resize();
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';refinementTime.demand(performance.now());preparing();message('');syncControls();
@@ -81,7 +81,7 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(){dirty=true;lastInteraction=performance.now();preparing();syncPlace();}
+function changed(){preparingColourData=false;dirty=true;lastInteraction=performance.now();preparing();syncPlace();}
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
   el('julia-preview').hidden=!visible;
@@ -176,13 +176,13 @@ async function compute(){
   try{
     const result=await engine.render(request());
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;stats=result;if(result.computed)fields++;else recolours++;
-      lastRevision=camera.revision;completedQuality=1;dirty=false;
+      lastRevision=camera.revision;completedQuality=1;preparingColourData=false;dirty=false;
       if(numericalWasPending)refinementTime.complete(performance.now());
     }
   }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
   finally{busy=false;if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
-function resize(){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;refinementTime.demand(performance.now());preparing();return true;}
+function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());preparing();return true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -203,7 +203,7 @@ function tick(time:number){
       const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
       const fresh=!busy && !dirty && !moving() && !numericalPending;
       const progress=engine?.debugProgress();
-      const state=!numericalPending?'Refined · 100%':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
+      const state=!numericalPending?`Refined · 100%${preparingColourData?' · Preparing colour data':''}`:progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
       freshness.textContent=`${error?'Rendering stopped':state} · ${refinementTime.text(time)}`;
       depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
       el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());
@@ -231,7 +231,7 @@ document.addEventListener('keydown',e=>{
   const key=e.key.toLowerCase();if(key!=='j'&&key!=='m')return;e.preventDefault();
   try{if(key==='j')toggleJuliaPreview();else switchJuliaView();}catch(err){message(String(err));}
 });
-window.addEventListener('blur',()=>{stop();persist();});document.addEventListener('visibilitychange',()=>{stop();persist();previousTime=0;});window.addEventListener('resize',resize);
+window.addEventListener('blur',()=>{stop();persist();});document.addEventListener('visibilitychange',()=>{stop();persist();previousTime=0;});window.addEventListener('resize',()=>resize());
 el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelectElement).value as Family;if(family===view.family)return;if(family==='mandelbrot'&&juliaReturn){switchJuliaView();return;}if(family==='julia')juliaReturn=snapshot();load({...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations});};
 el('julia-from').onclick=toggleJuliaPreview;
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
@@ -250,7 +250,7 @@ el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSel
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
-const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));colors=c;if(changed){const numericalChange=previous.mode!==c.mode||previous.supersample!==c.supersample||needsEndpoints(c)&&!engine?.endpointChannelsRequired();if(numericalChange){resize();completedQuality=0;refinementTime.demand(performance.now());generation++;engine?.abort();preparing();}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);});
+const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));const completedBefore=currentFieldComplete()||preparingColourData;colors=c;if(changed){const missingData=previous.mode!==c.mode||needsEndpoints(c)&&!engine?.endpointChannelsRequired();const numericalChange=missingData||previous.supersample!==c.supersample;if(numericalChange){const resized=resize(false);preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample;if(!preparingColourData)completedQuality=0;generation++;engine?.abort();preparing();}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);});
 syncAppearance=paletteController.sync;
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);

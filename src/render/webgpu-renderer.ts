@@ -230,6 +230,33 @@ interface FieldDescriptor {
   retainEndpoints: boolean;
 }
 
+export interface AppearanceFrameIdentity extends FrameView {
+  proxy?: boolean;
+  family?: "mandelbrot" | "julia";
+  juliaX?: Decimal;
+  juliaY?: Decimal;
+  maxIterations: number;
+  useApprox: boolean;
+  method: Method;
+  grid: number;
+  colors: ColorSettings;
+}
+
+/** Exact numerical/view identity allowed to hold an older completed appearance. */
+export function appearanceUpgradeCompatible(
+  frame: AppearanceFrameIdentity | null,
+  request: RenderRequest,
+  method: Method,
+  grid: number,
+): frame is AppearanceFrameIdentity {
+  const family=request.family??"mandelbrot",frameFamily=frame?.family??"mandelbrot";
+  return !!frame&&!frame.proxy&&frame.width===request.width&&frame.height===request.height&&
+    frame.centerX.eq(request.centerX)&&frame.centerY.eq(request.centerY)&&frame.unitsPerPixel.eq(request.unitsPerPixel)&&
+    frameFamily===family&&frame.maxIterations===request.maxIterations&&frame.useApprox===(request.useApprox===true)&&
+    frame.method===method&&frame.grid===grid&&
+    (family!=="julia"||!!frame.juliaX?.eq(request.juliaX!)&&!!frame.juliaY?.eq(request.juliaY!));
+}
+
 async function readTexturePoints(device:GPUDevice,texture:GPUTexture,size:{width:number;height:number},points:[number,number][]):Promise<number[][]>{
   const {width,height}=size,bytesPerRow=Math.ceil(width*4/256)*256;
   const staging=device.createBuffer({size:bytesPerRow*height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});let mapped=false;
@@ -280,23 +307,12 @@ export class WebGpuRenderer {
   private tableMs = 0;
   private tableMaxDelta = 0;
   /** Geometry and density of the retained history image. */
-  private lastFrame: {
+  private lastFrame: (AppearanceFrameIdentity & {
     proxy?: boolean;
     covered?: {x:number;y:number;width:number;height:number};
     coveredSpacing?: Decimal;
     coveredRegions?: {x:number;y:number;width:number;height:number;spacing:Decimal}[];
-    family?: "mandelbrot" | "julia";
-    juliaX?: Decimal;
-    juliaY?: Decimal;
-    centerX: Decimal;
-    centerY: Decimal;
-    unitsPerPixel: Decimal;
-    width: number;
-    height: number;
-    colors: ColorSettings;
-    maxIterations: number;
-    useApprox: boolean;
-  } | null = null;
+  }) | null = null;
   private xformBuffer: GPUBuffer | null = null;
   private history: GPUTexture | null = null;
   private coverageHistory: GPUTexture | null = null;
@@ -306,6 +322,7 @@ export class WebGpuRenderer {
   private historyValid = false;
   private publicationEpoch = 0;
   private incomingFrame: WebGpuRenderer["lastFrame"] = null;
+  private appearanceHoldFrame: WebGpuRenderer["lastFrame"] = null;
   private partialSerial = 0;
   private partialRegions = 0;
   private firstPartialAt = 0;
@@ -355,6 +372,7 @@ export class WebGpuRenderer {
   }
   private abortRequested = false;
   private shadePipeline: GPUComputePipeline | null = null;
+  private distanceToIterationPipeline: GPUComputePipeline | null = null;
   private bindLayout: GPUBindGroupLayout | null = null;
   private fieldBuffer: GPUBuffer | null = null;
   private fieldCapacity = 0;
@@ -513,6 +531,11 @@ export class WebGpuRenderer {
       label: "perturbation-shade",
       layout: pipelineLayout,
       compute: { module: renderModule, entryPoint: "shadePass" },
+    });
+    this.distanceToIterationPipeline = device.createComputePipeline({
+      label: "distance-to-iteration-field",
+      layout: pipelineLayout,
+      compute: { module: renderModule, entryPoint: "distanceToIterationField" },
     });
 
     const blitModule = await compileShader(
@@ -892,7 +915,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     encoder: GPUCommandEncoder,
     source: GPUTexture,
     xform: Float32Array,
-    destination?: GPUTexture
+    destination?: GPUTexture,
+    allowAppearanceFallback=false,
   ) {
     const { device } = this.ctx;
     if (!this.xformBuffer) {
@@ -902,7 +926,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
-    const matchesView = (frame: WebGpuRenderer["lastFrame"]) => !this.currentView || this.samePresentation(frame,this.currentView);
+    const matchesView = (frame: WebGpuRenderer["lastFrame"]) => !this.currentView || this.samePresentation(frame,this.currentView)||
+      !!(allowAppearanceFallback&&this.appearanceHoldFrame&&this.appearanceHoldActive(this.currentView)&&
+        this.samePresentation(frame,this.appearanceHoldFrame));
     const coverage = source === this.history && this.coverageFrame && matchesView(this.coverageFrame) && this.currentView
       ? reprojectionFor(this.coverageFrame, this.currentView, true) : null;
     const transforms = new Float32Array(24); transforms.set(xform);
@@ -989,20 +1015,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   reproject(request: RenderRequest): boolean {
     if(this.deviceLost)return false;
     this.currentView = request;
+    const heldAppearance=this.appearanceHoldActive(request);
+    if(this.appearanceHoldFrame&&!heldAppearance)this.appearanceHoldFrame=null;
     if (this.pendingReferenceDemand?.followView && !this.referenceDemandCompatible(this.pendingReferenceDemand, request)) {
       this.cancelPendingReference("Reference demand changed");
     }
-    const aa=!!(this.historyValid&&request.colors.postAntialias&&this.antialiasFrame&&this.antialiasTexture&&this.sameView(this.antialiasFrame,request)&&JSON.stringify(this.antialiasFrame.colors)===JSON.stringify(request.colors));
+    const heldAa=!!(heldAppearance&&this.antialiasFrame&&this.antialiasTexture&&this.appearanceHoldFrame&&
+      this.samePresentation(this.antialiasFrame,this.appearanceHoldFrame));
+    const aa=heldAa||!!(this.historyValid&&request.colors.postAntialias&&this.antialiasFrame&&this.antialiasTexture&&this.sameView(this.antialiasFrame,request)&&JSON.stringify(this.antialiasFrame.colors)===JSON.stringify(request.colors));
     const last = aa ? this.antialiasFrame : this.historyValid ? this.lastFrame : this.incomingFrame;
     const source = aa ? this.antialiasTexture : this.historyValid ? this.history : this.target;
     if (!last || !source || !this.blitPipeline) {
       return false;
     }
     const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
+    const heldCompatible=(frame:WebGpuRenderer["lastFrame"])=>!!(heldAppearance&&this.appearanceHoldFrame&&this.samePresentation(frame,this.appearanceHoldFrame));
     const incomingAvailable = compatible(this.incomingFrame) && reprojectionFor(this.incomingFrame!, request);
-    if (!compatible(last) && !incomingAvailable) return false;
+    if (!compatible(last) && !heldCompatible(last) && !incomingAvailable) return false;
 
-    let mapping = compatible(last) ? reprojectionFor(last, request) : null;
+    let mapping = compatible(last)||heldCompatible(last) ? reprojectionFor(last, request) : null;
     if (!mapping) {
       if (!incomingAvailable && (!compatible(this.coverageFrame) || !reprojectionFor(this.coverageFrame!, request, true))) return false;
       // The narrow front may be outside its useful range while the retained
@@ -1014,7 +1045,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.encodeBlit(
       encoder,
       source,
-      new Float32Array([mapping.scaleX, mapping.scaleY, mapping.offsetX, mapping.offsetY])
+      new Float32Array([mapping.scaleX, mapping.scaleY, mapping.offsetX, mapping.offsetY]),
+      undefined,
+      heldAppearance,
     );
     this.ctx.device.queue.submit([encoder.finish()]);
     return true;
@@ -1022,7 +1055,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   invalidateHistory() {
     this.publicationEpoch++; this.historyValid=false; this.refValid=false; this.refSamples=null;
-    this.incomingFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
+    this.incomingFrame=null; this.appearanceHoldFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
     this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
@@ -1033,6 +1066,40 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private sameView(a: FrameView, b: FrameView) {
     return a.width === b.width && a.height === b.height && a.centerX.eq(b.centerX) &&
       a.centerY.eq(b.centerY) && a.unitsPerPixel.eq(b.unitsPerPixel);
+  }
+
+  private fieldIdentity(request:RenderRequest,family:"mandelbrot"|"julia",constant:string,method:Method,grid:number,retainEndpoints:boolean,approximationLevels:number){
+    return [family,constant,request.centerX.toString(),request.centerY.toString(),request.unitsPerPixel.toString(),
+      request.width,request.height,request.maxIterations,request.colors.mode,retainEndpoints,grid,method,
+      this.refLength,approximationLevels].join("|");
+  }
+
+  private sampleIdentity(request:RenderRequest,family:"mandelbrot"|"julia",constant:string,method:Method,grid:number,limbs:number,approximationLevels:number){
+    return [family,constant,request.maxIterations,request.colors.mode,grid,method,limbs,this.refLimbs,
+      !!approximationLevels,request.useApprox===true].join("|");
+  }
+
+  private beginAppearanceHold(request:RenderRequest,method:Method,grid:number){
+    if(this.appearanceHoldFrame&&this.historyValid&&this.appearanceHoldFrame===this.lastFrame&&
+        appearanceUpgradeCompatible(this.appearanceHoldFrame,request,method,grid)&&
+        !this.samePresentation(this.appearanceHoldFrame,request))return true;
+    const frame=this.lastFrame;
+    if(this.historyValid&&this.fieldComplete&&appearanceUpgradeCompatible(frame,request,method,grid)&&
+        !this.samePresentation(frame,request)){
+      this.appearanceHoldFrame=frame;
+      return true;
+    }
+    if(this.appearanceHoldFrame&&(!appearanceUpgradeCompatible(this.appearanceHoldFrame,request,method,grid)||
+        this.samePresentation(this.appearanceHoldFrame,request)))this.appearanceHoldFrame=null;
+    return false;
+  }
+
+  private appearanceHoldActive(request:RenderRequest){
+    const frame=this.appearanceHoldFrame;
+    const method=request.forceMethod??methodForScale(request.unitsPerPixel);
+    const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
+    return this.historyValid&&frame===this.lastFrame&&appearanceUpgradeCompatible(frame,request,method,grid)&&
+      !this.samePresentation(frame,request);
   }
 
   isComplete(request: RenderRequest) {
@@ -1111,6 +1178,36 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       (!needsEndpoints(request.colors)||descriptor.retainEndpoints));
   }
 
+  /** Converts a complete distance field back to iteration scalars in place. */
+  private async convertDistanceToIteration(request:RenderRequest,method:Method,grid:number){
+    const descriptor=this.fieldDescriptor,view=this.fieldView,family=request.family??"mandelbrot";
+    const constant=family==="julia"?`${request.juliaX},${request.juliaY}`:"";
+    if(!this.fieldComplete||!this.fieldUniforms||!this.fieldStats||!descriptor||!view||!this.target||
+        !this.fieldBuffer||!this.endpointBuffer||!this.distanceToIterationPipeline||request.colors.mode!==0||
+        descriptor.mode!==1||!descriptor.retainEndpoints||!this.retainEndpoints||!this.sameView(view,request)||
+        descriptor.family!==family||descriptor.constant!==constant||descriptor.maxIterations!==request.maxIterations||
+        descriptor.grid!==grid||descriptor.method!==method||descriptor.useApprox!==(request.useApprox===true))return false;
+    const uniforms=this.fieldUniforms.slice(0),u32=new Uint32Array(uniforms);
+    u32[22]=0;u32[26]=request.height;u32[35]=grid;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;u32[55]=1;
+    const bind=this.createRenderBind(),device=this.ctx.device;
+    await checkedGpu(device,()=>{
+      device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+      const encoder=device.createCommandEncoder({label:"distance-to-iteration-field"});
+      const pass=encoder.beginComputePass({label:"distance-to-iteration-field"});
+      pass.setPipeline(this.distanceToIterationPipeline!);pass.setBindGroup(0,bind);
+      pass.dispatchWorkgroups(Math.ceil(request.width/8),Math.ceil(request.height/8));pass.end();
+      device.queue.submit([encoder.finish()]);
+    });
+    const limbs=limbsForScale(request.unitsPerPixel,family==="julia"||method!==Method.Direct?96:48);
+    const approximationLevels=u32[20];
+    this.fieldUniforms=uniforms;
+    this.fieldDescriptor={...descriptor,mode:0};
+    this.fieldKey=this.fieldIdentity(request,family,constant,method,grid,true,approximationLevels);
+    this.sampleKey=this.sampleIdentity(request,family,constant,method,grid,limbs,approximationLevels);
+    this.aborted=false;
+    return true;
+  }
+
   /** Fast completed-field recolour: no orbit/table/resource setup or stats readback. */
   private async recolorCompleted(request:RenderRequest,requestKey:string,method:Method,grid:number):Promise<RenderStats|null>{
     if(!this.fieldSupportsAppearance(request,method,grid))return null;
@@ -1134,10 +1231,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       });
       this.appearanceSubmissions++;
       const frame={family:request.family,juliaX:request.juliaX,juliaY:request.juliaY,centerX:request.centerX,centerY:request.centerY,
-        unitsPerPixel:request.unitsPerPixel,width:request.width,height:request.height,colors,maxIterations:request.maxIterations,useApprox:request.useApprox===true};
+        unitsPerPixel:request.unitsPerPixel,width:request.width,height:request.height,colors,maxIterations:request.maxIterations,useApprox:request.useApprox===true,method,grid};
       const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.currentView)&&this.samePresentation(frame,this.currentView));
       if(!current||this.deviceLost){return {...this.fieldStats!,completed:false,computed:false,computedSamples:0,reusedSamples:0,renderMs:performance.now()-started};}
-      this.commitHistory({...request,colors},candidate);candidate=undefined;this.lastFrame=frame;this.historyValid=true;this.incomingFrame=null;
+      this.commitHistory({...request,colors},candidate);candidate=undefined;this.lastFrame=frame;this.historyValid=true;this.incomingFrame=null;this.appearanceHoldFrame=null;
       if(candidateAa){this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
       this.antialiasFrame=colors.postAntialias?frame:null;this.fieldUniforms=uniforms;this.lastPartialAt=performance.now();this.appearancePublications++;
       const result={...this.fieldStats!,completed:true,computed:false,computedSamples:0,reusedSamples:request.width*request.height,
@@ -1284,8 +1381,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     const method = request.forceMethod ?? methodForScale(request.unitsPerPixel);
     const initialGrid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
-    const recoloured=await this.recolorCompleted(request,requestKey,method,initialGrid);
+    let recoloured=await this.recolorCompleted(request,requestKey,method,initialGrid);
     if(recoloured)return recoloured;
+    const holdCompletedAppearance=this.beginAppearanceHold(request,method,initialGrid);
+    if(await this.convertDistanceToIteration(request,method,initialGrid)){
+      recoloured=await this.recolorCompleted(request,requestKey,method,initialGrid);
+      if(recoloured)return recoloured;
+    }
     this.referencePreparing=true;
     const wide = request.family === "julia" || method !== Method.Direct;
     const limbs = limbsForScale(request.unitsPerPixel, wide ? 96 : 48);
@@ -1438,24 +1540,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // What the field holds is a function of the geometry and the iteration,
     // not of the palette. Rebuilding it is the whole cost of a frame, so it is
     // only rebuilt when one of these changes.
-    const fieldKey = [
-      family,constant,
-      request.centerX.toString(),
-      request.centerY.toString(),
-      request.unitsPerPixel.toString(),
-      request.width,
-      request.height,
-      request.maxIterations,
-      colors.mode,
-      this.retainEndpoints,
-      grid,
-      method,
-      this.refLength,
-      u32[20],
-    ].join("|");
+    const fieldKey = this.fieldIdentity(request,family,constant,method,grid,this.retainEndpoints,u32[20]);
     const fieldStale = fieldKey !== this.fieldKey || this.aborted;
-    const sampleKey = [family, constant, request.maxIterations, colors.mode, grid, method,
-      limbs, this.refLimbs, !!u32[20], request.useApprox === true].join("|");
+    const sampleKey = this.sampleIdentity(request,family,constant,method,grid,limbs,u32[20]);
     if (fieldStale) {
       await checkedGpu(device,()=>this.moveField(request, request.width * request.height * grid * grid, sampleKey,
         grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid));
@@ -1476,8 +1563,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
       colors, maxIterations: request.maxIterations,
       useApprox: request.useApprox===true,
+      method, grid,
     };
-    const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false;
+    const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
     let timingSamples: (TimingSample | undefined)[] = [];
     const collectTimings = () => { timingSamples.forEach(s => this.timing.collect(s)); timingSamples = []; };
     const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height,timingSamples);
@@ -1614,7 +1702,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           (!request.followView||!this.currentView||this.samePresentation(frame,this.currentView));
         if(currentPresentation){
           this.commitHistory(request,candidate!);candidate=undefined;
-          this.lastFrame=frame;published=true;
+          this.lastFrame=frame;this.appearanceHoldFrame=null;published=true;
           if(candidateAa){this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
           this.antialiasFrame=colors.postAntialias?frame:null;
         }

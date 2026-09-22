@@ -248,6 +248,15 @@ submission path remain the stable ones. The footer shows stationary refinement
 time and stays visible when the control panel is hidden. Colour spacing reaches
 16,384; iteration limits are fixed from 1 to 1,000,000, with Home at 5,000.
 
+Same-view appearance upgrades that need missing endpoint data now keep the
+previous completed, antialiased image visible and publish the new appearance
+only when its field is complete. Their footer remains at `Refined · 100% ·
+Preparing colour data` with the completed time frozen. Disabling Distance
+Lighting converts its complete retained endpoint field back to the normal field
+without another orbit recurrence. Palette-only edits and re-enabling an already
+prepared effect still recolour without recurrence. The controls toggle is an
+accessible hamburger; it and the footer remain visible while controls are hidden.
+
 Julia BLA remains unresolved and is not in main: the default-bound probe missed
 6 of 49 independently checked points, and tighter bounds still failed targeted
 checks against the independent oracle. Its limited pass flag is not acceptance;
@@ -257,11 +266,10 @@ browser. Candidate builds must write outside the directory served on 5183: a
 source revision or unchanged listener does not establish the served bundle.
 
 The next numerical target is Julia BLA for deep main-view refinement while
-keeping preview and morph interaction responsive. Then investigate apparent
-regeneration on first use of effects and lighting before continuous colour
-slider latency. Existing-data colour-control response takes precedence while
-adjusting; numerical progress must survive. Investigate the critical path and
-remove unnecessary work without a separate final-quality fractal calculation
+keeping preview and morph interaction responsive. Then investigate continuous
+colour slider latency. Existing-data colour-control response takes precedence
+while adjusting; numerical progress must survive. Investigate the critical path
+and remove unnecessary work without a separate final-quality fractal calculation
 pass. Never reinstate the rejected zoom-out numerical-field cache or the 5184
 scheduler architecture. Retain accepted numerical and BLA gains.
 
@@ -280,7 +288,8 @@ been established.
 The later Stop action must halt orbit work and optional colour-data preparation,
 freeze time and keep the image visible. Existing-data appearance edits should
 still work. Missing-data appearance edits must retain the prior valid image
-until Refresh, navigation or a numerical change; navigation restarts work.
+while preparation runs; navigation or a numerical change returns to normal
+progressive refinement.
 Refresh should restart the exact current view while retaining the old image.
 Replace the main Julia Preview/Return buttons with Refresh/Stop only when this
 interaction is implemented; J/M remain Julia shortcuts with another

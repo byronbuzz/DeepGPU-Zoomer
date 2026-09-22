@@ -643,6 +643,24 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     if(beforePlain>0xffffffffu-plain){atomicAdd(&stats[11],1u);}
 }
 
+/// Reconstructs the ordinary iteration field from a complete distance field
+/// and its retained endpoint channels. The distance field's y component is the
+/// authoritative escape flag; n == maxIterations can still be an escape.
+@compute @workgroup_size(8, 8)
+fn distanceToIterationField(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
+    if (gid.x >= size.x || gid.y >= size.y) { return; }
+    let grid = max(u.supersample, 1u);
+    for (var sy: u32 = 0u; sy < grid; sy = sy + 1u) {
+        for (var sx: u32 = 0u; sx < grid; sx = sx + 1u) {
+            let at = fieldIndex(gid.x * grid + sx, gid.y * grid + sy);
+            let escaped = field[at].y > 0.0;
+            let endpoint = endpoints[at];
+            field[at] = vec2<f32>(select(-1.0, endpoint.z, escaped), endpoint.w);
+        }
+    }
+}
+
 /// Turns the stored field into pixels. No iteration happens here.
 @compute @workgroup_size(8, 8)
 fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {

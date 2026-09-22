@@ -36,9 +36,10 @@ export function setupPanels():PanelController{
   const selectTab=(tab:HTMLButtonElement,focus=false)=>{for(const item of tabs){const selected=item===tab;item.setAttribute('aria-selected',String(selected));item.tabIndex=selected?0:-1;const panel=document.getElementById(item.getAttribute('aria-controls')!);if(panel)panel.hidden=!selected;}if(focus)tab.focus();};
   tabs.forEach((tab,index)=>{tab.onclick=()=>selectTab(tab);tab.onkeydown=e=>{let next=index;if(e.key==='ArrowRight')next=(index+1)%tabs.length;else if(e.key==='ArrowLeft')next=(index+tabs.length-1)%tabs.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=tabs.length-1;else return;e.preventDefault();selectTab(tabs[next],true);};});
   const toggle=document.getElementById('toggle')!;
-  toggle.onclick=()=>{const hidden=document.body.classList.toggle('controls-hidden');toggle.textContent=hidden?'Show controls':'Hide controls';toggle.setAttribute('aria-expanded',String(!hidden));};
+  const syncToggle=(hidden:boolean)=>{const label=hidden?'Show controls':'Hide controls';toggle.setAttribute('aria-label',label);toggle.title=label;toggle.setAttribute('aria-expanded',String(!hidden));};
+  toggle.onclick=()=>syncToggle(document.body.classList.toggle('controls-hidden'));
   return {reset(){
-    opacity=.8;setOpacity();resetLayout(false);document.body.classList.remove('controls-hidden');toggle.textContent='Hide controls';toggle.setAttribute('aria-expanded','true');
+    opacity=.8;setOpacity();resetLayout(false);document.body.classList.remove('controls-hidden');syncToggle(false);
     selectTab(tabs[0]);document.querySelectorAll<HTMLDetailsElement>('#controls details').forEach(details=>details.open=false);
   }};
 }
