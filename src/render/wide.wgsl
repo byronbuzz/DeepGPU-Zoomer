@@ -100,7 +100,7 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     let fromCentre = pixel - 0.5 * u.resolution;
     let pixelDelta = wideMul(Wide(u.wideScale, vec4<f32>(0.0), u.scaleExponent),
         Wide(vec4<f32>(fromCentre.x, 0.0, 0.0, 0.0), vec4<f32>(fromCentre.y, 0.0, 0.0, 0.0), 0));
-    let direct = u.method == 0u;
+    let direct = JULIA && u.method == 0u;
     let injection = wideAdd(pixelDelta, wideNorm(Wide(u.wideOffsetX, u.wideOffsetY, u.offsetExponent)));
     var delta = injection;
     if (!JULIA) { delta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
