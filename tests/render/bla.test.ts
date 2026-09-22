@@ -71,6 +71,17 @@ describe("standard linear BLA", () => {
     expect(first.b).toEqual({ x: 1, y: 0, e: 0 });
   });
 
+  it("distinguishes a table with no shader-usable multi-step entries", () => {
+    const orbit = new Float32Array(65 * 6);
+    for (let i = 0; i < 65; i++) orbit[i * 6] = 0.3;
+    const wideDomain = buildBla(orbit, 65, 1);
+    const narrowDomain = buildBla(orbit, 65, 1e-30);
+    expect(wideDomain.entryCount).toBeGreaterThan(0);
+    expect(wideDomain.levels).toBeGreaterThan(1);
+    expect(wideDomain.hasUsableMultiStep).toBe(false);
+    expect(narrowDomain.hasUsableMultiStep).toBe(true);
+  });
+
   it("composes adjacent index-one-aligned ranges", () => {
     const { orbit } = makeOrbit(-0.12, 0.74, 64);
     const table = buildBla(orbit, 65, 1e-30);

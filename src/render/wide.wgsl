@@ -43,6 +43,57 @@ fn wideValue(a: Wide) -> vec2<f32> {
     return ldexp(vec2<f32>(a.x.x, a.y.x), vec2<i32>(a.e));
 }
 
+fn wideReal(value: f32) -> Wide {
+    return Wide(vec4<f32>(value, 0.0, 0.0, 0.0), vec4<f32>(0.0), 0);
+}
+
+fn wideRealPart(value: Wide) -> Wide {
+    return Wide(value.x, vec4<f32>(0.0), value.e);
+}
+
+fn wideImagPart(value: Wide) -> Wide {
+    return Wide(value.y, vec4<f32>(0.0), value.e);
+}
+
+fn wideNegate(value: Wide) -> Wide {
+    return Wide(-value.x, -value.y, value.e);
+}
+
+// A positive QD result is accepted only when its leading word dominates the
+// retained tail and the result is comfortably outside a fixed uncertainty
+// band. Points near either analytic boundary keep the ordinary recurrence.
+fn decisivelyPositive(value: Wide) -> bool {
+    let normalized = wideNorm(value);
+    let tail = abs(normalized.x.y) + abs(normalized.x.z) + abs(normalized.x.w);
+    let lower = normalized.x.x - tail;
+    return lower > 0.0 && f32(normalized.e) + log2(lower) > -20.0;
+}
+
+// Proven Mandelbrot interiors. This intentionally uses the existing Wide/QD
+// coordinate representation; the leading f32 value is only a cheap rejection.
+fn analyticMandelbrotInterior(c: Wide) -> bool {
+    let approximate = wideValue(c);
+    if (approximate.x < -1.3 || approximate.x > 0.3 || abs(approximate.y) > 0.7) {
+        return false;
+    }
+
+    let x = wideRealPart(c);
+    let y = wideImagPart(c);
+    let y2 = wideMul(y, y);
+
+    let bulbX = wideAdd(x, wideReal(1.0));
+    let bulbDistance = wideAdd(wideMul(bulbX, bulbX), y2);
+    if (decisivelyPositive(wideAdd(wideReal(0.0625), wideNegate(bulbDistance)))) {
+        return true;
+    }
+
+    let cardioidX = wideAdd(x, wideReal(-0.25));
+    let q = wideAdd(wideMul(cardioidX, cardioidX), y2);
+    let left = wideMul(q, wideAdd(q, cardioidX));
+    let right = wideMul(y2, wideReal(0.25));
+    return decisivelyPositive(wideAdd(right, wideNegate(left)));
+}
+
 fn decodeRawReference(index: u32, relative: bool) -> Wide {
     let base = index * 20u + select(0u, 10u, relative);
     let ex = i32(rawOrbit[base + 4u]);
@@ -105,6 +156,12 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var delta = injection;
     if (!JULIA) { delta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     var z = wideAdd(wideNorm(Wide(u.wideCentreX, u.wideCentreY, 0)), pixelDelta);
+    if (!JULIA && u.mode == 0u && u.retainEndpoints == 0u && u.cappedPattern == 0u &&
+        analyticMandelbrotInterior(z)) {
+        // The caller already represents a determined capped sample as (-1,0).
+        // n=0 records that no recurrence iterations were executed.
+        return emptySample();
+    }
     var reference = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0);
     if (!direct) {
         reference = wideReference(0u, false);

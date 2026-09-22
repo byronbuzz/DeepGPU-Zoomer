@@ -116,9 +116,9 @@ export interface RenderStats {
   /** Fraction of iterations avoided by approximation, 0..1. */
   skipRatio: number;
   /**
-   * Fraction of samples that used the whole iteration budget, 0..1. Includes
-   * genuine interior, so it is only meaningful compared against the same view
-   * rendered at a different budget.
+   * Fraction of samples classified as capped/non-escaped, 0..1. This includes
+   * analytically determined interiors that execute no recurrence iterations,
+   * so it is only meaningful compared against the same view and policy.
    */
   cappedRatio: number;
 }
@@ -374,6 +374,7 @@ export class WebGpuRenderer {
   private laBuffer: GPUBuffer | null = null;
   private laIndexBuffer: GPUBuffer | null = null;
   private laLevels = 0;
+  private laHasUsableMultiStep = false;
   private statsBuffer: GPUBuffer;
   private orbitBuffer: GPUBuffer | null = null;
   private orbitCapacity = 0;
@@ -708,8 +709,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.tableMaxDelta = halfDiagonal;
 
     this.laLevels = table.levels;
+    this.laHasUsableMultiStep = table.hasUsableMultiStep;
     if (table.entryCount === 0) {
       this.laLevels = 0;
+      this.laHasUsableMultiStep = false;
     }
     this.tableMs = performance.now() - started;
 
@@ -1318,19 +1321,20 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.refLength = orbit.length; this.refEscaped = orbit.escaped;
         this.refSamples = orbit.samples; this.refValid = true;
         drift = new Decimal(0); orbitMs = orbit.ms;
-        this.tableMs = 0; this.laLevels=0; this.tableMaxDelta=-1;
-        if (method === Method.Hdr && family === "mandelbrot" && request.useApprox===true && request.colors.mode===0) await this.buildApproxTable(request);
+        this.tableMs = 0; this.laLevels=0; this.laHasUsableMultiStep=false; this.tableMaxDelta=-1;
+        if (family === "mandelbrot" && request.useApprox===true && request.colors.mode===0) await this.buildApproxTable(request);
       } catch (error) {
         this.referencePreparing=false;
         throw error;
       }
     }
-    // Reversal/overscan can need a larger delta domain without needing a new
-    // orbit. Rebuild the inexpensive table for that domain instead of silently
-    // turning acceleration off for the whole expanded field.
+    // Reversal/overscan can need a larger delta domain without a new orbit.
+    // Conversely, a table with no usable multi-step entry can become useful
+    // when the same orbit is viewed through a narrower domain.
     const requiredDelta = request.unitsPerPixel.times(Math.hypot(request.width, request.height) / 2).plus(drift).toNumber();
-    if (method === Method.Hdr && family === "mandelbrot" && request.useApprox === true && request.colors.mode === 0 &&
-        requiredDelta > this.tableMaxDelta * (1 + 1e-12)) {
+    if (method !== Method.Direct && family === "mandelbrot" && request.useApprox === true && request.colors.mode === 0 &&
+        (requiredDelta > this.tableMaxDelta * (1 + 1e-12) ||
+         !this.laHasUsableMultiStep && requiredDelta < this.tableMaxDelta * (1 - 1e-12))) {
       await this.buildApproxTable(request);
     }
 
@@ -1396,7 +1400,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     u32[8] = this.refLength;
     const deltaBound = requiredDelta;
     const approximationLevels =
-      request.useApprox !== true || method !== Method.Hdr || family === "julia" || colors.mode === 1 || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
+      request.useApprox !== true || method === Method.Direct || family === "julia" || colors.mode === 1 ||
+      !this.laHasUsableMultiStep || deltaBound > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
     u32[20] = approximationLevels;
     u32[21] = BASE_STEP;
     u32[35] = grid;

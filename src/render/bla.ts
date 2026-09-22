@@ -20,6 +20,8 @@ export const BASE_STEP = 1;
 const EPSILON_LOG2 = -21;
 /** Sentinel log2-radius meaning "this step is never usable". */
 export const NEVER = -1e30;
+/** Matches the shader's LA_NEVER eligibility cutoff. */
+const MIN_USABLE_RADIUS_LOG2 = -1e29;
 /** Two complex coefficients, radius, padding. */
 export const ENTRY_FLOATS = 12;
 
@@ -29,6 +31,8 @@ export interface BlaTable {
   levelCounts: number[];
   levels: number;
   entryCount: number;
+  /** At least one packed range of two or more iterations can pass the shader's radius sentinel. */
+  hasUsableMultiStep: boolean;
 }
 
 /** A complex number as (x, y) * 2^e, mantissa normalised near [1, 2). */
@@ -136,8 +140,9 @@ function* buildBlaSteps(
   const entryCount = levels.reduce((sum, level) => sum + level.length, 0);
   const data = new Float32Array(Math.max(1, entryCount) * ENTRY_FLOATS);
   const levelOffsets: number[] = [], levelCounts: number[] = [];
-  let offset = 0;
-  for (const level of levels) {
+  let offset = 0, hasUsableMultiStep = false;
+  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
+    const level = levels[levelIndex];
     levelOffsets.push(offset); levelCounts.push(level.length);
     for (let index = 0; index < level.length; index++) {
       if (index % 4096 === 0) yield;
@@ -150,10 +155,13 @@ function* buildBlaSteps(
         data[target + slot * 5 + 4] = value.e;
       };
       put(0, step.a); put(1, step.b); data[target + 10] = step.radiusLog2;
+      // Level zero spans one iteration and is deliberately ignored by the
+      // shader. Use the same radius eligibility cutoff as takeSkip.
+      if (levelIndex > 0 && step.radiusLog2 > MIN_USABLE_RADIUS_LOG2) hasUsableMultiStep = true;
     }
     offset += level.length;
   }
-  return { data, levelOffsets, levelCounts, levels: levels.length, entryCount };
+  return { data, levelOffsets, levelCounts, levels: levels.length, entryCount, hasUsableMultiStep };
 }
 
 export function buildBla(orbit: Float32Array, length: number, maxDelta: number, options: BuildOptions = {}): BlaTable {
