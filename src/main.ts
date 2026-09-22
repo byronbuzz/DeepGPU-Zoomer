@@ -84,9 +84,9 @@ function load(next:SavedView,record=true){
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';freshness.textContent='Preparing current view';message('');syncControls();
   if(record)persist();
 }
-function persist(){
+function persist(sync=true){
   const s=snapshot();try{localStorage.setItem('gpu-zoomer-view',JSON.stringify(s));}catch{message('This browser could not save preferences locally. Copy a share link to keep this exact view.');}
-  syncControls();
+  if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||keys.size>0||performance.now()-lastInteraction<180;}
 function changed(){dirty=true;lastInteraction=performance.now();freshness.textContent='Preparing current view';syncPlace();}
@@ -189,7 +189,7 @@ async function compute(){
   }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
   finally{busy=false;if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
-function resize(){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;canvas.width=width;canvas.height=height;dirty=true;freshness.textContent='Preparing current view';return true;}
+function resize(){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;freshness.textContent='Preparing current view';return true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -208,9 +208,10 @@ function tick(time:number){
       if(dirty&&!busy)void compute();
     }
     if(time-statusTime>250){statusTime=time;const mean=frameTimes.reduce((a,b)=>a+b,0)/Math.max(1,frameTimes.length);cadence.textContent=`Presentation ${Math.round(1000/mean)||0} Hz`;
-      const fresh=!busy && !dirty && !moving() && lastRevision===camera.revision && completedQuality===1;
+      const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
+      const fresh=!busy && !dirty && !moving() && !numericalPending;
       const progress=engine?.debugProgress();
-      const state=fresh?'Refined · 100%':progress?.appearancePending?'Updating appearance':progress?.finalizing?'Finishing':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:busy?'Computing':'Preview';
+      const state=!numericalPending?'Refined · 100%':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
       freshness.textContent=error?'Rendering stopped':`${state} · ${progress?.lastPublicationAt?Math.max(0,(time-progress.lastPublicationAt)/1000).toFixed(1)+'s since update':lastFresh?'Field ready':'first update pending'}`;
       depth.textContent=`${depthLabel(camera.span)} · ${effectiveLimit.toLocaleString()} iterations`;
       el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());
@@ -258,7 +259,7 @@ el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSel
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
-const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));colors=c;if(changed){const numericalChange=previous.mode!==c.mode||previous.supersample!==c.supersample||needsEndpoints(c)&&!engine?.endpointChannelsRequired();if(numericalChange){resize();generation++;engine?.abort();freshness.textContent='Preparing current view';}else{lastInteraction=performance.now();freshness.textContent='Updating appearance';}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(persist,250);});
+const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));colors=c;if(changed){const numericalChange=previous.mode!==c.mode||previous.supersample!==c.supersample||needsEndpoints(c)&&!engine?.endpointChannelsRequired();if(numericalChange){resize();completedQuality=0;generation++;engine?.abort();freshness.textContent='Preparing current view';}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);});
 syncAppearance=paletteController.sync;
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
