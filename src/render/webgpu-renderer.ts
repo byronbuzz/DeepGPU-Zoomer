@@ -177,6 +177,18 @@ export function binaryExponent(value: Decimal): number {
   if (magnitude.gte(power.times(2))) exponent++;
   return exponent;
 }
+
+/** Exact far-corner distance from the retained reference to this viewport. */
+export function referenceViewportRadius(
+  request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height">,
+  refX: Decimal,
+  refY: Decimal,
+): number {
+  const x = request.unitsPerPixel.times(request.width / 2).plus(request.centerX.minus(refX).abs());
+  const y = request.unitsPerPixel.times(request.height / 2).plus(request.centerY.minus(refY).abs());
+  return Decimal.hypot(x, y).toNumber();
+}
+
 function splitExponent(value: Decimal): { mantissa: number; exponent: number } {
   if (value.isZero()) return { mantissa: 0, exponent: 0 };
   const exponent = binaryExponent(value);
@@ -690,23 +702,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const { device } = this.ctx;
     const started = performance.now();
 
-    // Largest |delta| any pixel can have: the half-diagonal of the view.
-    const halfDiagonal = request.unitsPerPixel
-      .times(Math.hypot(request.width, request.height) / 2)
-      .plus(request.centerX.minus(this.refX).abs())
-      .plus(request.centerY.minus(this.refY).abs())
-      .toNumber();
+    const maxDelta = referenceViewportRadius(request, this.refX, this.refY);
 
     const samples = this.refSamples;
     if (!samples || samples.length !== this.refLength * 20) {
       throw new Error("The CPU reference orbit is unavailable for approximation");
     }
-    const table = await buildBlaAsync(samples, this.refLength, halfDiagonal, async()=>{
+    const table = await buildBlaAsync(samples, this.refLength, maxDelta, async()=>{
       await yieldToEvents();
       if(this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException("Superseded table","AbortError");
     }, { sampleWords: 20 });
     if(table.data.byteLength>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('The approximation table exceeds this GPU’s buffer capacity.');
-    this.tableMaxDelta = halfDiagonal;
+    this.tableMaxDelta = maxDelta;
 
     this.laLevels = table.levels;
     this.laHasUsableMultiStep = table.hasUsableMultiStep;
@@ -1331,7 +1338,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Reversal/overscan can need a larger delta domain without a new orbit.
     // Conversely, a table with no usable multi-step entry can become useful
     // when the same orbit is viewed through a narrower domain.
-    const requiredDelta = request.unitsPerPixel.times(Math.hypot(request.width, request.height) / 2).plus(drift).toNumber();
+    const requiredDelta = referenceViewportRadius(request, this.refX, this.refY);
     if (method !== Method.Direct && family === "mandelbrot" && request.useApprox === true && request.colors.mode !== 2 &&
         (requiredDelta > this.tableMaxDelta * (1 + 1e-12) ||
          !this.laHasUsableMultiStep && requiredDelta < this.tableMaxDelta * (1 - 1e-12))) {
