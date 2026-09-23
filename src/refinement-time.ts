@@ -11,6 +11,7 @@ export class RefinementTimer {
     if(this.heldChanged){this.startedAt=now;this.completedAt=complete?now:null;this.heldChanged=false;}
   }
   complete(now:number){if(!this.heldChanged&&this.completedAt===null)this.completedAt=now;}
+  halt(now:number){if(this.completedAt===null)this.completedAt=now;this.heldChanged=false;}
   text(now:number){
     if(this.heldChanged)return 'Time taken: waiting for stationary';
     const centiseconds=Math.floor(Math.max(0,(this.completedAt??now)-this.startedAt)/10);

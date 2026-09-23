@@ -22,6 +22,11 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   zoom speed is 0.8x. Shift-drag
   or middle-drag pans; the wheel zooms. On the focused canvas, +/− zoom,
   arrow keys pan, and Esc stops motion.
+- Refresh recalculates the exact current view and starts a new Time taken
+  interval while keeping the prior image visible. Stop halts refinement and
+  freezes that interval without changing the view; compatible appearance
+  edits still recolour retained data. Navigation or numerical-setting changes
+  resume calculation. Esc remains motion-only.
 - J toggles a small Julia preview. While it is open, left-click/drag selects
   the exact Mandelbrot point as c without zooming the main view. M opens the
   selected Julia; M again restores the preserved Mandelbrot view.
@@ -273,13 +278,15 @@ Use the Codex in-app browser for testing; do not launch an external or headless
 browser. Candidate builds must write outside the directory served on 5183: a
 source revision or unchanged listener does not establish the served bundle.
 
-The next Julia numerical follow-up is broader BLA qualification while keeping
-preview and morph interaction responsive. Then investigate continuous
-colour slider latency. Existing-data colour-control response takes precedence
-while adjusting; numerical progress must survive. Investigate the critical path
-and remove unnecessary work without a separate final-quality fractal calculation
-pass. Never reinstate the rejected zoom-out numerical-field cache or the 5184
-scheduler architecture. Retain accepted numerical and BLA gains.
+Julia BLA is accepted for the current scope; broader numerical qualification is
+not a prerequisite for the practical-fidelity target (preserved major structure
+and useful detail) in either Julia or Mandelbrot. Park continuous UI-control
+latency work on the backlog: prioritising existing-data appearance ahead of
+preview, trying temporarily smaller batches, and investigating redundant
+reproject/copy submissions. The bounded colour-response measurement is in
+`F:\Coding\Temp\GPU-Zoomer-3-colour-response-20260923\RESULT.md`; it does not
+establish a change to adopt. Never reinstate the rejected zoom-out numerical-field
+cache or the 5184 scheduler architecture. Retain accepted numerical and BLA gains.
 
 Further candidates require evidence before adoption: workgroup, subgroup,
 register, temporary-storage and submission efficiencies; redundant spatial
@@ -293,17 +300,15 @@ rewrites, the three-step alignment bridge, wholesale arithmetic replacement,
 and another broad profiler campaign. No fixed 10–15% presentation reserve has
 been established.
 
-The later Stop action must halt orbit work and optional colour-data preparation,
-freeze time and keep the image visible. Existing-data appearance edits should
-still work. Missing-data appearance edits must retain the prior valid image
-while preparation runs; navigation or a numerical change returns to normal
-progressive refinement.
-Refresh should restart the exact current view while retaining the old image.
-Replace the main Julia Preview/Return buttons with Refresh/Stop only when this
-interaction is implemented; J/M remain Julia shortcuts with another
-discoverable mouse/touch route. Investigate preparing missing effect data after
-visual 100% only if inexpensive: retain 100% and frozen time with a separate
-Preparing colour data status, let Stop halt it, and prioritize navigation.
+The main action row is Refresh/Stop. The separate Julia preview toggle remains
+available by mouse/touch; J/M and the family selector retain their previous
+Julia open/return behaviour. Stop also cancels optional preview and colour-data
+preparation. An appearance edit that needs missing data holds the previous
+valid image until Refresh, navigation or a numerical-setting change.
+
+Later, investigate preparing missing effect data after visual 100% only if
+inexpensive: retain 100% and frozen time with a separate Preparing colour data
+status, let Stop halt it, and prioritize navigation.
 
 Approved later UI work: editable combined location selector/name with exact
 locations and links retained, and collision confirmation; reorganize Colouring

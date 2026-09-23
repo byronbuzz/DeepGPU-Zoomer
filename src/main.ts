@@ -14,6 +14,9 @@ const canvas=el<HTMLCanvasElement>('fractal');
 const camera=new Camera();
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
+let stopped=false, refreshPending=false, refreshHolding=false, stoppedAppearancePending=false;
+let retainedRequest:RenderRequest|null=null;
+let stopSnapshotPending=false,retainedPartialCaptured=false;
 let fields=0, recolours=0, stats:RenderStats|undefined, completedQuality=0, preparingColourData=false, colourDataTarget=0;
 let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=.8, previousTime=0, statusTime=0;
 let juliaReturn:SavedView|null=null;
@@ -56,6 +59,29 @@ function syncIterationLabel(){
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function stop(){refinementTime.stopHeld(performance.now(),currentFieldComplete());direction=0;wheelDirection=0;dragging=false;selecting=false;keys.clear();}
+function cancelPreviewWork(){previewLifetime++;previewEpoch++;previewPending=false;previewEngine?.abort();el('julia-preview').setAttribute('aria-busy','false');}
+function captureStoppedPartial(){
+  if(!stopSnapshotPending||!engine||!retainedRequest)return;
+  retainedPartialCaptured=engine.retainDisplayedPartial(retainedRequest,true);
+  stopSnapshotPending=false;
+}
+function stopRefinement(){
+  if(stopped){stop();return;}
+  retainedRequest=request();
+  stop();stopped=true;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;
+  generation++;engine?.abort();cancelPreviewWork();dirty=false;preparingColourData=false;
+  stopSnapshotPending=true;retainedPartialCaptured=false;if(!busy)captureStoppedPartial();
+  refinementTime.halt(performance.now());
+}
+function refresh(){
+  retainedRequest ??= request();
+  stop();stopped=false;refreshPending=true;refreshHolding=true;stoppedAppearancePending=false;
+  stopSnapshotPending=false;
+  generation++;engine?.abort();cancelPreviewWork();
+  resize(false);completedQuality=0;preparingColourData=false;dirty=true;error='';
+  refinementTime.demand(performance.now());preparing();
+  if(previewEnabled&&selectedJulia)queuePreview();
+}
 function syncPlace(){
   const matches=(p:SavedView)=>p.family===view.family && p.iterations===view.iterations && camera.x.eq(p.x) && camera.y.eq(p.y) && camera.span.eq(p.span) && (view.family==='mandelbrot'||new Decimal(view.jx).eq(p.jx)&&new Decimal(view.jy).eq(p.jy));
   const index=PLACES.findIndex(matches),savedIndex=saved.findIndex(item=>matches(item.view));
@@ -68,17 +94,17 @@ function syncControls(){
   syncIterationLabel();
   el<HTMLInputElement>('jx').value=view.jx;el<HTMLInputElement>('jy').value=view.jy;
   el<HTMLTextAreaElement>('cx').value=camera.x.toString();el<HTMLTextAreaElement>('cy').value=camera.y.toString();el<HTMLInputElement>('span').value=camera.span.toString();
-  el<HTMLButtonElement>('return').disabled=view.family!=='julia'||!juliaReturn;
   el<HTMLButtonElement>('julia-from').disabled=view.family==='julia';
   depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
   syncPlace();syncJuliaPreview();
   syncAppearance();
 }
 function load(next:SavedView,record=true){
-  const valid=validateView(next);stop();preparingColourData=false;view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
+  const valid=validateView(next);stop();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
   if(view.family==='julia')setPreview(false);
   resize();
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';refinementTime.demand(performance.now());preparing();message('');syncControls();
+  if(previewEnabled&&selectedJulia)queuePreview();
   if(record)persist();
 }
 function persist(sync=true){
@@ -86,7 +112,7 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(){preparingColourData=false;dirty=true;lastInteraction=performance.now();preparing();syncPlace();}
+function changed(){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=performance.now();preparing();syncPlace();}
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
   el('julia-preview').hidden=!visible;
@@ -96,6 +122,7 @@ function syncJuliaPreview(){
   el<HTMLButtonElement>('julia-promote').disabled=!selectedJulia;
 }
 function queuePreview(){
+  if(stopped)return;
   previewEpoch++;previewPending=true;
   el('julia-preview').setAttribute('aria-busy','true');
 }
@@ -124,7 +151,7 @@ function selectJuliaAtPointer(){
 }
 function setPreview(enabled:boolean){
   previewEnabled=enabled && view.family==='mandelbrot';selecting=false;
-  if(!previewEnabled){previewLifetime++;previewEpoch++;previewPending=false;previewEngine?.abort();}
+  if(!previewEnabled)cancelPreviewWork();
   syncJuliaPreview();
   if(previewEnabled)measurePreview();
 }
@@ -135,10 +162,10 @@ function toggleJuliaPreview(){
   canvas.focus();
 }
 async function computeJuliaPreview(){
-  if(previewBusy||!previewPending||!previewEnabled||!selectedJulia||!gpuContext)return;
+  if(stopped||previewBusy||!previewPending||!previewEnabled||!selectedJulia||!gpuContext)return;
   previewBusy=true;previewPending=false;
   const epoch=previewEpoch,lifetime=previewLifetime,selected={...selectedJulia},size={...previewSize};
-    const sameTarget=()=>previewEnabled && view.family==='mandelbrot' && previewLifetime===lifetime && selectedJulia?.x===selected.x && selectedJulia.y===selected.y && previewSize.width===size.width && previewSize.height===size.height;
+    const sameTarget=()=>!stopped && previewEnabled && view.family==='mandelbrot' && previewLifetime===lifetime && selectedJulia?.x===selected.x && selectedJulia.y===selected.y && previewSize.width===size.width && previewSize.height===size.height;
     const current=()=>sameTarget() && previewEpoch===epoch;
   try{
     // One persistent small renderer, with its own fields/history/uniforms.
@@ -174,20 +201,27 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
 }
 async function compute(){
-  if(busy||!engine||error)return;busy=true;dirty=false;const g=generation;
+  if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
   try{
     const result=await engine.render(request());
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;stats=result;if(result.computed)fields++;else recolours++;
-      lastRevision=camera.revision;completedQuality=1;preparingColourData=false;dirty=false;
+      lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
       if(numericalWasPending)refinementTime.complete(performance.now());
     }
   }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
-  finally{busy=false;if(lastRevision!==camera.revision||g!==generation)dirty=true;}
+  finally{busy=false;if(stopped){captureStoppedPartial();dirty=false;}else if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
-function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());preparing();return true;}
+async function recolorStopped(){
+  if(busy||!engine||!stopped||!stoppedAppearancePending)return;
+  busy=true;stoppedAppearancePending=false;const g=generation;
+  try{if(await engine.recolorRetained(request())&&g===generation&&stopped)retainedRequest=request();}
+  catch(e){if(g===generation){error=String(e);message(error);}}
+  finally{busy=false;if(stopped)captureStoppedPartial();}
+}
+function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;if(resetTimer){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;}preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());preparing();return true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -197,18 +231,20 @@ function tick(time:number){
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);refinementTime.heldCameraChange();changed();}
     if(engine){
-      engine.reproject(request());
+      if(refreshPending&&!busy){if(retainedRequest&&!retainedPartialCaptured)engine.retainDisplayedPartial(retainedRequest);engine.restartCalculation();retainedRequest=null;retainedPartialCaptured=false;refreshPending=false;dirty=true;}
+      engine.reproject(request(),stopped||refreshHolding);
       // Give the latest preview one turn between main jobs, without awaiting it.
       // Both renderers keep at most one bounded numerical region in the queue.
       const referenceWorkerWaiting=busy&&engine.debugProgress().referenceWorkerActive;
-      if((!busy||referenceWorkerWaiting)&&!previewBusy&&previewPending)void computeJuliaPreview();
-      if(dirty&&!busy)void compute();
+      if(!stopped&&(!busy||referenceWorkerWaiting)&&!previewBusy&&previewPending)void computeJuliaPreview();
+      if(stopped&&stoppedAppearancePending&&!busy)void recolorStopped();
+      if(dirty&&!busy&&!stopped&&!refreshPending)void compute();
     }
     if(time-statusTime>50){statusTime=time;
       const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
       const fresh=!busy && !dirty && !moving() && !numericalPending;
       const progress=engine?.debugProgress();
-      const state=!numericalPending?preparingColourData?colourPreparationLabel(progress):'Refined · 100%':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
+      const state=stopped?'Stopped':!numericalPending?preparingColourData?colourPreparationLabel(progress):'Refined · 100%':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
       freshness.textContent=`${error?'Rendering stopped':state} · ${refinementTime.text(time)}`;
       depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
       el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());
@@ -241,7 +277,8 @@ el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelec
 el('julia-from').onclick=toggleJuliaPreview;
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
 el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(String(err));}};
-el('return').onclick=switchJuliaView;
+el('refresh').onclick=refresh;
+el('stop-refinement').onclick=stopRefinement;
 el('reset').onclick=()=>load({...HOME,appearance:validateColors(colors)});
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
@@ -255,7 +292,31 @@ el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSel
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
-const paletteController=setupPaletteEditor(()=>colors,c=>{const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));const completedBefore=currentFieldComplete()||preparingColourData;colors=c;if(changed){const missingData=previous.mode!==c.mode||needsEndpoints(c)&&!engine?.endpointChannelsRequired();const numericalChange=missingData||previous.supersample!==c.supersample;if(numericalChange){const wasPreparing=preparingColourData,previousTarget=colourDataTarget,currentTarget=engine?.debugProgress().targets??0;const resized=resize(false);preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample;if(preparingColourData)colourDataTarget=wasPreparing&&previous.mode===c.mode?previousTarget:currentTarget;if(!preparingColourData)completedQuality=0;generation++;engine?.abort();preparing();}dirty=true;if(previewEnabled)queuePreview();}clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);});
+const paletteController=setupPaletteEditor(()=>colors,c=>{
+  const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));
+  const completedBefore=currentFieldComplete()||preparingColourData;
+  colors=c;
+  if(changed){
+    const missingData=previous.mode!==c.mode||needsEndpoints(c)&&!engine?.endpointChannelsRequired();
+    const numericalChange=missingData||previous.supersample!==c.supersample;
+    if(stopped&&previous.supersample===c.supersample){
+      generation++;engine?.abort();preparingColourData=false;dirty=false;
+      stoppedAppearancePending=true;
+    }else{
+      if(stopped){stopped=false;refinementTime.demand(performance.now());}
+      if(numericalChange){
+        const wasPreparing=preparingColourData,previousTarget=colourDataTarget,currentTarget=engine?.debugProgress().targets??0;
+        const resized=resize(false);
+        preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample;
+        if(preparingColourData)colourDataTarget=wasPreparing&&previous.mode===c.mode?previousTarget:currentTarget;
+        if(!preparingColourData)completedQuality=0;
+        generation++;engine?.abort();preparing();
+      }
+      dirty=true;if(previewEnabled)queuePreview();
+    }
+  }
+  clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);
+});
 syncAppearance=paletteController.sync;
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
@@ -297,7 +358,7 @@ export const testing = import.meta.env.DEV ? {
   capture:()=>engine.capturePixels(request()),
   selectPreview(x:number,y:number){pointer={x,y};selectJuliaAtPointer();},
   juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,size:{...previewSize},selected:selectedJulia?{...selectedJulia}:null,displayed:displayedJulia?{...displayedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null,work:previewEngine?.debugProgress()}),
-  status:()=>({busy,dirty,error,fields,recolours,effectiveLimit:view.iterations,lastRevision,revision:camera.revision,quality:completedQuality,stats,progress:engine?.debugProgress(),frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
+  status:()=>({busy,dirty,stopped,refreshPending,refreshHolding,stoppedAppearancePending,error,fields,recolours,effectiveLimit:view.iterations,lastRevision,revision:camera.revision,quality:completedQuality,stats,progress:engine?.debugProgress(),frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
   resetTiming(){frameTimes=[];frameCount=0;sessionStart=performance.now();},
 } : undefined;
 if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerTesting?:typeof testing}).__gpuZoomerTesting=testing;

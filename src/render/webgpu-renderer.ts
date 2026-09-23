@@ -331,6 +331,7 @@ export class WebGpuRenderer {
   private publicationEpoch = 0;
   private incomingFrame: WebGpuRenderer["lastFrame"] = null;
   private appearanceHoldFrame: WebGpuRenderer["lastFrame"] = null;
+  private partialAppearanceUniforms: ArrayBuffer | null = null;
   private partialSerial = 0;
   private partialRegions = 0;
   private firstPartialAt = 0;
@@ -940,6 +941,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       });
     }
     const matchesView = (frame: WebGpuRenderer["lastFrame"]) => !this.currentView || this.samePresentation(frame,this.currentView)||
+      !!(allowAppearanceFallback&&frame===this.lastFrame)||
       !!(allowAppearanceFallback&&this.appearanceHoldFrame&&this.appearanceHoldActive(this.currentView)&&
         this.samePresentation(frame,this.appearanceHoldFrame));
     const coverage = source === this.history && this.coverageFrame && matchesView(this.coverageFrame) && this.currentView
@@ -1025,7 +1027,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.cancelPendingReference("Reference generation aborted");
   }
 
-  reproject(request: RenderRequest): boolean {
+  /** Starts a fresh calculation without discarding the displayed history. */
+  restartCalculation() {
+    this.abort();
+    this.publicationEpoch++;
+    this.cachedRequest='';this.cachedStats=null;this.fieldKey='';this.sampleKey='';
+    this.fieldComplete=false;this.fieldDescriptor=null;this.fieldUniforms=null;this.fieldStats=null;
+    this.partialAppearanceUniforms=null;this.incomingFrame=null;this.appearanceHoldFrame=null;
+    this.pending.reset(0,0);this.partialRegions=0;this.determined=new CoverageRegions();
+    this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
+    this.aborted=true;
+  }
+
+  reproject(request: RenderRequest, allowStaleAppearance=false): boolean {
     if(this.deviceLost)return false;
     this.currentView = request;
     const heldAppearance=this.appearanceHoldActive(request);
@@ -1043,10 +1057,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
     const heldCompatible=(frame:WebGpuRenderer["lastFrame"])=>!!(heldAppearance&&this.appearanceHoldFrame&&this.samePresentation(frame,this.appearanceHoldFrame));
+    const stale=allowStaleAppearance&&this.historyValid&&this.stalePresentationCompatible(last,request);
     const incomingAvailable = compatible(this.incomingFrame) && reprojectionFor(this.incomingFrame!, request);
-    if (!compatible(last) && !heldCompatible(last) && !incomingAvailable) return false;
+    if (!compatible(last) && !heldCompatible(last) && !stale && !incomingAvailable) return false;
 
-    let mapping = compatible(last)||heldCompatible(last) ? reprojectionFor(last, request) : null;
+    let mapping = compatible(last)||heldCompatible(last)||stale ? reprojectionFor(last, request) : null;
     if (!mapping) {
       if (!incomingAvailable && (!compatible(this.coverageFrame) || !reprojectionFor(this.coverageFrame!, request, true))) return false;
       // The narrow front may be outside its useful range while the retained
@@ -1060,7 +1075,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       source,
       new Float32Array([mapping.scaleX, mapping.scaleY, mapping.offsetX, mapping.offsetY]),
       undefined,
-      heldAppearance,
+      heldAppearance||stale,
     );
     this.ctx.device.queue.submit([encoder.finish()]);
     return true;
@@ -1072,7 +1087,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
     this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
-    this.fieldStats=null;this.fieldDescriptor=null;this.fieldUniforms=null;
+    this.fieldStats=null;this.fieldDescriptor=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
     this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
     this.abort();
   }
@@ -1129,6 +1144,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       frame.useApprox === (request.useApprox === true) &&
       (request.family !== "julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors) === JSON.stringify(request.colors);
+  }
+  private stalePresentationCompatible(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>){
+    return !!frame&&frame.family===request.family&&frame.maxIterations===request.maxIterations&&
+      frame.useApprox===(request.useApprox===true)&&
+      (request.family!=='julia'||!!frame.juliaX?.eq(request.juliaX!)&&!!frame.juliaY?.eq(request.juliaY!));
   }
 
   private copyColors(colors: ColorSettings): ColorSettings {
@@ -1256,6 +1276,41 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }finally{candidate?.destroy();candidateAa?.destroy();this.finalizing=false;}
   }
 
+  /** Recolours only channels already present after an explicit Stop. Never starts orbit or region work. */
+  async recolorRetained(request:RenderRequest):Promise<boolean>{
+    if(this.deviceLost)return false;
+    const method=request.forceMethod??methodForScale(request.unitsPerPixel);
+    const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
+    if(!this.fieldSupportsAppearance(request,method,grid))await this.convertDistanceToIteration(request,method,grid);
+    if(this.fieldSupportsAppearance(request,method,grid)){
+      const result=await this.recolorCompleted(request,'',method,grid);
+      return !!result?.completed;
+    }
+    const frame=this.incomingFrame,base=this.partialAppearanceUniforms;
+    if(!frame||!base||!this.target||!this.fieldBuffer||!this.sameView(frame,request)||
+      frame.family!==request.family||frame.maxIterations!==request.maxIterations||
+      frame.useApprox!==(request.useApprox===true)||frame.method!==method||frame.grid!==grid||
+      (request.family==='julia'&&(!frame.juliaX?.eq(request.juliaX!)||!frame.juliaY?.eq(request.juliaY!)))||
+      frame.colors.mode!==request.colors.mode||(needsEndpoints(request.colors)&&!this.retainEndpoints))return false;
+    const {device}=this.ctx,epoch=this.publicationEpoch,colors=this.copyColors(request.colors);
+    const uniforms=base.slice(0),u32=new Uint32Array(uniforms);
+    u32[26]=request.height;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;
+    const stops=this.fillAppearance(uniforms,colors,this.retainEndpoints),bind=this.createRenderBind();
+    const timingSamples:(TimingSample|undefined)[]=[];
+    await checkedGpu(device,()=>{
+      device.queue.writeBuffer(this.stopsBuffer,0,stops);device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+      const encoder=device.createCommandEncoder({label:'recolour-stopped-partial'});
+      this.encodeShadePass(encoder,bind,request.width,request.height,timingSamples);
+      device.queue.submit([encoder.finish()]);timingSamples.forEach(sample=>this.timing.collect(sample));
+    });
+    this.appearanceSubmissions++;
+    if(epoch!==this.publicationEpoch||request.isCurrent&&!request.isCurrent())return false;
+    this.partialAppearanceUniforms=uniforms;this.incomingFrame={...frame,colors};
+    this.lastPartialAt=performance.now();this.appearancePublications++;
+    this.reproject(request,true);
+    return true;
+  }
+
   /** Captures only the completed, current 8-bit presentation image. */
   async capturePixels(request:RenderRequest):Promise<{width:number;height:number;pixels:Uint8ClampedArray}> {
     if(!this.isComplete(request))throw new Error('The current image is not ready to save yet.');
@@ -1297,13 +1352,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }).filter(r=>r.width>0&&r.height>0);
   }
 
-  private retainPartial() {
+  retainDisplayedPartial(request:RenderRequest,keepIncoming=false){
+    const live=this.currentView;
+    this.currentView=request;
+    try{return this.retainPartial(true,keepIncoming);}finally{this.currentView=live;}
+  }
+
+  private retainPartial(allowStaleAppearance=false,keepIncoming=false) {
     const frame = this.incomingFrame;
-    if (!frame || !this.target || !this.partialRegions) return;
+    if (!frame || !this.target || !this.partialRegions) return false;
     if (this.currentView && !this.samePresentation(frame,this.currentView)) {
       this.incomingFrame=null;this.partialRegions=0;this.determined=new CoverageRegions();
       this.determinedRegion=null;this.determinedSpacing=undefined;
-      return;
+      return false;
     }
     const { device } = this.ctx;
     this.retainedAnchor ??= createSampleGridAnchor(this.lastFrame ?? frame);
@@ -1320,7 +1381,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const source = this.historyValid ? this.history! : this.target;
     const mapping = this.historyValid && this.lastFrame ? reprojectionFor(this.lastFrame,retained,!this.lastFrame.proxy) : null;
     const encoder = device.createCommandEncoder({label:"retain-progress"});
-    this.encodeBlit(encoder,source,mapping ? new Float32Array([mapping.scaleX,mapping.scaleY,mapping.offsetX,mapping.offsetY]) : new Float32Array([0,0,-1,-1]),snapshot);
+    this.encodeBlit(encoder,source,mapping ? new Float32Array([mapping.scaleX,mapping.scaleY,mapping.offsetX,mapping.offsetY]) : new Float32Array([0,0,-1,-1]),snapshot,
+      allowStaleAppearance&&this.stalePresentationCompatible(this.lastFrame,retained));
     device.queue.submit([encoder.finish()]);
     this.currentView = live;
     if (this.historyValid && this.lastFrame && !this.lastFrame.proxy) {
@@ -1328,7 +1390,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     } else this.history?.destroy();
     this.history=snapshot; this.historySize={width:retained.width,height:retained.height};
     this.lastFrame={...retained,proxy:true,covered,coveredSpacing:covered?.spacing,
-      coveredRegions:retainedCoverage.rectangles.map(r=>({...r,spacing:retained.unitsPerPixel.times(r.spacing??1)}))}; this.historyValid=true; this.incomingFrame=null;
+      coveredRegions:retainedCoverage.rectangles.map(r=>({...r,spacing:retained.unitsPerPixel.times(r.spacing??1)}))}; this.historyValid=true;
+    if(!keepIncoming)this.incomingFrame=null;
+    return true;
   }
 
   private regionDemand(request: RenderRequest): Demand {
@@ -1351,7 +1415,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     try{do {
       this.retarget=false;
       try{result=await this.renderTarget(request);}catch(error){
-        this.referencePreparing=false;this.finalizing=false;this.cachedRequest='';this.fieldKey='';this.fieldComplete=false;
+        this.referencePreparing=false;this.finalizing=false;this.cachedRequest='';
+        if(!(error instanceof DOMException&&error.name==='AbortError')){this.fieldKey='';this.fieldComplete=false;}
         if(!(error instanceof DOMException&&error.name==='AbortError')){this.incomingFrame=null;this.sampleKey='';this.fieldView=null;this.aborted=true;this.exactCompletedSamples=0;}
         throw error;
       }
@@ -1470,7 +1535,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.laBuffer = storageBuffer(device, ENTRY_FLOATS, "la-table");
       this.laIndexBuffer = storageBuffer(device, 2, "la-index");
     }
-    this.incomingFrame = null;
+    this.incomingFrame = null;this.partialAppearanceUniforms=null;
     await this.ensureTarget(request.width, request.height);
     if(this.abortRequested||!request.isCurrent!())throw new DOMException("Superseded target","AbortError");
 
@@ -1546,6 +1611,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         request.juliaX ?? new Decimal(0), request.juliaY ?? new Decimal(0)].forEach((value, i) => f32.set(splitQuad(value), 56 + i * 4));
     }
     const stopData=this.fillAppearance(uniforms,colors,this.retainEndpoints);
+    this.partialAppearanceUniforms=uniforms.slice(0);
     device.queue.writeBuffer(this.stopsBuffer,0,stopData);
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(12));
@@ -1612,6 +1678,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if(!this.appearanceCompatible(request,latest,method,grid,this.retainEndpoints))return false;
       colors=this.copyColors(latest.colors);request={...request,colors};requestKey=keyFor(request);frame.colors=colors;
       const latestStops=this.fillAppearance(uniforms,colors,this.retainEndpoints);
+      this.partialAppearanceUniforms=uniforms.slice(0);
       u32[26]=request.height;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;
       device.queue.writeBuffer(this.stopsBuffer,0,latestStops);device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
       const encoder=device.createCommandEncoder({label:"shade-latest-appearance"});shade(encoder,request.width,request.height);
@@ -1667,6 +1734,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
       this.batchMsPerSample = this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
       await yieldToEvents();
+      if (!request.isCurrent!() || this.abortRequested) {
+        completed = false; this.aborted = true; break;
+      }
       await request.betweenBatches?.();
       if (!request.isCurrent!() || this.abortRequested) {
         completed = false; this.aborted = true; break;
@@ -1690,7 +1760,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined,published=false;
     let counters:Uint32Array;
     try{
-      counters=new Uint32Array(await checkedGpu(device,()=>{
+      counters=!completed&&(this.abortRequested||!request.isCurrent!())?new Uint32Array(12):new Uint32Array(await checkedGpu(device,()=>{
         if(completed){
           candidate=this.candidateTexture(request.width,request.height);
           if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);
@@ -1756,7 +1826,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     };
     if(completed&&this.fieldComplete){
       this.fieldDescriptor={family,constant,maxIterations:request.maxIterations,mode:colors.mode,grid,method,useApprox:request.useApprox===true,retainEndpoints:this.retainEndpoints};
-      this.fieldUniforms=uniforms.slice(0);this.fieldStats=result;
+      this.fieldUniforms=uniforms.slice(0);this.fieldStats=result;this.partialAppearanceUniforms=null;
     }
     if (completed && request.isCurrent!() && published) {
       this.cachedStats = result; this.cachedRequest = requestKey;

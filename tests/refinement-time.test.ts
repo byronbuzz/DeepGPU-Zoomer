@@ -21,4 +21,10 @@ describe('refinement time',()=>{
     const timer=new RefinementTimer(0);timer.complete(3_661_230);
     expect(timer.text(8_000_000)).toBe('Time taken: 01:01:01.23');
   });
+  it('freezes an unfinished demand on Stop until an explicit new demand',()=>{
+    const timer=new RefinementTimer(100);
+    timer.halt(850);expect(timer.text(5000)).toBe('Time taken: 00:00.75');
+    timer.demand(5100);expect(timer.text(5350)).toBe('Time taken: 00:00.25');
+    timer.halt(5400);expect(timer.text(9000)).toBe('Time taken: 00:00.30');
+  });
 });

@@ -14,7 +14,8 @@
     </div>
     <div id="panel-main" class="tab-panel" role="tabpanel" aria-labelledby="tab-main">
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
-      <div class="row main-action-row"><button id="julia-from" aria-pressed="false" aria-controls="julia-preview" aria-keyshortcuts="J">Julia preview · J</button><button id="return" disabled aria-keyshortcuts="M">Return · M</button></div>
+      <div class="row main-action-row"><button id="refresh">Refresh</button><button id="stop-refinement">Stop</button></div>
+      <button id="julia-from" class="preview-toggle" aria-pressed="false" aria-controls="julia-preview" aria-keyshortcuts="J">Julia preview · J</button>
       <form id="julia-form" hidden><label>Julia c · real<input id="jx" value="-0.8" spellcheck="false"></label><label>Imaginary<input id="jy" value="0.156" spellcheck="false"></label><button>Apply constant</button></form>
       <div class="row main-action-row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
       <label>Locations<select id="locations"><option value="">Choose a location…</option></select></label>
@@ -25,7 +26,7 @@
       <label>Iteration limit <output id="iteration-value">5,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
       <p id="iteration-detail" class="help compact">Fixed limit.</p>
       <button id="screenshot" disabled>Save PNG</button>
-      <p class="help">Hold left / right to zoom in / out. Shift-drag to pan. Wheel, + / − and arrows also work. J previews Julia; M opens or returns. Esc stops motion.</p>
+      <p class="help">Hold left / right to zoom in / out. Shift-drag to pan. Wheel, + / − and arrows also work. J previews Julia; M opens or returns. Esc stops motion; Stop halts refinement. Refresh recalculates this view.</p>
     </div>
     <div id="panel-colouring" class="tab-panel" role="tabpanel" aria-labelledby="tab-colouring" hidden>
       <label>Preset<select id="palette"></select></label>
