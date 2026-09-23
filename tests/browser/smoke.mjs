@@ -52,11 +52,12 @@ try{
   const downloadPromise=page.waitForEvent('download');await page.locator('#screenshot').click();const download=await downloadPromise;const png=path.join(output,'capture.png');await download.saveAs(png);const bytes=fs.readFileSync(png);
   const width=bytes.readUInt32BE(16),height=bytes.readUInt32BE(20);
   check('PNG uses backing dimensions',bytes.subarray(1,4).toString()==='PNG'&&width===canvas.width&&height===canvas.height,{png:[width,height],canvas});
-  await page.locator('#location-name').fill('Keep me');await page.locator('#save').click();await page.locator('#speed').fill('3');
+  await page.locator('#location-entry').fill('Keep me');await page.locator('#save').click();await page.locator('#speed').fill('3');
   await page.locator('#fractal').focus();await page.keyboard.down('+');await page.waitForTimeout(2600);await page.keyboard.press('Escape');await page.keyboard.up('+');const settled=await settle();
   check('held zoom and Escape settle at the fixed cap',(await snapshot()).iterations===5000&&settled.effectiveLimit===5000&&settled.lastRevision===settled.revision&&settled.progress.percentage===100&&await page.locator('#freshness').innerText().then(text=>text.includes('Time taken:')),{effective:settled.effectiveLimit,revision:settled.revision});
   await page.locator('#full-reset').click();await settle();const reset=await snapshot();
-  check('full reset restores defaults and preserves saved locations',reset.iterations===5000&&reset.span==='2.8'&&reset.appearance.postAntialias===false&&await page.locator('#speed').inputValue()==='0.8'&&await page.locator('#locations option').filter({hasText:'Keep me'}).count()===1&&await page.locator('#tab-main').getAttribute('aria-selected')==='true',reset);
+  await page.locator('#location-entry').focus();
+  check('full reset restores defaults and preserves saved locations',reset.iterations===5000&&reset.span==='2.8'&&reset.appearance.postAntialias===false&&await page.locator('#speed').inputValue()==='0.8'&&await page.locator('#location-options [data-location-kind="saved"]').filter({hasText:'Keep me'}).count()===1&&await page.locator('#tab-main').getAttribute('aria-selected')==='true',reset);
   await page.screenshot({path:path.join(output,'reset-main.png')});
 }catch(error){errors.push(String(error));console.error(error);}finally{
   const report={checks,errors,browser:context.browser()?.version()};fs.writeFileSync(path.join(output,'results.json'),JSON.stringify(report,null,2));await context.close();

@@ -29,6 +29,8 @@ const previewCanvas=el<HTMLCanvasElement>('julia-preview-canvas');
 let previewSize={width:previewCanvas.width,height:previewCanvas.height};
 const keys=new Set<string>();
 let saved: {name:string;view:SavedView}[]=[];
+type LocationChoice={kind:'place'|'saved';index:number;name:string};
+let selectedLocation:LocationChoice|null=null;
 let linkedView:SavedView|null=null;
 let frameTimes:number[]=[], frameCount=0, sessionStart=performance.now();
 const refinementTime=new RefinementTimer(performance.now());
@@ -82,21 +84,17 @@ function refresh(){
   refinementTime.demand(performance.now());preparing();
   if(previewEnabled&&selectedJulia)queuePreview();
 }
-function syncPlace(){
-  const matches=(p:SavedView)=>p.family===view.family && p.iterations===view.iterations && camera.x.eq(p.x) && camera.y.eq(p.y) && camera.span.eq(p.span) && (view.family==='mandelbrot'||new Decimal(view.jx).eq(p.jx)&&new Decimal(view.jy).eq(p.jy));
-  const index=PLACES.findIndex(matches),savedIndex=saved.findIndex(item=>matches(item.view));
-  el<HTMLSelectElement>('locations').value=index>=0?`place:${index}`:savedIndex>=0?`saved:${savedIndex}`:'';
-}
 function syncControls(){
   el<HTMLSelectElement>('family').value=view.family;
   el<HTMLInputElement>('iteration-slider').value=String(iterationToSlider(view.iterations));
   syncIterationLabel();
   el<HTMLTextAreaElement>('cx').value=camera.x.toString();el<HTMLTextAreaElement>('cy').value=camera.y.toString();el<HTMLInputElement>('span').value=camera.span.toString();
   depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
-  syncPlace();syncJuliaPreview();
+  syncJuliaPreview();
   syncAppearance();
 }
 function load(next:SavedView,record=true){
+  dismissReplacement();
   const valid=validateView(next);stop();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
   if(view.family==='julia')setPreview(false);
   resize();
@@ -109,7 +107,7 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=performance.now();preparing();syncPlace();}
+function changed(){dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=performance.now();preparing();}
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
   el('julia-preview').hidden=!visible;
@@ -274,14 +272,72 @@ el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(Strin
 el('refresh').onclick=refresh;
 el('stop-refinement').onclick=stopRefinement;
 el('reset').onclick=()=>load(homePosition(snapshot()));
+const fullscreenButton=el<HTMLButtonElement>('fullscreen');
+const syncFullscreen=()=>{const active=!!document.fullscreenElement;fullscreenButton.textContent=active?'Exit fullscreen':'Enter fullscreen';fullscreenButton.setAttribute('aria-pressed',String(active));};
+document.addEventListener('fullscreenchange',syncFullscreen);syncFullscreen();
+fullscreenButton.onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else{if(!document.fullscreenEnabled)throw Error('This browser does not allow fullscreen here.');await document.documentElement.requestFullscreen();}}catch(reason){message(`Fullscreen unavailable: ${String(reason)}`);}};
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
 el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
 el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
 el<HTMLFormElement>('coordinates').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),x:el<HTMLInputElement>('cx').value,y:el<HTMLInputElement>('cy').value,span:el<HTMLInputElement>('span').value});}catch(err){message(String(err));}};
-function savedOptions(){const select=el<HTMLSelectElement>('locations');select.replaceChildren(new Option('Choose a location…',''));const places=document.createElement('optgroup');places.label='Places';PLACES.forEach((p,i)=>places.append(new Option(p.name,`place:${i}`)));select.append(places);if(saved.length){const own=document.createElement('optgroup');own.label='Saved locations';saved.forEach((s,i)=>own.append(new Option(s.name,`saved:${i}`)));select.append(own);}}
-el('save').onclick=()=>{saved.push({name:el<HTMLInputElement>('location-name').value.trim()||`${view.family} ${saved.length+1}`,view:snapshot()});try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(saved));savedOptions();syncPlace();message('Location saved on this browser.',true);}catch{message('Local storage is unavailable. Copy a share link instead.');}};
-el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value.startsWith('place:'))load(PLACES[Number(value.slice(6))]);else if(value.startsWith('saved:'))load(saved[Number(value.slice(6))].view);};
+const locationEntry=el<HTMLInputElement>('location-entry'),locationOptions=el<HTMLElement>('location-options');
+const replaceLocation=el<HTMLElement>('replace-location');
+let visibleLocations:LocationChoice[]=[],locationOptionsOpen=false,filterLocations=false,activeLocation=-1;
+let pendingReplacement:{name:string;index:number;view:SavedView}|null=null;
+function closeLocationOptions(){locationOptionsOpen=false;activeLocation=-1;locationOptions.hidden=true;locationEntry.setAttribute('aria-expanded','false');locationEntry.removeAttribute('aria-activedescendant');}
+function dismissReplacement(){pendingReplacement=null;replaceLocation.hidden=true;}
+function selectLocation(choice:LocationChoice){
+  const item=choice.kind==='place'?PLACES[choice.index]:saved[choice.index];if(!item)return;
+  selectedLocation={...choice,name:item.name};locationEntry.value=item.name;dismissReplacement();closeLocationOptions();load(choice.kind==='place'?PLACES[choice.index]:saved[choice.index].view);
+}
+function highlightLocation(){
+  locationOptions.querySelectorAll<HTMLElement>('[role=option]').forEach((item,index)=>item.setAttribute('aria-selected',String(index===activeLocation)));
+  if(activeLocation<0){locationEntry.removeAttribute('aria-activedescendant');return;}
+  const item=locationOptions.querySelectorAll<HTMLElement>('[role=option]')[activeLocation];
+  if(item){locationEntry.setAttribute('aria-activedescendant',item.id);item.scrollIntoView({block:'nearest'});}
+}
+function renderLocationOptions(){
+  const query=filterLocations?locationEntry.value.trim().toLocaleLowerCase():'';
+  visibleLocations=[...PLACES.map((item,index)=>({kind:'place' as const,index,name:item.name})),...saved.map((item,index)=>({kind:'saved' as const,index,name:item.name}))]
+    .filter(item=>item.name.toLocaleLowerCase().includes(query));
+  locationOptions.replaceChildren();
+  visibleLocations.forEach((choice,index)=>{
+    const option=document.createElement('div');option.id=`location-option-${index}`;option.className='location-option';option.setAttribute('role','option');
+    option.dataset.locationKind=choice.kind;option.dataset.locationIndex=String(choice.index);
+    option.textContent=`${choice.kind==='place'?'Place':'Saved'} · ${choice.name}`;
+    option.onpointerdown=event=>event.preventDefault();option.onclick=()=>selectLocation(choice);locationOptions.append(option);
+  });
+  if(!visibleLocations.length){const empty=document.createElement('div');empty.className='location-empty';empty.textContent='No matching location. Save to create one.';locationOptions.append(empty);}
+  locationOptions.hidden=!locationOptionsOpen;locationEntry.setAttribute('aria-expanded',String(locationOptionsOpen));highlightLocation();
+}
+locationEntry.onfocus=()=>{filterLocations=false;activeLocation=-1;locationOptionsOpen=true;renderLocationOptions();};
+locationEntry.onclick=()=>{if(!locationOptionsOpen){filterLocations=false;locationOptionsOpen=true;renderLocationOptions();}};
+locationEntry.oninput=()=>{dismissReplacement();filterLocations=true;activeLocation=-1;locationOptionsOpen=true;renderLocationOptions();};
+locationEntry.onblur=()=>setTimeout(()=>{if(document.activeElement!==locationEntry)closeLocationOptions();},0);
+locationEntry.onkeydown=event=>{
+  if(event.key==='ArrowDown'||event.key==='ArrowUp'){
+    event.preventDefault();if(!locationOptionsOpen){filterLocations=false;locationOptionsOpen=true;renderLocationOptions();}
+    if(visibleLocations.length){activeLocation=event.key==='ArrowDown'?(activeLocation+1)%visibleLocations.length:activeLocation<0?visibleLocations.length-1:(activeLocation-1+visibleLocations.length)%visibleLocations.length;highlightLocation();}
+  }else if(event.key==='Enter'&&locationOptionsOpen&&activeLocation>=0){event.preventDefault();selectLocation(visibleLocations[activeLocation]);}
+  else if(event.key==='Escape')closeLocationOptions();
+};
+function storeLocation(name:string,index:number,nextView:SavedView){
+  const next=saved.slice(),target=index<0?next.length:index;next[target]={name,view:nextView};
+  try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(next));saved=next;selectedLocation={kind:'saved',index:target,name};locationEntry.value=name;dismissReplacement();closeLocationOptions();message(index<0?'Location saved on this browser.':'Location updated on this browser.',true);}
+  catch{dismissReplacement();message('Local storage is unavailable. Copy a share link instead.');}
+}
+el('save').onclick=()=>{
+  const name=locationEntry.value.trim()||`${view.family} ${saved.length+1}`,nextView=snapshot();
+  const selectedIndex=selectedLocation?.kind==='saved'?selectedLocation.index:-1;
+  if(selectedIndex>=0&&saved[selectedIndex]?.name.toLocaleLowerCase()===name.toLocaleLowerCase()){storeLocation(name,selectedIndex,nextView);return;}
+  const collision=saved.findIndex(item=>item.name.toLocaleLowerCase()===name.toLocaleLowerCase());
+  if(collision<0){storeLocation(name,-1,nextView);return;}
+  pendingReplacement={name,index:collision,view:nextView};el('replace-location-text').textContent=`Replace saved location “${saved[collision].name}” with this view?`;
+  replaceLocation.hidden=false;closeLocationOptions();el<HTMLButtonElement>('replace-cancel').focus();
+};
+el('replace-cancel').onclick=()=>{dismissReplacement();el<HTMLButtonElement>('save').focus();};
+el('replace-confirm').onclick=()=>{if(!pendingReplacement)return;const {name,index,view:nextView}=pendingReplacement;storeLocation(name,index,nextView);el<HTMLButtonElement>('save').focus();};
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
 const panelController=setupPanels();
@@ -315,7 +371,7 @@ el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
   speed=.8;el<HTMLInputElement>('speed').value='.8';el('speed-value').textContent='0.8×';
-  el<HTMLInputElement>('location-name').value='';el<HTMLSelectElement>('random-style').value='harmonious';
+  selectedLocation=null;locationEntry.value='';dismissReplacement();closeLocationOptions();el<HTMLSelectElement>('random-style').value='harmonious';
   profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
   try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}
   history.replaceState(null,'',location.pathname+location.search);el('linked-location').hidden=true;
@@ -336,7 +392,7 @@ el('screenshot').onclick=async()=>{
   finally{button.disabled=!engine?.isComplete(request());}
 };
 export const ready=(async()=>{
-  try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}savedOptions();
+  try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}
   let rememberedAppearance=DEFAULT_COLORS;try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
   let linkedError=false;if(location.hash){try{linkedView=decodeView(location.hash.slice(1));}catch{linkedError=true;}}
   load({...HOME,appearance:validateColors(rememberedAppearance)},false);

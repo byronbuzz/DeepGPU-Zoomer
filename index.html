@@ -19,10 +19,12 @@
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
       <div class="row main-action-row"><button id="refresh">Refresh</button><button id="stop-refinement">Stop</button></div>
       <div class="row main-action-row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
-      <label>Locations<select id="locations"><option value="">Choose a location…</option></select></label>
-      <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
-      <label>Location name<input id="location-name" maxlength="80" placeholder="Untitled location"></label>
+      <button id="fullscreen" type="button" aria-pressed="false">Enter fullscreen</button>
+      <label>Location<input id="location-entry" role="combobox" type="text" maxlength="80" autocomplete="off" aria-autocomplete="list" aria-controls="location-options" aria-expanded="false" placeholder="Choose or name a location"></label>
+      <div id="location-options" class="location-options" role="listbox" aria-label="Places and saved locations" hidden></div>
       <div class="row"><button id="save">Save location</button><button id="share">Copy exact link</button></div>
+      <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
+      <div id="replace-location" class="linked-location" role="group" aria-labelledby="replace-location-text" hidden><p id="replace-location-text"></p><div class="row"><button id="replace-cancel" type="button">Cancel</button><button id="replace-confirm" type="button">Replace location</button></div></div>
       <button id="screenshot" disabled>Save PNG</button>
       <p class="help">Hold left / right to zoom in / out. Shift-drag to pan. Wheel, + / − and arrows also work. J previews Julia; M opens or returns. Esc stops motion; Stop halts refinement. Refresh recalculates this view.</p>
     </div>
@@ -57,12 +59,11 @@
       </details>
     </div>
     <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
-      <form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label>Vertical span<input id="span" spellcheck="false"></label><button>Go to coordinates</button></form>
-      <label class="profiling-switch"><input id="profiling" type="checkbox"> Measure GPU timings</label><p id="profiling-data">GPU timings are off.</p>
+      <label>Panel opacity<input id="panel-opacity" type="range" min="0.15" max="1" step="0.01" value="0.8"></label>
       <label class="check"><input id="post-antialias" type="checkbox"> Completed-image antialiasing</label>
       <p class="help compact">A low-cost final image filter. It does not rerun or recover missing fractal samples.</p>
-      <label>Panel opacity<input id="panel-opacity" type="range" min="0.15" max="1" step="0.01" value="0.8"></label>
-      <button id="reset-layout">Reset panel layout</button>
+      <form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label title="Top-to-bottom distance in the complex plane. Smaller means deeper zoom; 2.8 corresponds to 10^0×.">View height (complex units)<input id="span" spellcheck="false" title="Top-to-bottom distance in the complex plane. Smaller means deeper zoom; 2.8 corresponds to 10^0×."></label><button>Go to coordinates</button></form>
+      <label class="profiling-switch"><input id="profiling" type="checkbox"> Measure GPU timings</label><p id="profiling-data">GPU timings are off.</p>
     </div>
     </div>
     <button class="resize-edge resize-left" data-resize="left" aria-label="Resize controls from left edge" title="Drag or use arrow keys to resize"></button>

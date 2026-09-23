@@ -19,4 +19,18 @@ describe('bounded controls and footer wording',()=>{
     expect(main).toContain("preparingColourData?`${colourPreparationLabel()} · `:''");
     expect(main).toContain('refinementTime.text(performance.now())');
   });
+  it('keeps the requested controls inside the existing panels without new footer text',()=>{
+    expect(html).toContain('id="fullscreen"');
+    expect(html).toContain('id="location-entry"');
+    expect(html).not.toContain('id="location-name"');
+    expect(html).not.toContain('id="locations"');
+    expect(html).not.toContain('id="reset-layout"');
+    expect(html).toContain('View height (complex units)');
+    expect(html.indexOf('id="location-entry"')).toBeLessThan(html.indexOf('id="save"'));
+    expect(html.indexOf('id="save"')).toBeLessThan(html.indexOf('id="linked-location"'));
+    const advanced=html.slice(html.indexOf('id="panel-advanced"'));
+    expect(advanced.indexOf('id="panel-opacity"')).toBeLessThan(advanced.indexOf('id="post-antialias"'));
+    expect(advanced.indexOf('id="post-antialias"')).toBeLessThan(advanced.indexOf('id="coordinates"'));
+    expect(main).toContain('panelController.reset();load(');
+  });
 });
