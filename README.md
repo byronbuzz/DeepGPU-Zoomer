@@ -264,13 +264,14 @@ prepared effect still recolour without recurrence. The controls toggle is an
 accessible hamburger; it and the footer remain visible while controls are hidden.
 
 Julia BLA is now enabled for eligible main-view iteration colouring. The same
-practical acceptance criterion applies to both fractal families: repeated
-bounded wall benefit, intact visible structure and no observed escape/capped
-classification changes, not exact raw iteration equality. The historical
+practical acceptance standard applies to both fractal families: repeated
+bounded wall benefit and preservation of major structure and useful detail,
+not exact raw iteration equality. The historical
 default-bound Julia probe missed 6 of 49 independently checked points. At the
 tighter -40 bound, four fresh 960×640 spiral renders gave a 23.6% mean wall
 gain (including preparation), with 1.012% changed pixels and the visible
-spiral intact. This view had no capped samples; other views, GPUs and
+spiral intact. No escape/capped classification changes were observed in this
+tested view, which had no capped samples; other views, GPUs and
 endpoint-dependent appearances remain unqualified. Patches and raw evidence are in
 `F:\Coding\Temp\GPU-Zoomer-3-julia-practical-20260923\RESULT.md` and the
 earlier `F:\Coding\Temp\GPU-Zoomer-3-julia-bla-20260923\RESULT.md`.
