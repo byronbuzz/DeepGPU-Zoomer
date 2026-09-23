@@ -4,6 +4,7 @@ import { PLACES } from '../src/places';
 import Decimal from 'decimal.js';
 import {depthLabel,iterationFromSlider,iterationToSlider} from '../src/state';
 import {CAPPED,DEFAULT_COLORS,FORMULAS,PRESETS,cycleFromSlider,cycleToSlider,decodeColors,encodeColors,needsEndpoints,validateColors} from '../src/logic/colorSettings';
+import {paletteStops,withStops} from '../src/palette-editor';
 
 describe('exact view state',()=>{
   it('uses the released Home iteration default',()=>{
@@ -45,7 +46,24 @@ describe('exact view state',()=>{
     for(const id of [2,3,4,5,6,7,8,9,10])expect(needsEndpoints({...c,formula:id,capped:0,effect:0})).toBe(true);
     for(const id of [0,1,11,12,13,14])expect(needsEndpoints({...c,formula:id,capped:0,effect:0})).toBe(false);
     expect(CAPPED).toHaveLength(13);
-    expect(PRESETS.filter(p=>p.name.includes('adapted'))).toHaveLength(10);
+    expect(PRESETS.every(p=>!p.name.includes('adapted'))).toBe(true);
+  });
+  it('defaults old colour records to zero hue and roundtrips a full-turn hue setting',()=>{
+    expect(DEFAULT_COLORS.hueRotation).toBe(0);
+    const legacy=encodeColors(DEFAULT_COLORS).split('.').slice(0,-1).join('.');
+    expect(decodeColors(legacy)?.hueRotation).toBe(0);
+    for(const hueRotation of [0,120,360]){
+      const colors=validateColors({...DEFAULT_COLORS,hueRotation});
+      expect(decodeColors(encodeColors(colors))).toEqual(colors);
+    }
+    expect(()=>validateColors({...DEFAULT_COLORS,hueRotation:-1})).toThrow();
+    expect(()=>validateColors({...DEFAULT_COLORS,hueRotation:361})).toThrow();
+  });
+  it('preserves hue rotation when palette stops are edited',()=>{
+    const colors=validateColors({...DEFAULT_COLORS,hueRotation:135});
+    const stops=paletteStops(colors);
+    stops[0].color='#123456';
+    expect(withStops(colors,stops).hueRotation).toBe(135);
   });
   it('maps colour spacing exponentially without losing endpoints',()=>{
     expect(DEFAULT_COLORS.cycle).toBe(64);

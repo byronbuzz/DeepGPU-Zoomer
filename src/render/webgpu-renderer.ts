@@ -1170,7 +1170,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     colors.stops.slice(0,MAX_STOPS).forEach((stop,i)=>{
       stopData.set(hexToRgb(stop),i*4);stopData[i*4+3]=stopPositions(colors)[i];
     });
-    u32[84]=colors.formula??0;u32[85]=colors.effect??0;u32[86]=colors.capped??0;u32[87]=colors.repeating===false?0:1;u32[88]=retainEndpoints?1:0;
+    u32[84]=colors.formula??0;u32[85]=colors.effect??0;u32[86]=colors.capped??0;u32[87]=colors.repeating===false?0:1;u32[88]=retainEndpoints?1:0;f32[89]=colors.hueRotation/360;
     u32[9]=colors.palette;f32[10]=Math.max(1,colors.cycle);f32[11]=colors.offset;u32[12]=colors.mapping;u32[13]=colors.mirror?1:0;u32[14]=colors.smooth?1:0;
     const interior=hexToRgb(colors.interior);f32[16]=interior[0];f32[17]=interior[1];f32[18]=interior[2];u32[19]=Math.max(1,Math.min(MAX_STOPS,colors.stops.length));
     u32[22]=colors.mode;f32[23]=colors.colorDensity;f32[24]=colors.colorPhase;f32[25]=colors.slopeDepth;

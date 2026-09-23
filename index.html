@@ -30,11 +30,7 @@
       <label>Colour spacing <output id="cycle-value">64</output><input id="cycle" type="range" min="0" max="1" value="0.5" step="0.001"></label>
       <label>Palette offset<input id="color-offset" type="range" min="0" max="1" step="0.001"></label>
       <label>Preset<select id="palette"></select></label>
-      <label>Colouring formula<select id="color-formula"></select></label>
-      <label>Effect<select id="color-effect"></select></label>
-      <label>Capped samples<select id="capped-mode"></select></label>
-      <p class="help compact">Capped samples have not escaped within the iteration limit; they are not proven interior.</p>
-      <details id="edit-palette"><summary>Edit palette</summary>
+      <details id="edit-palette"><summary>Edit Palette</summary>
         <div id="palette-strip" aria-label="Palette strip: click to add a stop"></div>
         <label class="check stop-lock"><input id="stop-lock" type="checkbox"> Lock this stop for randomisation <span id="selected-stop-label"></span></label>
         <p class="help compact">Click the strip to add. Drag a stop to move; arrow keys adjust it. Click a stop to edit its colour.</p>
@@ -55,6 +51,10 @@
         <label>Ambient<input id="ambient-light" type="range" min="0" max="2" step="0.01"></label>
         <label>Highlights<input id="specular-strength" type="range" min="0" max="3" step="0.01"></label>
       </details>
+      <label>Hue rotation <output id="hue-value">0°</output><input id="hue-rotation" type="range" min="0" max="360" step="1" value="0"></label>
+      <label>Colouring formula<select id="color-formula"></select></label>
+      <label>Effect<select id="color-effect"></select></label>
+      <label>Capped samples<select id="capped-mode"></select></label>
     </div>
     <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
       <form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label>Vertical span<input id="span" spellcheck="false"></label><button>Go to coordinates</button></form>

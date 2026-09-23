@@ -31,6 +31,7 @@ describe("completed appearance upgrades", () => {
     expect(appearanceUpgradeCompatible(frame, phaseWeave, Method.Plain, 1)).toBe(false);
     expect(appearanceUpgradeCompatible(frame, phaseWeave, Method.Hdr, 2)).toBe(false);
     expect(appearanceUpgradeCompatible({ ...frame, proxy: true }, phaseWeave, Method.Hdr, 1)).toBe(false);
+    expect(appearanceUpgradeCompatible(frame, { ...request, colors: { ...request.colors, hueRotation: 120 } }, Method.Hdr, 1)).toBe(true);
   });
 
   it("requires the exact Julia constant", () => {

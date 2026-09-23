@@ -52,15 +52,17 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   immediately. New palette edits are seamless repeating gradients and retain
   2–8 stops, stop-bound randomisation locks, reversal, even spacing and
   undo/redo. Older non-repeating saved colours still load. Ten compact presets
-  are visibly labelled as adaptations of documented Matplotlib colormaps.
+  use adapted colours from documented Matplotlib colormaps.
 - Colour mappings retain the original five IDs for smooth escape, classic
   bands, XaoS binary/colour decomposition and biomorphs. Ten additional
   formulas use escape scalars or honestly labelled final endpoint coordinates.
   Endpoint-dependent mappings acquire their missing channels once; scalar-only
   formula changes reuse the field. Colour spacing uses an exponential slider;
+  whole-image Hue rotation recolours palette, effects and capped samples without
+  changing the numerical field, and old links default to zero rotation;
   distance lighting explicitly opts into derivative computation. Capped samples
   default to black, with twelve optional low-cost final-orbit patterns. Five
-  are labelled XaoS endpoint adaptations; the remaining patterns are original.
+  adapt XaoS endpoint ideas; the remaining patterns are original.
   Capped is not proven interior.
 - Places includes whole-set, Seahorse Valley, period-1215 and structured
   Mandelbrot/Julia 1e50 views. Moving away clears the preset label.

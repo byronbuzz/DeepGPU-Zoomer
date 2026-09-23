@@ -70,6 +70,7 @@ struct Uniforms {
     cappedPattern: u32,
     repeating: u32,
     retainEndpoints: u32,
+    hueRotation: f32,
 };
 
 // Raw worker output is consumed only by the one-time reference decode pass.
@@ -526,6 +527,28 @@ fn toLinear(c: vec3<f32>) -> vec3<f32> {
     return pow(max(c, vec3<f32>(0.0)), vec3<f32>(2.2));
 }
 
+// Presentation-only hue shift after palette, effects, capped colour and lighting.
+fn rotateHue(c: vec3<f32>) -> vec3<f32> {
+    if (u.hueRotation <= 0.0 || u.hueRotation >= 1.0) { return c; }
+    let high = max(c.r, max(c.g, c.b));
+    let low = min(c.r, min(c.g, c.b));
+    let chroma = high - low;
+    if (chroma <= 0.000001) { return c; }
+    var hue: f32;
+    if (high == c.r) { hue = (c.g - c.b) / chroma; }
+    else if (high == c.g) { hue = (c.b - c.r) / chroma + 2.0; }
+    else { hue = (c.r - c.g) / chroma + 4.0; }
+    let sector = fract(hue / 6.0 + u.hueRotation) * 6.0;
+    let wedge = chroma * (1.0 - abs(sector - 2.0 * floor(sector / 2.0) - 1.0));
+    let base = vec3<f32>(low);
+    if (sector < 1.0) { return base + vec3<f32>(chroma, wedge, 0.0); }
+    if (sector < 2.0) { return base + vec3<f32>(wedge, chroma, 0.0); }
+    if (sector < 3.0) { return base + vec3<f32>(0.0, chroma, wedge); }
+    if (sector < 4.0) { return base + vec3<f32>(0.0, wedge, chroma); }
+    if (sector < 5.0) { return base + vec3<f32>(wedge, 0.0, chroma); }
+    return base + vec3<f32>(chroma, 0.0, wedge);
+}
+
 /**
  * Colour for one sample, with the pseudo-3D relief.
  *
@@ -754,5 +777,5 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Encode out of linear light at the very end.
     let encoded = pow(max(linearColour, vec3<f32>(0.0)), vec3<f32>(u.invGamma));
     textureStore(output, vec2<i32>(pixel),
-                 vec4<f32>(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0)), density));
+                 vec4<f32>(rotateHue(clamp(encoded, vec3<f32>(0.0), vec3<f32>(1.0))), density));
 }

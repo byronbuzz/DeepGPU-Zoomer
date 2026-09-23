@@ -66,6 +66,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     el<HTMLSelectElement>('color-formula').value=String(c.formula??0);el<HTMLSelectElement>('color-effect').value=String(c.effect??0);el<HTMLSelectElement>('capped-mode').value=String(c.capped??0);
     el<HTMLInputElement>('distance-mode').checked=c.mode===1;
     el<HTMLInputElement>('cycle').value=String(cycleToSlider(c.cycle));el('cycle-value').textContent=c.cycle<100?c.cycle.toFixed(1):Math.round(c.cycle).toString();
+    el<HTMLInputElement>('hue-rotation').value=String(c.hueRotation);el('hue-value').textContent=`${c.hueRotation}°`;
     for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).value=String(c[key]);
     el<HTMLInputElement>('post-antialias').checked=c.postAntialias===true;
   }
@@ -80,7 +81,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   el('stop-delete').onclick=()=>{if(get().stops.length>2)update(s=>s.filter((_,i)=>i!==selected));};
   el('palette-reverse').onclick=()=>update(s=>s.map(v=>({...v,position:1-v.position})));
   el('palette-even').onclick=()=>update(s=>s.map((v,i)=>({...v,position:i/s.length})));
-  el<HTMLSelectElement>('palette').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value==='')return;const p=PRESETS[Number(value)];commit({...get(),palette:5,repeating:true,stops:[...p.stops],positions:undefined,locks:undefined});};
+  el<HTMLSelectElement>('palette').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value==='')return;const p=PRESETS[Number(value)];commit({...get(),palette:5,repeating:true,stops:[...p.stops],positions:undefined,locks:undefined,hueRotation:0});};
   for(const [id,all] of [['random-colors',false],['random-palette',true]] as const)el(id).onclick=()=>commit(randomizePalette(get(),all,el<HTMLSelectElement>('random-style').value==='harmonious'));
   el('palette-undo').onclick=()=>{const c=undo.pop();if(c){redo.push(validateColors(get()));commit(c,false);}};
   el('palette-redo').onclick=()=>{const c=redo.pop();if(c){undo.push(validateColors(get()));commit(c,false);}};
@@ -88,6 +89,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   el<HTMLInputElement>('distance-mode').onchange=e=>commit({...get(),mode:(e.target as HTMLInputElement).checked?1:0});
   el<HTMLInputElement>('post-antialias').onchange=e=>commit({...get(),postAntialias:(e.target as HTMLInputElement).checked});
   el<HTMLInputElement>('cycle').oninput=e=>{const value=cycleFromSlider(Number((e.target as HTMLInputElement).value));change({...get(),cycle:value});el('cycle-value').textContent=value<100?value.toFixed(1):Math.round(value).toString();};
+  el<HTMLInputElement>('hue-rotation').oninput=e=>{const hueRotation=Number((e.target as HTMLInputElement).value);change({...get(),hueRotation});el('hue-value').textContent=`${hueRotation}°`;};
   for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).oninput=e=>{change({...get(),[key]:Number((e.target as HTMLInputElement).value)});};
   sync();return {sync,reset(){selected=0;dragging=false;undo.length=0;redo.length=0;closePicker();sync();}};
 }
