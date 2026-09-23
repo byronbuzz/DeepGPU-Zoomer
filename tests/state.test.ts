@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Camera, HOME, encodeView, decodeView, validateView } from '../src/state';
+import { Camera, HOME, homePosition, encodeView, decodeView, validateView } from '../src/state';
 import { PLACES } from '../src/places';
 import Decimal from 'decimal.js';
 import {depthLabel,iterationFromSlider,iterationToSlider} from '../src/state';
@@ -8,6 +8,14 @@ import {CAPPED,DEFAULT_COLORS,FORMULAS,PRESETS,cycleFromSlider,cycleToSlider,dec
 describe('exact view state',()=>{
   it('uses the released Home iteration default',()=>{
     expect(HOME.iterations).toBe(5000);
+  });
+  it('moves Home coordinates without changing a customised family or controls',()=>{
+    const appearance=validateColors({...DEFAULT_COLORS,cycle:317,effect:8,postAntialias:true});
+    for(const family of ['mandelbrot','julia'] as const){
+      const current={...HOME,family,x:'1.25',y:'-.75',span:'0.001',jx:'-.2',jy:'.3',iterations:7321,appearance};
+      expect(homePosition(current)).toEqual({...current,x:family==='julia'?'0':'-0.6',y:'0',span:'2.8'});
+      expect(depthLabel(new Decimal(homePosition(current).span))).toBe('10^0.00×');
+    }
   });
   it('formats depth without overflow and maps continuous limits to exact integers',()=>{
     expect(depthLabel(new Decimal('2.8'))).toBe('10^0.00×');

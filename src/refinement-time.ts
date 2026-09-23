@@ -13,7 +13,7 @@ export class RefinementTimer {
   complete(now:number){if(!this.heldChanged&&this.completedAt===null)this.completedAt=now;}
   halt(now:number){if(this.completedAt===null)this.completedAt=now;this.heldChanged=false;}
   text(now:number){
-    if(this.heldChanged)return 'Time taken: waiting for stationary';
+    if(this.heldChanged)return 'Time taken: 00:00.00';
     const centiseconds=Math.floor(Math.max(0,(this.completedAt??now)-this.startedAt)/10);
     const seconds=Math.floor(centiseconds/100),minutes=Math.floor(seconds/60),hours=Math.floor(minutes/60);
     const pad=(n:number)=>String(n).padStart(2,'0');

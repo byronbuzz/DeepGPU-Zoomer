@@ -156,8 +156,11 @@ trades some numerical throughput for responsiveness; eight milliseconds is a
 sizing target, not a GPU latency guarantee. Input state does not select a different
 batch policy.
 The Julia preview can run between main-stream batches.
-Orbit pipelines compile
-asynchronously. At deep Mandelbrot scales, every eligible sampling density uses
+The initial Home view prepares only its direct calculation, shading, sample
+reuse and presentation pipelines; other calculation variants and completed-image
+antialiasing compile asynchronously on first demand. The small retained-image
+pipelines remain ready for synchronous Stop/Refresh capture. At deep Mandelbrot
+scales, every eligible sampling density uses
 one standard linear BLA table to skip reference ranges within its existing
 radius policy. Ordinary Wide recurrence is the local fallback when a skip is
 inapplicable, and changing density does not force recomputation of an already
@@ -293,7 +296,8 @@ Further candidates require evidence before adoption: workgroup, subgroup,
 register, temporary-storage and submission efficiencies; redundant spatial
 dispatch, boundary/solid filling and adaptive subdivision; a retained-image
 row/column experiment; shared series-prefix jumps beyond BLA including their
-preparation cost; independent CPU/GPU preparation or pixel overlap, perhaps
+preparation cost (no separate change is justified without measured residual
+prefix work beyond current BLA); independent CPU/GPU preparation or pixel overlap, perhaps
 WASM f64/SIMD rather than idle-core parallelism; periodicity beyond Direct,
 reference choice beyond the domain-bound fix, and arithmetic cheaper than the
 accepted two-word BLA jump. Park tolerance loosening, logarithm/comparator
@@ -301,9 +305,15 @@ rewrites, the three-step alignment bridge, wholesale arithmetic replacement,
 and another broad profiler campaign. No fixed 10–15% presentation reserve has
 been established.
 
-The main action row is Refresh/Stop. The separate Julia preview toggle remains
-available by mouse/touch; J/M and the family selector retain their previous
-Julia open/return behaviour. Stop also cancels optional preview and colour-data
+Main begins with Zoom speed and Iteration limit, then retains the Refresh/Stop
+action row. J/M and the preview panel's own controls
+retain Julia open/return behaviour; Main has no separate preview button or
+constant form. Home changes only position and scale for the active family to
+the displayed 10^0 view; Full Reset restores defaults. The footer retains a
+numeric Time taken during held navigation, starting at release; wheel timing
+still starts at the last actual wheel change. The controls panel defaults to
+286 CSS pixels wide and resizes from its left, right and bottom edges.
+Stop also cancels optional preview and colour-data
 preparation. An appearance edit that needs missing data holds the previous
 valid image until Refresh, navigation or a numerical-setting change.
 
@@ -312,9 +322,10 @@ inexpensive: retain 100% and frozen time with a separate Preparing colour data
 status, let Stop halt it, and prioritize navigation.
 
 Approved later UI work: editable combined location selector/name with exact
-locations and links retained, and collision confirmation; reorganize Colouring
-as Preset, Edit Palette, Lighting, Colour spacing, Palette offset, Hue rotation,
-then formula/effect/capped selectors. Hue rotation affects the whole output
+locations and links retained, and collision confirmation; retain Colour spacing
+and Palette offset at the top of Colouring during later reorganization, followed
+by Preset, Edit Palette, Lighting, Hue rotation and the formula/effect/capped
+selectors. Hue rotation affects the whole output
 including capped/effect colours without mutating palette points; presets reset
 rotation, individual palette edits preserve it. More formula/effect ideas need
 their exact approved list recovered first. Exclude solarised, duotone, halftone

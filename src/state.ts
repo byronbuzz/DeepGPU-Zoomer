@@ -8,6 +8,9 @@ export function iterationFromSlider(value:number){return Math.round(Math.pow(MAX
 export function iterationToSlider(value:number){return Math.log(value)/Math.log(MAX_ITERATIONS);}
 export function depthLabel(span:Decimal){const ratio=new Decimal(2.8).div(span);return `10^${(ratio.e+Math.log10(Number(ratio.toExponential(14).split('e')[0]))).toFixed(2)}×`;}
 export const HOME: SavedView = {family:'mandelbrot',x:'-0.6',y:'0',span:'2.8',jx:'-0.8',jy:'0.156',iterations:5000};
+export function homePosition(view:SavedView):SavedView {
+  return {...view,x:view.family==='julia'?'0':HOME.x,y:'0',span:HOME.span};
+}
 export function validateView(value: unknown): SavedView {
   const v = value as SavedView;
   if (!v || !['mandelbrot','julia'].includes(v.family)) throw Error('Invalid fractal');

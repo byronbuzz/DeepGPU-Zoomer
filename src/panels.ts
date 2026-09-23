@@ -18,13 +18,51 @@ export function setupPanels():PanelController{
     handle.addEventListener('click',e=>{if(!suppressClick)return;suppressClick=false;e.preventDefault();e.stopPropagation();},true);
     handle.addEventListener('pointerdown',e=>{const target=e.target as HTMLElement,tab=!!target.closest('[role=tab]');if(e.button!==0||(!tab&&target.closest('button,input,select')))return;
       const r=p.getBoundingClientRect();start={x:e.clientX,y:e.clientY,px:r.x,py:r.y,tab,pointerId:e.pointerId};if(!tab){handle.setPointerCapture(e.pointerId);e.preventDefault();}});
-    window.addEventListener('pointermove',e=>{if(!start)return;const dx=e.clientX-start.x,dy=e.clientY-start.y;if(start.tab&&Math.hypot(dx,dy)<4)return;if(start.tab){suppressClick=true;if(!handle.hasPointerCapture(start.pointerId))handle.setPointerCapture(start.pointerId);}saved[p.id]=clamp(p,start.px+dx,start.py+dy);});
+    window.addEventListener('pointermove',e=>{if(!start)return;const dx=e.clientX-start.x,dy=e.clientY-start.y;if(start.tab&&Math.hypot(dx,dy)<4)return;if(start.tab){suppressClick=true;if(!handle.hasPointerCapture(start.pointerId))handle.setPointerCapture(start.pointerId);}saved[p.id]={...saved[p.id],...clamp(p,start.px+dx,start.py+dy)};});
     const end=(e:PointerEvent)=>{if(!start)return;start=undefined;persist();if(e.type==='pointercancel')suppressClick=false;else setTimeout(()=>{suppressClick=false;},0);};window.addEventListener('pointerup',end);window.addEventListener('pointercancel',end);
-    handle.addEventListener('keydown',e=>{const d:Record<string,number[]>={ArrowLeft:[-10,0],ArrowRight:[10,0],ArrowUp:[0,-10],ArrowDown:[0,10]};if(e.target!==handle||!d[e.key])return;e.preventDefault();const r=p.getBoundingClientRect();saved[p.id]=clamp(p,r.x+d[e.key][0],r.y+d[e.key][1]);persist();});
+    handle.addEventListener('keydown',e=>{const d:Record<string,number[]>={ArrowLeft:[-10,0],ArrowRight:[10,0],ArrowUp:[0,-10],ArrowDown:[0,10]};if(e.target!==handle||!d[e.key])return;e.preventDefault();const r=p.getBoundingClientRect();saved[p.id]={...saved[p.id],...clamp(p,r.x+d[e.key][0],r.y+d[e.key][1])};persist();});
     const size=saved[p.id];if(size?.width&&p.id==='controls'){p.style.width=size.width+'px';p.style.height=(size.height??p.offsetHeight)+'px';}
-    let resizeReady=false;
-    new ResizeObserver(()=>{if(!p.hidden){const r=p.getBoundingClientRect();const pos=clamp(p,saved[p.id]?.x??r.x,saved[p.id]?.y??r.y);if(resizeReady&&p.id==='controls'){saved[p.id]={...pos,width:r.width,height:r.height};persist();}resizeReady=true;}}).observe(p);
+    new ResizeObserver(()=>{if(!p.hidden){const r=p.getBoundingClientRect();clamp(p,saved[p.id]?.x??r.x,saved[p.id]?.y??r.y);}}).observe(p);
   }
+  const controls=document.getElementById('controls')!;
+  const limit=(value:number,minimum:number,maximum:number)=>Math.max(minimum,Math.min(maximum,value));
+  const resizeControls=(edge:string,r:DOMRect,delta:number)=>{
+    const minWidth=Math.min(286,Math.max(1,innerWidth-16));
+    const minHeight=Math.min(280,Math.max(1,innerHeight-76));
+    let x=r.x,width=r.width,height=r.height;
+    if(edge==='left'){
+      x=limit(r.x+delta,8,r.right-minWidth);
+      width=r.right-x;
+    }else if(edge==='right'){
+      width=limit(r.width+delta,minWidth,Math.max(minWidth,innerWidth-r.x-8));
+    }else{
+      height=limit(r.height+delta,minHeight,Math.max(minHeight,innerHeight-r.y-8));
+    }
+    controls.style.left=x+'px';controls.style.top=r.y+'px';controls.style.right='auto';controls.style.bottom='auto';
+    controls.style.width=width+'px';controls.style.height=height+'px';
+    saved[controls.id]={x,y:r.y,width,height};
+  };
+  controls.querySelectorAll<HTMLButtonElement>('[data-resize]').forEach(edgeHandle=>{
+    const edge=edgeHandle.dataset.resize!;
+    let start:{rect:DOMRect;pointerX:number;pointerY:number}|undefined;
+    edgeHandle.addEventListener('pointerdown',event=>{
+      if(event.button!==0)return;
+      event.preventDefault();event.stopPropagation();
+      start={rect:controls.getBoundingClientRect(),pointerX:event.clientX,pointerY:event.clientY};
+      edgeHandle.setPointerCapture(event.pointerId);
+    });
+    edgeHandle.addEventListener('pointermove',event=>{
+      if(!start)return;
+      resizeControls(edge,start.rect,edge==='bottom'?event.clientY-start.pointerY:event.clientX-start.pointerX);
+    });
+    const end=()=>{if(start){start=undefined;persist();}};
+    edgeHandle.addEventListener('pointerup',end);edgeHandle.addEventListener('pointercancel',end);
+    edgeHandle.addEventListener('keydown',event=>{
+      const direction=edge==='bottom'?event.key==='ArrowDown'?1:event.key==='ArrowUp'?-1:0:event.key==='ArrowRight'?1:event.key==='ArrowLeft'?-1:0;
+      if(!direction)return;
+      event.preventDefault();resizeControls(edge,controls.getBoundingClientRect(),direction*10);persist();
+    });
+  });
   const restore=()=>panels.forEach(p=>{if(!p.hidden){const r=p.getBoundingClientRect();clamp(p,saved[p.id]?.x??r.x,saved[p.id]?.y??r.y);}});
   window.addEventListener('resize',restore);restore();
   const input=document.getElementById('panel-opacity') as HTMLInputElement;

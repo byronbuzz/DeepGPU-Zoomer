@@ -298,6 +298,11 @@ export class WebGpuRenderer {
   private retainPipeline: GPURenderPipeline | null = null;
   private retainFloatPipeline: GPURenderPipeline | null = null;
   private antialiasPipeline: GPURenderPipeline | null = null;
+  private renderModule: GPUShaderModule | null = null;
+  private reuseModule: GPUShaderModule | null = null;
+  private blitModule: GPUShaderModule | null = null;
+  private pipelineLayout: GPUPipelineLayout | null = null;
+  private pendingPipelines = new Map<string, Promise<void>>();
   private antialiasTexture: GPUTexture | null = null;
   private spareHistory: GPUTexture | null = null;
   private spareAntialias: GPUTexture | null = null;
@@ -477,13 +482,11 @@ export class WebGpuRenderer {
 
   async init() {
     const { device } = this.ctx;
-    const reuseModule = await compileShader(device, reuseSource, "sample-reuse");
-    this.reusePipeline = device.createComputePipeline({ layout: "auto", compute: { module: reuseModule, entryPoint: "remap" } });
+    this.reuseModule = await compileShader(device, reuseSource, "sample-reuse");
+    await this.ensureComputePipeline("reuse");
     this.reuseUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    const renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, wideSource].join("\n"), "perturbation");
-    this.referenceDecodePipeline=device.createComputePipeline({label:"reference-decode",layout:"auto",compute:{module:renderModule,entryPoint:"decodeReferenceOrbit"}});
-    if(import.meta.env.DEV)this.referenceVerifyPipeline=device.createComputePipeline({label:"reference-decode-verify",layout:"auto",compute:{module:renderModule,entryPoint:"verifyDecodedReferenceOrbit"}});
+    this.renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, wideSource].join("\n"), "perturbation");
 
     // Explicit rather than "auto": the two entry points touch different
     // subsets of the bindings, and an auto layout would derive a different
@@ -512,47 +515,14 @@ export class WebGpuRenderer {
       ],
     });
     this.bindLayout = bindLayout;
-    const pipelineLayout = device.createPipelineLayout({
+    this.pipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [bindLayout],
     });
 
-    this.directPipeline = device.createComputePipeline({
-      label: "direct-compute",
-      layout: pipelineLayout,
-      compute: { module: renderModule, entryPoint: "compute", constants: { DIRECT: 1 } },
-    });
-    this.renderPipeline = device.createComputePipeline({
-      label: "perturbation-compute",
-      layout: pipelineLayout,
-      compute: { module: renderModule, entryPoint: "compute" },
-    });
-    this.approxPipeline = device.createComputePipeline({
-      label: "approximation-compute",
-      layout: pipelineLayout,
-      compute: { module: renderModule, entryPoint: "compute", constants: { APPROX: 1 } },
-    });
-    this.juliaPipeline = device.createComputePipeline({
-      label: "julia-compute",
-      layout: pipelineLayout,
-      compute: { module: renderModule, entryPoint: "compute", constants: { JULIA: 1 } },
-    });
-    this.juliaApproxPipeline = device.createComputePipeline({
-      label: "julia-approximation-compute",
-      layout: pipelineLayout,
-      compute: { module: renderModule, entryPoint: "compute", constants: { JULIA: 1, APPROX: 1 } },
-    });
-    this.shadePipeline = device.createComputePipeline({
-      label: "perturbation-shade",
-      layout: pipelineLayout,
-      compute: { module: renderModule, entryPoint: "shadePass" },
-    });
-    this.distanceToIterationPipeline = device.createComputePipeline({
-      label: "distance-to-iteration-field",
-      layout: pipelineLayout,
-      compute: { module: renderModule, entryPoint: "distanceToIterationField" },
-    });
+    await this.ensureComputePipeline("direct");
+    await this.ensureComputePipeline("shade");
 
-    const blitModule = await compileShader(
+    this.blitModule = await compileShader(
       device,
       `
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -615,17 +585,51 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 `,
       "blit"
     );
-    const blitDescriptor = (format: GPUTextureFormat): GPURenderPipelineDescriptor => ({
-      label: "blit", layout: "auto",
-      vertex: { module: blitModule, entryPoint: "vs" },
-      fragment: { module: blitModule, entryPoint: "fs", targets: [{ format }] },
-      primitive: { topology: "triangle-strip" },
+    await this.ensureRenderPipeline("blit");
+    await this.ensureRenderPipeline("retain");
+    await this.ensureRenderPipeline("retainFloat");
+  }
+
+  private async oncePipeline(key:string,ready:()=>boolean,build:()=>Promise<void>) {
+    if(ready())return;
+    let pending=this.pendingPipelines.get(key);
+    if(!pending){
+      pending=build();this.pendingPipelines.set(key,pending);
+      void pending.finally(()=>{if(this.pendingPipelines.get(key)===pending)this.pendingPipelines.delete(key);}).catch(()=>{});
+    }
+    await pending;
+    if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+  }
+
+  private async ensureComputePipeline(kind:'reuse'|'direct'|'plain'|'approx'|'julia'|'juliaApprox'|'shade'|'decode'|'verify'|'distance') {
+    const slot={reuse:'reusePipeline',direct:'directPipeline',plain:'renderPipeline',approx:'approxPipeline',julia:'juliaPipeline',juliaApprox:'juliaApproxPipeline',shade:'shadePipeline',decode:'referenceDecodePipeline',verify:'referenceVerifyPipeline',distance:'distanceToIterationPipeline'} as const;
+    const field=slot[kind];
+    await this.oncePipeline(kind,()=>!!this[field],async()=>{
+      const module=kind==='reuse'?this.reuseModule:this.renderModule;
+      if(!module)throw Error('Shader module is unavailable.');
+      const names={reuse:'sample-reuse',direct:'direct-compute',plain:'perturbation-compute',approx:'approximation-compute',julia:'julia-compute',juliaApprox:'julia-approximation-compute',shade:'perturbation-shade',decode:'reference-decode',verify:'reference-decode-verify',distance:'distance-to-iteration-field'} as const;
+      const entryPoint=kind==='reuse'?'remap':kind==='shade'?'shadePass':kind==='decode'?'decodeReferenceOrbit':kind==='verify'?'verifyDecodedReferenceOrbit':kind==='distance'?'distanceToIterationField':'compute';
+      const constants:Record<string,number>|undefined=kind==='direct'?{DIRECT:1}:kind==='approx'?{APPROX:1}:kind==='julia'?{JULIA:1}:kind==='juliaApprox'?{JULIA:1,APPROX:1}:undefined;
+      const pipeline=await this.ctx.device.createComputePipelineAsync({label:names[kind],layout:kind==='reuse'||kind==='decode'||kind==='verify'?'auto':this.pipelineLayout!,compute:{module,entryPoint,...(constants?{constants}:{})}});
+      if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+      (this[field] as GPUComputePipeline|null)=pipeline;
     });
-    this.blitPipeline = device.createRenderPipeline(blitDescriptor(this.format));
-    this.retainPipeline = device.createRenderPipeline(blitDescriptor("rgba8unorm"));
-    this.retainFloatPipeline = device.createRenderPipeline(blitDescriptor("rgba16float"));
-    const antialiasModule=await compileShader(device,antialiasSource,'completed-image-antialias');
-    this.antialiasPipeline=device.createRenderPipeline({label:'completed-image-antialias',layout:'auto',vertex:{module:antialiasModule,entryPoint:'vs'},fragment:{module:antialiasModule,entryPoint:'fs',targets:[{format:'rgba8unorm-srgb'}]},primitive:{topology:'triangle-strip'}});
+    return this[field]!;
+  }
+
+  private async ensureRenderPipeline(kind:'blit'|'retain'|'retainFloat'|'antialias') {
+    const field=kind==='blit'?'blitPipeline':kind==='retain'?'retainPipeline':kind==='retainFloat'?'retainFloatPipeline':'antialiasPipeline';
+    await this.oncePipeline(kind,()=>!!this[field],async()=>{
+      const device=this.ctx.device;
+      const module=kind==='antialias'?await compileShader(device,antialiasSource,'completed-image-antialias'):this.blitModule;
+      if(!module)throw Error('Presentation shader is unavailable.');
+      const format:GPUTextureFormat=kind==='blit'?this.format:kind==='retain'?'rgba8unorm':kind==='retainFloat'?'rgba16float':'rgba8unorm-srgb';
+      const descriptor:GPURenderPipelineDescriptor={label:kind,layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'fs',targets:[{format}]},primitive:{topology:'triangle-strip'}};
+      const pipeline=await device.createRenderPipelineAsync(descriptor);
+      if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+      (this[field] as GPURenderPipeline|null)=pipeline;
+    });
+    return this[field]!;
   }
 
   private referenceDemand(request: RenderRequest, limbs: number): ReferenceDemand {
@@ -687,7 +691,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       }
       const samples = new Float32Array(orbit.buffer);
       if (samples.length !== orbit.length * 20) throw new Error("Reference worker returned an invalid sample buffer");
-      if(!this.referenceDecodePipeline)throw Error('Reference decode pipeline is unavailable.');
+      const pipelineStarted=performance.now();
+      await this.ensureComputePipeline('decode');
+      if(import.meta.env.DEV)await this.ensureComputePipeline('verify');
+      this.pipelineWaitMs+=performance.now()-pipelineStarted;
+      if(this.pendingReferenceDemand!==demand||this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException('Superseded reference','AbortError');
       const device=this.ctx.device;
       let raw:GPUBuffer|undefined,replacement:GPUBuffer|undefined,mismatches:GPUBuffer|undefined;
       try{
@@ -1216,10 +1224,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const descriptor=this.fieldDescriptor,view=this.fieldView,family=request.family??"mandelbrot";
     const constant=family==="julia"?`${request.juliaX},${request.juliaY}`:"";
     if(!this.fieldComplete||!this.fieldUniforms||!this.fieldStats||!descriptor||!view||!this.target||
-        !this.fieldBuffer||!this.endpointBuffer||!this.distanceToIterationPipeline||request.colors.mode!==0||
+        !this.fieldBuffer||!this.endpointBuffer||request.colors.mode!==0||
         descriptor.mode!==1||!descriptor.retainEndpoints||!this.retainEndpoints||!this.sameView(view,request)||
         descriptor.family!==family||descriptor.constant!==constant||descriptor.maxIterations!==request.maxIterations||
         descriptor.grid!==grid||descriptor.method!==method||descriptor.useApprox!==(request.useApprox===true))return false;
+    await this.ensureComputePipeline('distance');
+    if(this.deviceLost||request.isCurrent&&!request.isCurrent())return false;
     const uniforms=this.fieldUniforms.slice(0),u32=new Uint32Array(uniforms);
     u32[22]=0;u32[26]=request.height;u32[35]=grid;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;u32[55]=1;
     const bind=this.createRenderBind(),device=this.ctx.device;
@@ -1252,6 +1262,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const timingSamples:(TimingSample|undefined)[]=[];
     this.finalizing=true;
     try{
+      if(colors.postAntialias)await this.ensureRenderPipeline('antialias');
+      if(this.deviceLost||request.isCurrent&&!request.isCurrent())return null;
       candidate=this.candidateTexture(request.width,request.height);
       if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);
       await checkedGpu(device,()=>{
@@ -1453,7 +1465,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         reusedSamples: request.width * request.height, orbitMs: 0, pipelineWaitMs: 0, tableMs: 0, renderMs: 0,
         skippedIterations:0,plainIterations:0,approxSteps:0,rebases:0,skipRatio:0 };
     }
-    if (!this.renderPipeline || !this.blitPipeline) {
+    if (!this.directPipeline || !this.shadePipeline || !this.reusePipeline || !this.blitPipeline) {
       throw new Error("WebGpuRenderer.init() was not awaited");
     }
 
@@ -1667,6 +1679,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (this.batchCostKey!==batchCostKey) { this.batchCostKey=batchCostKey; this.batchMsPerSample=0; }
     if (!fieldStale) this.pending.reset(0,0);
     if (fieldStale) { this.pending.reset(request.width,request.height,previewStride,request.followView); this.determined=new CoverageRegions(); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
+    const pipelineKind=family==='julia'?approximationLevels>0?'juliaApprox':'julia':method===Method.Direct?'direct':approximationLevels>0?'approx':'plain';
+    const pipelineStarted=performance.now();
+    const calculatePipeline=await this.ensureComputePipeline(pipelineKind);
+    this.pipelineWaitMs+=performance.now()-pipelineStarted;
+    if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded pipeline','AbortError');
     const targetStarted=performance.now();
     const serviceAppearance=()=>{
       if(!request.followView)return true;
@@ -1707,8 +1724,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const encoder = device.createCommandEncoder({ label: "calculate-region" });
       const sample = this.timing.begin("calculate");
       const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
-      pass.setPipeline(family === "julia" ? approximationLevels > 0 ? this.juliaApproxPipeline! : this.juliaPipeline! : method === Method.Direct ? this.directPipeline! :
-        approximationLevels > 0 ? this.approxPipeline! : this.renderPipeline);
+      pass.setPipeline(calculatePipeline);
       pass.setBindGroup(0, bind);
       pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 8)); pass.end();
       this.timing.resolve(encoder, sample); timingSamples.push(sample);
@@ -1760,7 +1776,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined,published=false;
     let counters:Uint32Array;
     try{
-      counters=!completed&&(this.abortRequested||!request.isCurrent!())?new Uint32Array(12):new Uint32Array(await checkedGpu(device,()=>{
+      if(completed&&colors.postAntialias)await this.ensureRenderPipeline('antialias');
+      if(this.abortRequested||!request.isCurrent!()||this.deviceLost)completed=false;
+      counters=!completed&&(this.abortRequested||!request.isCurrent!()||this.deviceLost)?new Uint32Array(12):new Uint32Array(await checkedGpu(device,()=>{
         if(completed){
           candidate=this.candidateTexture(request.width,request.height);
           if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);

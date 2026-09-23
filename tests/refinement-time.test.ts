@@ -4,7 +4,7 @@ import {RefinementTimer} from '../src/refinement-time';
 describe('refinement time',()=>{
   it('starts at the held-navigation release and freezes at completed publication',()=>{
     const timer=new RefinementTimer(0);
-    timer.heldCameraChange();expect(timer.text(1200)).toContain('waiting for stationary');
+    timer.heldCameraChange();expect(timer.text(1200)).toBe('Time taken: 00:00.00');
     timer.complete(1250);timer.stopHeld(1400,false);
     expect(timer.text(3240)).toBe('Time taken: 00:01.84');
     timer.complete(3250);expect(timer.text(9000)).toBe('Time taken: 00:01.85');

@@ -3,7 +3,7 @@ import Decimal from 'decimal.js';
 import { acquireGpu, backingSize, type GpuContext } from './gpu/device';
 import { WebGpuRenderer, type RenderRequest, type RenderStats } from './render/webgpu-renderer';
 import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './logic/colorSettings';
-import { Camera, HOME, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
+import { Camera, HOME, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
 import { setupPanels } from './panels';
 import { setupPaletteEditor } from './palette-editor';
@@ -89,12 +89,9 @@ function syncPlace(){
 }
 function syncControls(){
   el<HTMLSelectElement>('family').value=view.family;
-  el<HTMLFormElement>('julia-form').hidden=view.family!=='julia';
   el<HTMLInputElement>('iteration-slider').value=String(iterationToSlider(view.iterations));
   syncIterationLabel();
-  el<HTMLInputElement>('jx').value=view.jx;el<HTMLInputElement>('jy').value=view.jy;
   el<HTMLTextAreaElement>('cx').value=camera.x.toString();el<HTMLTextAreaElement>('cy').value=camera.y.toString();el<HTMLInputElement>('span').value=camera.span.toString();
-  el<HTMLButtonElement>('julia-from').disabled=view.family==='julia';
   depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
   syncPlace();syncJuliaPreview();
   syncAppearance();
@@ -116,8 +113,6 @@ function changed(){stopped=false;refreshPending=false;refreshHolding=false;stopp
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
   el('julia-preview').hidden=!visible;
-  el('julia-from').setAttribute('aria-pressed',String(visible));
-  el('julia-from').textContent=visible?'Close Julia preview':'Julia preview · J';
   canvas.classList.toggle('selecting-julia',visible);
   el<HTMLButtonElement>('julia-promote').disabled=!selectedJulia;
 }
@@ -274,18 +269,16 @@ document.addEventListener('keydown',e=>{
 });
 window.addEventListener('blur',()=>{stop();persist();});document.addEventListener('visibilitychange',()=>{stop();persist();previousTime=0;});window.addEventListener('resize',()=>resize());
 el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelectElement).value as Family;if(family===view.family)return;if(family==='mandelbrot'&&juliaReturn){switchJuliaView();return;}if(family==='julia')juliaReturn=snapshot();load({...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations});};
-el('julia-from').onclick=toggleJuliaPreview;
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
 el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(String(err));}};
 el('refresh').onclick=refresh;
 el('stop-refinement').onclick=stopRefinement;
-el('reset').onclick=()=>load({...HOME,appearance:validateColors(colors)});
+el('reset').onclick=()=>load(homePosition(snapshot()));
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
 el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
 el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
 el<HTMLFormElement>('coordinates').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),x:el<HTMLInputElement>('cx').value,y:el<HTMLInputElement>('cy').value,span:el<HTMLInputElement>('span').value});}catch(err){message(String(err));}};
-el<HTMLFormElement>('julia-form').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),jx:el<HTMLInputElement>('jx').value,jy:el<HTMLInputElement>('jy').value});}catch(err){message(String(err));}};
 function savedOptions(){const select=el<HTMLSelectElement>('locations');select.replaceChildren(new Option('Choose a location…',''));const places=document.createElement('optgroup');places.label='Places';PLACES.forEach((p,i)=>places.append(new Option(p.name,`place:${i}`)));select.append(places);if(saved.length){const own=document.createElement('optgroup');own.label='Saved locations';saved.forEach((s,i)=>own.append(new Option(s.name,`saved:${i}`)));select.append(own);}}
 el('save').onclick=()=>{saved.push({name:el<HTMLInputElement>('location-name').value.trim()||`${view.family} ${saved.length+1}`,view:snapshot()});try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(saved));savedOptions();syncPlace();message('Location saved on this browser.',true);}catch{message('Local storage is unavailable. Copy a share link instead.');}};
 el<HTMLSelectElement>('locations').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value.startsWith('place:'))load(PLACES[Number(value.slice(6))]);else if(value.startsWith('saved:'))load(saved[Number(value.slice(6))].view);};
