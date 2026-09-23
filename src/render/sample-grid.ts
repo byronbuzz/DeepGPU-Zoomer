@@ -16,6 +16,26 @@ export interface SampleGridRemap {
   denominator: number;
 }
 
+export const RETAINED_WIDTH = 2560;
+export const RETAINED_HEIGHT = 1440;
+
+/** History only: never used to size the numerical field or the main image. */
+export function retainedLimits(deviceLimit = Infinity) {
+  const width = Math.min(RETAINED_WIDTH, Math.floor(deviceLimit));
+  const height = Math.min(RETAINED_HEIGHT, Math.floor(deviceLimit));
+  if (width < 8 || height < 8 || Number.isNaN(width) || Number.isNaN(height)) throw Error('Invalid retained image limits');
+  return { width, height };
+}
+
+/** A completed/rotated snapshot keeps its centre and uniform pixel scale. */
+export function boundedRetainedView(view: FrameView, deviceLimit = Infinity): FrameView {
+  const limit = retainedLimits(deviceLimit);
+  let step = 1;
+  while (Math.ceil(view.width / step) > limit.width || Math.ceil(view.height / step) > limit.height) step *= 2;
+  return {...view, width: Math.ceil(view.width / step), height: Math.ceil(view.height / step),
+    unitsPerPixel: view.unitsPerPixel.times(step)};
+}
+
 // Coordinate planning needs exact sums of the finite decimal inputs, including
 // cancellation at depth. Use a local constructor, without changing app precision.
 function coordinateDecimal(values: Decimal[], extra = 0): typeof Decimal {
@@ -40,11 +60,11 @@ export function createSampleGridAnchor(view: FrameView): SampleGridAnchor {
 export function planRetainedView(
   view: FrameView,
   anchor: SampleGridAnchor,
-  options: { overscan?: number } = {},
+  options: { overscan?: number; deviceLimit?: number } = {},
 ): FrameView {
   // Keep rotated visual snapshots in their source geometry. This axis-aligned
   // anchor never determines a rotated numerical sample grid.
-  if(view.angle)return {...view};
+  if(view.angle)return boundedRetainedView(view, options.deviceLimit);
   const overscan = options.overscan ?? 1.25;
   if (!Number.isFinite(overscan) || overscan < 1 || view.width <= 0 || view.height <= 0 ||
       view.unitsPerPixel.lte(0) || anchor.unitsPerPixel.lte(0)) {
@@ -59,10 +79,18 @@ export function planRetainedView(
   // A logarithm rounded at an exact power of two must not choose the wrong tier.
   while (spacing.gt(view.unitsPerPixel)) { spacing = spacing.div(2); level--; }
   while (spacing.times(2).lte(view.unitsPerPixel)) { spacing = spacing.times(2); level++; }
-  const expansion = new D(view.unitsPerPixel).div(spacing).toNumber() * overscan;
+  const limit = retainedLimits(options.deviceLimit);
+  let expansion = new D(view.unitsPerPixel).div(spacing).toNumber() * overscan;
   // One sample of spare coverage at either edge covers snapping the centre.
-  const width = Math.ceil((view.width * expansion + 2) / 8) * 8;
-  const height = Math.ceil((view.height * expansion + 2) / 8) * 8;
+  let width = Math.ceil((view.width * expansion + 2) / 8) * 8;
+  let height = Math.ceil((view.height * expansion + 2) / 8) * 8;
+  // Coarsen the anchored power-of-two lattice before rounding/padding. Merely
+  // truncating dimensions would crop coverage and change the world mapping.
+  while (width > limit.width || height > limit.height) {
+    spacing = spacing.times(2); expansion /= 2;
+    width = Math.ceil((view.width * expansion + 2) / 8) * 8;
+    height = Math.ceil((view.height * expansion + 2) / 8) * 8;
+  }
   const halfX = new D(width - 1).div(2), halfY = new D(height - 1).div(2);
   // Nest pixel edges, not sample centres. Subdividing centre-aligned pixels
   // puts an old colour boundary through a new pixel centre, shifting that

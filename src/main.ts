@@ -32,6 +32,10 @@ let displayedJulia:{x:string;y:string}|null=null,previewLifetime=0;
 const previewCanvas=el<HTMLCanvasElement>('julia-preview-canvas');
 let previewSize={width:previewCanvas.width,height:previewCanvas.height};
 const keys=new Set<string>();
+// Keep layout-dependent actions, but pair releases by physical identity even
+// when releasing Shift changes the reported key (for example '+' to '=').
+const heldKeyActions=new Map<string,string>();
+function keyIdentity(e:KeyboardEvent){return e.code||e.key;}
 let saved: {name:string;view:SavedView}[]=[];
 type LocationChoice={kind:'place'|'saved';index:number;name:string};
 let selectedLocation:LocationChoice|null=null;
@@ -73,12 +77,22 @@ function syncIterationLabel(){
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
-function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();rotationKeys.clear();releasePointer();}
+function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();heldKeyActions.clear();rotationKeys.clear();releasePointer();}
 function cancelPreviewWork(){previewLifetime++;previewEpoch++;previewPending=false;previewEngine?.abort();el('julia-preview').setAttribute('aria-busy','false');}
 function captureStoppedPartial(){
   if(!stopSnapshotPending||!engine||!retainedRequest)return;
-  retainedPartialCaptured=engine.retainDisplayedPartial(retainedRequest,true);
+  const retained=retainedRequest,g=generation;
+  void engine.retainDisplayedPartial(retained,true).then(captured=>{if(g===generation&&retainedRequest===retained)retainedPartialCaptured=captured;});
   stopSnapshotPending=false;
+}
+async function refreshCalculation(){
+  if(!engine||busy||!refreshPending)return;
+  busy=true;const g=generation;
+  try{
+    if(retainedRequest&&!retainedPartialCaptured)await engine.retainDisplayedPartial(retainedRequest);
+    if(g!==generation||!refreshPending)return;
+    engine.restartCalculation();retainedRequest=null;retainedPartialCaptured=false;refreshPending=false;dirty=true;
+  }finally{busy=false;if(stopped)captureStoppedPartial();}
 }
 function stopRefinement(){
   if(stopped){stop();return;}
@@ -223,7 +237,7 @@ async function compute(){
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
       if(numericalWasPending)refinementTime.complete(performance.now());
     }
-  }catch(e){if(!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
+  }catch(e){if(g===generation&&!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
   finally{busy=false;if(stopped){captureStoppedPartial();dirty=false;}else if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
 async function recolorStopped(){
@@ -244,7 +258,7 @@ function tick(time:number){
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);refinementTime.heldCameraChange();changed();}
     if(engine){
-      if(refreshPending&&!busy){if(retainedRequest&&!retainedPartialCaptured)engine.retainDisplayedPartial(retainedRequest);engine.restartCalculation();retainedRequest=null;retainedPartialCaptured=false;refreshPending=false;dirty=true;}
+      if(refreshPending&&!busy)void refreshCalculation();
       engine.reproject(request(),stopped||refreshHolding);
       // Give the latest preview one turn between main jobs, without awaiting it.
       // Both renderers keep at most one bounded numerical region in the queue.
@@ -285,8 +299,9 @@ canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.
 canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();persist();return;}
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key)))return;
   if(e.ctrlKey||e.metaKey||e.altKey)return;
-  if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;keys.add(e.key);changed();}});
-canvas.addEventListener('keyup',e=>{if(!keys.delete(e.key))return;if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();});
+  if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;const identity=keyIdentity(e);if(!heldKeyActions.has(identity)){heldKeyActions.set(identity,e.key);keys.add(e.key);}changed();}});
+document.addEventListener('keyup',e=>{const identity=keyIdentity(e),action=heldKeyActions.get(identity);if(action===undefined)return;heldKeyActions.delete(identity);if(![...heldKeyActions.values()].includes(action))keys.delete(action);if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();});
+canvas.addEventListener('blur',()=>{stop();persist();});
 document.addEventListener('keyup',e=>{if(e.key==='Control'&&(rotating||controlDown)){finishRotation();}
   if(rotationKeys.delete(e.key)){if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();}});
 document.addEventListener('keydown',e=>{

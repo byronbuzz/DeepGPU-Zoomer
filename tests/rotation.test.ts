@@ -76,7 +76,7 @@ describe('rotated frame presentation and numerical authority',()=>{
   it('does not report a stale orientation complete or reuse it for an appearance hold',()=>{
     const renderer:any=Object.create(WebGpuRenderer.prototype);
     const old={...frame(),family:'mandelbrot' as const,maxIterations:5000,useApprox:true,colors:DEFAULT_COLORS,method:0,grid:1};
-    Object.assign(renderer,{fieldComplete:true,historyValid:true,lastFrame:old});
+    Object.assign(renderer,{fieldComplete:true,currentImageValid:true,completedFrame:old,historyValid:true,lastFrame:old});
     expect(renderer.isComplete(old)).toBe(true);
     expect(renderer.isComplete({...old,angle:90})).toBe(false);
     expect(appearanceUpgradeCompatible(old,{...old,angle:90},0,1)).toBe(false);

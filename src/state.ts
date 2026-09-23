@@ -1,6 +1,7 @@
 import Decimal from 'decimal.js';
 import { validateColors, type ColorSettings } from './logic/colorSettings';
 import { rotationBasis } from './rotation';
+import { parseCoordinateInput } from './coordinate';
 
 export type Family = 'mandelbrot' | 'julia';
 export interface SavedView { family: Family; x: string; y: string; span: string; jx: string; jy: string; iterations: number; angle?: number; appearance?: ColorSettings }
@@ -15,9 +16,7 @@ export function homePosition(view:SavedView):SavedView {
 export function validateView(value: unknown): SavedView {
   const v = value as SavedView;
   if (!v || !['mandelbrot','julia'].includes(v.family)) throw Error('Invalid fractal');
-  for (const k of ['x','y','span','jx','jy'] as const) {
-    if (typeof v[k] !== 'string' || v[k].length>12000 || !/^[+-]?(\d+(\.\d*)?|\.\d+)(e[+-]?\d+)?$/i.test(v[k]) || !new Decimal(v[k]).isFinite()) throw Error(`Invalid ${k}`);
-  }
+  for (const k of ['x','y','span','jx','jy'] as const) parseCoordinateInput(v[k], k);
   if(new Decimal(v.span).lte(0) || new Decimal(v.span).gt(8)) throw Error('Span must be positive and at most 8');
   // 256 u32 limbs provide 8160 fractional bits. Leave room for pixels and
   // the orbit guard precision before allocating decimal camera arithmetic.
