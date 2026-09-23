@@ -329,9 +329,8 @@ status, let Stop halt it, and prioritize navigation.
 
 Approved later UI work: editable combined location selector/name with exact
 locations and links retained, and collision confirmation; retain Colour spacing
-and Palette offset at the top of Colouring during later reorganization, followed
-by Preset, Edit Palette, Lighting, Hue rotation and the formula/effect/capped
-selectors. Hue rotation affects the whole output
+and Palette offset at the top of Colouring, followed by Hue rotation, Palette,
+Edit Palette, the formula/effect/capped selectors and Lighting. Hue rotation affects the whole output
 including capped/effect colours without mutating palette points; presets reset
 rotation, individual palette edits preserve it. More formula/effect ideas need
 their exact approved list recovered first. Exclude solarised, duotone, halftone

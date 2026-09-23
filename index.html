@@ -29,7 +29,8 @@
     <div id="panel-colouring" class="tab-panel" role="tabpanel" aria-labelledby="tab-colouring" hidden>
       <label>Colour spacing <output id="cycle-value">64</output><input id="cycle" type="range" min="0" max="1" value="0.5" step="0.001"></label>
       <label>Palette offset<input id="color-offset" type="range" min="0" max="1" step="0.001"></label>
-      <label>Preset<select id="palette"></select></label>
+      <label>Hue rotation <output id="hue-value">0°</output><input id="hue-rotation" type="range" min="0" max="360" step="1" value="0"></label>
+      <label>Palette<select id="palette"></select></label>
       <details id="edit-palette"><summary>Edit Palette</summary>
         <div id="palette-strip" aria-label="Palette strip: click to add a stop"></div>
         <label class="check stop-lock"><input id="stop-lock" type="checkbox"> Lock this stop for randomisation <span id="selected-stop-label"></span></label>
@@ -43,6 +44,9 @@
         <div class="row"><button id="random-colors">Randomise colours</button><button id="random-palette">Randomise palette</button></div>
         <div class="row"><button id="palette-undo">Undo</button><button id="palette-redo">Redo</button></div>
       </details>
+      <label>Colouring formula<select id="color-formula"></select></label>
+      <label>Effect<select id="color-effect"></select></label>
+      <label>Capped samples<select id="capped-mode"></select></label>
       <details id="lighting"><summary>Lighting</summary>
         <label class="check"><input id="distance-mode" type="checkbox"> Distance lighting · extra computation</label>
         <label>Relief strength<input id="slope-depth" type="range" min="0" max="80" step="0.1"></label>
@@ -51,10 +55,6 @@
         <label>Ambient<input id="ambient-light" type="range" min="0" max="2" step="0.01"></label>
         <label>Highlights<input id="specular-strength" type="range" min="0" max="3" step="0.01"></label>
       </details>
-      <label>Hue rotation <output id="hue-value">0°</output><input id="hue-rotation" type="range" min="0" max="360" step="1" value="0"></label>
-      <label>Colouring formula<select id="color-formula"></select></label>
-      <label>Effect<select id="color-effect"></select></label>
-      <label>Capped samples<select id="capped-mode"></select></label>
     </div>
     <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
       <form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label>Vertical span<input id="span" spellcheck="false"></label><button>Go to coordinates</button></form>
