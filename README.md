@@ -66,9 +66,11 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
   Capped is not proven interior.
 - Places includes whole-set, Seahorse Valley, period-1215 and structured
   Mandelbrot/Julia 1e50 views. Moving away clears the preset label.
-- Built-in Places and browser-local saved locations share one grouped selector
-  with distinct IDs. Save locations, return Home, fully reset preferences while
-  retaining saved locations, or copy a share link.
+- Built-in Places and browser-local saved locations share one editable location
+  chooser/name with distinct IDs. Selection is explicit; saving the current
+  view with a matching name updates that location, while a different-location
+  name collision asks for confirmation. Return Home, fully reset preferences
+  while retaining saved locations, or copy a share link.
   Coordinates, span, c, iteration limit and appearance round-trip without
   trimming digits. Old links use default appearance.
 
@@ -327,10 +329,14 @@ Later, investigate preparing missing effect data after visual 100% only if
 inexpensive: retain 100% and frozen time with a separate Preparing colour data
 status, let Stop halt it, and prioritize navigation.
 
-Approved later UI work: editable combined location selector/name with exact
-locations and links retained, and collision confirmation; retain Colour spacing
-and Palette offset at the top of Colouring, followed by Hue rotation, Palette,
-Edit Palette, the formula/effect/capped selectors and Lighting. Hue rotation affects the whole output
+The editable location chooser/name, Advanced ordering and labels, removal of
+Reset panel layout, and independent fullscreen toggle are complete. Fullscreen
+is independent of panel visibility; Escape exits without resetting the view.
+The lazy-log optimisation comparison was not adopted.
+
+Approved later UI work: retain Colour spacing and Palette offset at the top of
+Colouring, followed by Hue rotation, Palette, Edit Palette, the formula/effect/
+capped selectors and Lighting. Hue rotation affects the whole output
 including capped/effect colours without mutating palette points; presets reset
 rotation, individual palette edits preserve it. More formula/effect ideas need
 their exact approved list recovered first. Exclude solarised, duotone, halftone
@@ -338,16 +344,13 @@ dots, crosshatch, histogram colouring and unapproved gcollombet features.
 Remove the specified “final”, “adapted”, and “XaoS adapted” label fragments and
 the capped-samples explanation. Replace Hide controls with a hamburger and
 use helpful hover-only tooltips. Keep status and the hamburger visible with
-controls hidden and do not change Julia preview visibility. Put panel opacity
-first in Advanced, then antialiasing; clarify Vertical span and remove Reset
-panel layout. A hard-right palette point and light-distance control were
-cancelled.
+controls hidden and do not change Julia preview visibility. A hard-right
+palette point and light-distance control were cancelled.
 
 Approved rotation is for the main fractal only, with a −180° to +180° slider,
 no numerical angle field, CTRL+circular drag, SHIFT pan, centre pivot, zero
 reset, and angle retained in locations and exact links. Rotation is navigation.
-Fullscreen is independent of panel visibility; Escape exits without resetting
-the view. Later antialiasing should be sharper, post-image only, after
+Later antialiasing should be sharper, post-image only, after
 completion, with no extra fractal calculation. PNG should export only the
 fractal, with Current viewport, Monitor size and 2× Monitor size as true render
 sizes, retaining view, rotation, palette and AA. Palette-offset animation was
