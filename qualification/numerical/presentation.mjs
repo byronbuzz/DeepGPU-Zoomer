@@ -189,7 +189,7 @@ export async function presentationChecks(context, baseUrl) {
         if(a!==b||value!==b)numerical.push({x:px,y:py,oracle512:a,oracle768:b,gpu:value});
       }
       checks.push({ name: 'BLA expands its bound for a moved field on a retained reference',
-        pass: renderer.tableMaxDelta>firstBound&&renderer.tableMaxDelta<firstBound*4&&expanded.orbitMs===0&&expanded.skippedIterations>0&&expanded.computedSamples>0&&numerical.length===0,
+        pass: renderer.tableMaxDelta.gt(firstBound)&&renderer.tableMaxDelta.lt(firstBound.times(4))&&expanded.orbitMs===0&&expanded.skippedIterations>0&&expanded.computedSamples>0&&numerical.length===0,
         detail: { firstBound, expandedBound: renderer.tableMaxDelta, orbitMs: expanded.orbitMs,
           skippedIterations: expanded.skippedIterations, computedSamples: expanded.computedSamples, numerical } });
       // Crossing the existing geometric drift threshold refreshes the

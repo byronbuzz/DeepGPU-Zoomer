@@ -17,18 +17,18 @@ describe("reference viewport radius", () => {
       new Decimal(1).minus(scale).times(57),
       scale,
     );
-    expect(target).toBeLessThan(initial);
+    expect(target.lt(initial)).toBe(true);
   });
 
   it("still detects a real viewport expansion", () => {
     const initial = radius(refX, refY, new Decimal(1));
-    expect(radius(refX, refY, new Decimal(1.01))).toBeGreaterThan(initial);
+    expect(radius(refX, refY, new Decimal(1.01)).gt(initial)).toBe(true);
   });
 
   it("uses zero parameter injection for Julia while retaining its initial offset", () => {
     const view = { centerX: new Decimal(2), centerY: new Decimal(3), unitsPerPixel: new Decimal(0.01), width, height };
-    expect(approximationDeltaBound("julia", view, refX, refY)).toBe(0);
-    expect(approximationDeltaBound("mandelbrot", view, refX, refY)).toBeGreaterThan(0);
+    expect(approximationDeltaBound("julia", view, refX, refY).isZero()).toBe(true);
+    expect(approximationDeltaBound("mandelbrot", view, refX, refY).gt(0)).toBe(true);
     expect(wideShader).toContain("var delta = injection;");
     expect(wideShader).toMatch(/if \(JULIA\) \{ parameterDelta = Wide\(vec4<f32>\(0\.0\), vec4<f32>\(0\.0\), 0\); \}/);
     expect(wideShader).toContain("wantDerivative, parameterDelta, u.maxIterations - n");

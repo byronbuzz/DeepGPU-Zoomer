@@ -1,7 +1,7 @@
 import Decimal from 'decimal.js';
 import {describe,expect,it,vi} from 'vitest';
 import {DEFAULT_COLORS} from '../../src/logic/colorSettings';
-import {limbsForScale,WebGpuRenderer} from '../../src/render/webgpu-renderer';
+import {approximationDeltaBound,limbsForScale,WebGpuRenderer} from '../../src/render/webgpu-renderer';
 
 function deferred<T>() {
   let resolve!:(value:T)=>void,reject!:(reason:unknown)=>void;
@@ -14,6 +14,29 @@ const request=()=>({family:'mandelbrot',centerX:new Decimal(0),centerY:new Decim
 const limits={maxStorageBufferBindingSize:1e8,maxBufferSize:1e8,maxTextureDimension2D:8192};
 
 describe('demand-specific pipeline preparation',()=>{
+  it.each([
+    ['mandelbrot','1e-1000',2,true,true],
+    ['mandelbrot','1e-2400',2,true,true],
+    ['mandelbrot','2e-324',2,true,true],
+    ['mandelbrot','1e-2400',0.5,true,false],
+    ['mandelbrot','1e-2400',0.5,false,true],
+    ['julia','1e-2400',2,true,false],
+  ] as const)('retains %s table-domain decisions at %s (scale %s, usable %s)',async(family,span,scale,usable,rebuild)=>{
+    const renderer:any=Object.create(WebGpuRenderer.prototype);
+    const original={...request(),family,unitsPerPixel:new Decimal(span),useApprox:true};
+    const r={...original,unitsPerPixel:original.unitsPerPixel.times(scale)};
+    const build=vi.fn(async()=>{renderer.tableMaxDelta=approximationDeltaBound(family,r,r.centerX,r.centerY);renderer.laHasUsableMultiStep=true;});
+    Object.assign(renderer,{ctx:{device:{limits}},publicationEpoch:0,directPipeline:{},shadePipeline:{},reusePipeline:{},blitPipeline:{},
+      recolorCompleted:async()=>null,beginAppearanceHold:()=>false,convertDistanceToIteration:async()=>false,
+      refValid:true,refX:r.centerX,refY:r.centerY,refFamily:family,refConstant:family==='julia'?'undefined,undefined':'',
+      refLimbs:limbsForScale(r.unitsPerPixel,96),refIterations:100,
+      tableMaxDelta:approximationDeltaBound(family,original,r.centerX,r.centerY),laHasUsableMultiStep:usable,laLevels:2,
+      buildApproxTable:build,ensureOrbitCapacity:()=>{},laBuffer:{},laIndexBuffer:{},
+      ensureComputePipeline:()=>Promise.resolve({}),ensureTarget:()=>{throw new Error('resource boundary');}});
+    await expect(renderer.renderTarget(r)).rejects.toThrow('resource boundary');
+    expect(build).toHaveBeenCalledTimes(rebuild?1:0);
+  });
+
   it('starts decoding preparation before dispatching the worker and keeps a current preparation failure visible',async()=>{
     const renderer:any=Object.create(WebGpuRenderer.prototype),worker=deferred<any>(),decode=deferred<any>();
     const events:string[]=[];
@@ -64,7 +87,7 @@ describe('demand-specific pipeline preparation',()=>{
     Object.assign(renderer,{ctx:{device:{limits}},publicationEpoch:0,directPipeline:{},shadePipeline:{},reusePipeline:{},blitPipeline:{},
       recolorCompleted:async()=>null,beginAppearanceHold:()=>false,convertDistanceToIteration:async()=>false,
       refValid:true,refX:r.centerX,refY:r.centerY,refFamily:family,refConstant:family==='julia'?'undefined,undefined':'',
-      refLimbs:limbsForScale(r.unitsPerPixel,96),refIterations:100,tableMaxDelta:100,laHasUsableMultiStep:approx,laLevels:2,
+      refLimbs:limbsForScale(r.unitsPerPixel,96),refIterations:100,tableMaxDelta:new Decimal(100),laHasUsableMultiStep:approx,laLevels:2,
       buildApproxTable:async()=>{events.push('table');},ensureOrbitCapacity:()=>{},laBuffer:{},laIndexBuffer:{},
       ensureComputePipeline:(selected:string)=>{events.push(selected);return Promise.reject(new Error('prepared pipeline failure'));},
       ensureTarget:async()=>{events.push('target');await new Promise(resolve=>setTimeout(resolve,0));throw new Error('resource boundary');}});

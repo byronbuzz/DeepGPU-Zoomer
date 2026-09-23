@@ -14,6 +14,8 @@
  * the local fallback whenever a skip is unavailable.
  */
 
+import Decimal from "decimal.js";
+
 /** One reference iteration per level-0 entry. */
 export const BASE_STEP = 1;
 /** Empirical local tolerance selected for the accepted quality/performance tradeoff. */
@@ -84,10 +86,25 @@ export interface BuildOptions {
   sampleWords?: 6 | 20;
 }
 
+/** Preserve ordinary binary64 bounds, but never narrow a deep Decimal to zero. */
+export function deltaBoundLog2(maxDelta: number | Decimal): number {
+  if (typeof maxDelta === "number") return maxDelta > 0 ? Math.log2(maxDelta) : -Infinity;
+  if (maxDelta.isZero()) return -Infinity;
+  const ordinary = maxDelta.toNumber();
+  if (ordinary >= 2 ** -1022 && Number.isFinite(ordinary)) return Math.log2(ordinary);
+  // Split before conversion: even binary64 subnormals lose significant range
+  // and precision. No high-precision transcendental is needed at deep zoom.
+  const leading = maxDelta.div(new Decimal(`1e${maxDelta.e}`)).toNumber();
+  const log = Math.log2(leading) + maxDelta.e * Math.LOG2E * Math.LN10;
+  // Bias the split conversion outward by a few binary64 rounding units. The
+  // existing log-radius composition and GPU packing policy remain unchanged.
+  return log + 4 * Number.EPSILON * Math.max(1, Math.abs(log));
+}
+
 function* buildBlaSteps(
   orbit: Float32Array,
   length: number,
-  maxDelta: number,
+  maxDelta: number | Decimal,
   options: BuildOptions = {},
 ): Generator<void, BlaTable> {
   // Reference index zero has X=0, so its perturbation step contains only the
@@ -109,7 +126,7 @@ function* buildBlaSteps(
     }
   }
 
-  const maxDeltaLog2 = maxDelta > 0 ? Math.log2(maxDelta) : -Infinity;
+  const maxDeltaLog2 = deltaBoundLog2(maxDelta);
   const levels: Step[][] = [[]];
   for (let i = 0; i < count; i++) {
     if (i % 4096 === 0) yield;
@@ -165,12 +182,12 @@ function* buildBlaSteps(
   return { data, levelOffsets, levelCounts, levels: levels.length, entryCount, hasUsableMultiStep };
 }
 
-export function buildBla(orbit: Float32Array, length: number, maxDelta: number, options: BuildOptions = {}): BlaTable {
+export function buildBla(orbit: Float32Array, length: number, maxDelta: number | Decimal, options: BuildOptions = {}): BlaTable {
   const steps = buildBlaSteps(orbit, length, maxDelta, options);
   for (;;) { const next = steps.next(); if (next.done) return next.value; }
 }
 
-export async function buildBlaAsync(orbit: Float32Array, length: number, maxDelta: number, checkpoint: () => Promise<void>, options: BuildOptions = {}): Promise<BlaTable> {
+export async function buildBlaAsync(orbit: Float32Array, length: number, maxDelta: number | Decimal, checkpoint: () => Promise<void>, options: BuildOptions = {}): Promise<BlaTable> {
   const steps = buildBlaSteps(orbit, length, maxDelta, options);
   for (;;) { const next = steps.next(); if (next.done) return next.value; await checkpoint(); }
 }

@@ -186,21 +186,21 @@ export function referenceViewportRadius(
   request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle">,
   refX: Decimal,
   refY: Decimal,
-): number {
+): Decimal {
   if(request.angle){
     const {c,s}=rotationBasis(request.angle),halfX=request.unitsPerPixel.times(request.width/2),halfY=request.unitsPerPixel.times(request.height/2);
     const dx=request.centerX.minus(refX),dy=request.centerY.minus(refY);
-    return Math.max(...[-1,1].flatMap(x=>[-1,1].map(y=>Decimal.hypot(
+    return Decimal.max(...[-1,1].flatMap(x=>[-1,1].map(y=>Decimal.hypot(
       dx.plus(halfX.times(x*c)).minus(halfY.times(y*s)),
-      dy.plus(halfX.times(x*s)).plus(halfY.times(y*c))).toNumber())));
+      dy.plus(halfX.times(x*s)).plus(halfY.times(y*c))))));
   }
   const x = request.unitsPerPixel.times(request.width / 2).plus(request.centerX.minus(refX).abs());
   const y = request.unitsPerPixel.times(request.height / 2).plus(request.centerY.minus(refY).abs());
-  return Decimal.hypot(x, y).toNumber();
+  return Decimal.hypot(x, y);
 }
 
-export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle">, refX: Decimal, refY: Decimal): number {
-  return family === "julia" ? 0 : referenceViewportRadius(request, refX, refY);
+export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle">, refX: Decimal, refY: Decimal): Decimal {
+  return family === "julia" ? new Decimal(0) : referenceViewportRadius(request, refX, refY);
 }
 export function approximationEligible(family: "mandelbrot" | "julia", mode: number): boolean {
   return family === "julia" ? mode === 0 : mode !== 2;
@@ -328,7 +328,7 @@ export class WebGpuRenderer {
   private uniformBuffer: GPUBuffer;
   private stopsBuffer: GPUBuffer;
   private tableMs = 0;
-  private tableMaxDelta = 0;
+  private tableMaxDelta = new Decimal(0);
   /** Geometry and density of the retained history image. */
   private lastFrame: (AppearanceFrameIdentity & {
     proxy?: boolean;
@@ -1597,7 +1597,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.refLength = orbit.length; this.refEscaped = orbit.escaped;
         this.refSamples = orbit.samples; this.refValid = true;
         drift = new Decimal(0); orbitMs = orbit.ms;
-        this.tableMs = 0; this.laLevels=0; this.laHasUsableMultiStep=false; this.tableMaxDelta=-1;
+        this.tableMs = 0; this.laLevels=0; this.laHasUsableMultiStep=false; this.tableMaxDelta=new Decimal(-1);
         if (request.useApprox===true && approximationEligible(family, request.colors.mode)) await this.buildApproxTable(request);
       } catch (error) {
         this.referencePreparing=false;
@@ -1609,8 +1609,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // when the same orbit is viewed through a narrower domain.
     const requiredDelta = approximationDeltaBound(family, request, this.refX, this.refY);
     if (method !== Method.Direct && request.useApprox === true && approximationEligible(family, request.colors.mode) &&
-        (requiredDelta > this.tableMaxDelta * (1 + 1e-12) ||
-         !this.laHasUsableMultiStep && requiredDelta < this.tableMaxDelta * (1 - 1e-12))) {
+        (requiredDelta.gt(this.tableMaxDelta.times(1 + 1e-12)) ||
+         !this.laHasUsableMultiStep && requiredDelta.lt(this.tableMaxDelta.times(1 - 1e-12)))) {
       await this.buildApproxTable(request);
     }
 
@@ -1619,7 +1619,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!request.isCurrent!()) throw new DOMException("Superseded render", "AbortError");
     const approximationLevels =
       request.useApprox !== true || method === Method.Direct || !approximationEligible(family, request.colors.mode) ||
-      !this.laHasUsableMultiStep || requiredDelta > this.tableMaxDelta * (1 + 1e-12) ? 0 : this.laLevels;
+      !this.laHasUsableMultiStep || requiredDelta.gt(this.tableMaxDelta.times(1 + 1e-12)) ? 0 : this.laLevels;
     const pipelineKind=family==='julia'?approximationLevels>0?'juliaApprox':'julia':method===Method.Direct?'direct':approximationLevels>0?'approx':'plain';
     // Table viability now fixes the exact variant. Prepare only that variant
     // while target/field resources are validated, then await residual work.

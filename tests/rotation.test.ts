@@ -61,7 +61,7 @@ describe('rotated frame presentation and numerical authority',()=>{
       const c=new Camera();c.load({...HOME,x:f.centerX.toString(),y:f.centerY.toString(),span:'.8',angle});
       for(const [x,y] of [[0,0],[120,0],[0,80],[120,80]]){
         const p=c.point(x,y,120,80),distance=Decimal.hypot(p.x.minus('.2'),p.y.plus('.3')).toNumber();
-        expect(radius+1e-14).toBeGreaterThanOrEqual(distance);
+        expect(radius.toNumber()+1e-14).toBeGreaterThanOrEqual(distance);
       }
     }
   });
