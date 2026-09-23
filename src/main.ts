@@ -53,7 +53,7 @@ function colourPreparationLabel(progress=engine?.debugProgress()){
     (progress.pending>0||progress.finalizing||progress.exactCompletedSamples<progress.exactTotalSamples);
   return `Refined · 100% · Preparing colour data${started&&progress?.percentage!==null?` · ${progress?.percentage}%`:''}`;
 }
-function preparing(){freshness.textContent=`${preparingColourData?colourPreparationLabel():'Preparing current view'} · ${refinementTime.text(performance.now())}`;}
+function preparing(){freshness.textContent=`${preparingColourData?`${colourPreparationLabel()} · `:''}${refinementTime.text(performance.now())}`;}
 function syncIterationLabel(){
   el('iteration-value').textContent=view.iterations.toLocaleString();
 }

@@ -313,6 +313,10 @@ the displayed 10^0 view; Full Reset restores defaults. The footer retains a
 numeric Time taken during held navigation, starting at release; wheel timing
 still starts at the last actual wheel change. The controls panel defaults to
 286 CSS pixels wide and resizes from its left, right and bottom edges.
+The Iteration limit has no helper line; each tab's content begins with 8px of
+internal top padding below the unchanged tabs. Ordinary preparation shows only
+numeric Time taken; colour-data preparation keeps its established label. Do not
+add status-line words, fields or phases without explicit approval.
 Stop also cancels optional preview and colour-data
 preparation. An appearance edit that needs missing data holds the previous
 valid image until Refresh, navigation or a numerical-setting change.
