@@ -8,6 +8,8 @@ import { PLACES } from './places';
 import { setupPanels } from './panels';
 import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
+import { RefiningStatus } from './refining-status';
+import { setupRangeControls } from './range-controls';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
 const canvas=el<HTMLCanvasElement>('fractal');
@@ -36,6 +38,7 @@ let selectedLocation:LocationChoice|null=null;
 let linkedView:SavedView|null=null;
 let frameTimes:number[]=[], frameCount=0, sessionStart=performance.now();
 const refinementTime=new RefinementTimer(performance.now());
+const refiningStatus=new RefiningStatus();
 const freshness=el('freshness'),depth=el('depth');
 let syncAppearance=()=>{};
 let messageDismissTimer=0,messageFadeTimer=0,messageVersion=0;
@@ -57,13 +60,20 @@ function colourPreparationLabel(progress=engine?.debugProgress()){
     (progress.pending>0||progress.finalizing||progress.exactCompletedSamples<progress.exactTotalSamples);
   return `Refined · 100% · Preparing colour data${started&&progress?.percentage!==null?` · ${progress?.percentage}%`:''}`;
 }
-function preparing(){freshness.textContent=`${preparingColourData?`${colourPreparationLabel()} · `:''}${refinementTime.text(performance.now())}`;}
+function setText(target:HTMLElement,value:string){if(target.textContent!==value)target.textContent=value;}
+function preparing(time=performance.now()){
+  const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
+  const progress=engine?.debugProgress();
+  const actual=numericalPending?(dirty&&!busy?0:progress?.percentage??0):100;
+  const state=error?'Rendering stopped':stopped?'Stopped':preparingColourData?colourPreparationLabel(progress):refiningStatus.text(time,actual);
+  setText(freshness,`${state} · ${refinementTime.text(time)}`);
+}
 function syncIterationLabel(){
   el('iteration-value').textContent=view.iterations.toLocaleString();
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
-function stop(){refinementTime.stopHeld(performance.now(),currentFieldComplete());direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();rotationKeys.clear();releasePointer();}
+function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();rotationKeys.clear();releasePointer();}
 function cancelPreviewWork(){previewLifetime++;previewEpoch++;previewPending=false;previewEngine?.abort();el('julia-preview').setAttribute('aria-busy','false');}
 function captureStoppedPartial(){
   if(!stopSnapshotPending||!engine||!retainedRequest)return;
@@ -77,10 +87,11 @@ function stopRefinement(){
   generation++;engine?.abort();cancelPreviewWork();dirty=false;preparingColourData=false;
   stopSnapshotPending=true;retainedPartialCaptured=false;if(!busy)captureStoppedPartial();
   refinementTime.halt(performance.now());
+  preparing();
 }
 function refresh(){
   retainedRequest ??= request();
-  stop();stopped=false;refreshPending=true;refreshHolding=true;stoppedAppearancePending=false;
+  stop();refiningStatus.reset();stopped=false;refreshPending=true;refreshHolding=true;stoppedAppearancePending=false;
   stopSnapshotPending=false;
   generation++;engine?.abort();cancelPreviewWork();
   resize(false);completedQuality=0;preparingColourData=false;dirty=true;error='';
@@ -99,7 +110,7 @@ function syncControls(){
 }
 function load(next:SavedView,record=true){
   dismissReplacement();
-  const valid=validateView(next);stop();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
+  const valid=validateView(next);stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
   if(view.family==='julia')setPreview(false);
   resize();
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';refinementTime.demand(performance.now());preparing();message('');syncControls();
@@ -111,11 +122,11 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||rotating||rotationSliderHeld||controlDown&&rotationKeys.size>0||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(){dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=performance.now();preparing();}
+function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;preparing(now);}
 function syncRotation(){el<HTMLInputElement>('rotation').value=String(camera.angle);el('rotation-value').textContent=`${Number(camera.angle.toFixed(1))}°`;}
 function setRotation(angle:number,held=true){const previous=camera.revision;camera.setAngle(angle);if(camera.revision===previous)return;
   if(held)refinementTime.heldCameraChange();else refinementTime.demand(performance.now());changed();syncRotation();}
-function finishRotation(){rotating=false;controlDown=false;rotationPointerAngle=null;releasePointer();refinementTime.stopHeld(performance.now(),currentFieldComplete());persist();}
+function finishRotation(){rotating=false;controlDown=false;rotationPointerAngle=null;releasePointer();const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);persist();}
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
   el('julia-preview').hidden=!visible;
@@ -245,10 +256,8 @@ function tick(time:number){
     if(time-statusTime>50){statusTime=time;
       const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
       const fresh=!busy && !dirty && !moving() && !numericalPending;
-      const progress=engine?.debugProgress();
-      const state=stopped?'Stopped':!numericalPending?preparingColourData?colourPreparationLabel(progress):'Refined · 100%':progress?.referencePreparing?'Preparing reference':progress?.percentage!==null&&progress?.percentage!==undefined?`Refining · ${progress.percentage}%`:progress?.finalizing?'Finishing':busy?'Computing':'Preview';
-      freshness.textContent=`${error?'Rendering stopped':state} · ${refinementTime.text(time)}`;
-      depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
+      preparing(time);
+      setText(depth,`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`);
       el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());
       if(profilingEnabled&&engine){
         const profile=engine.performance();
@@ -272,14 +281,14 @@ canvas.addEventListener('pointermove',e=>{if(rotating){if(!e.ctrlKey){finishRota
 function endPointer(){if(selecting){stop();return;}stop();persist();}
 canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();persist();});
 canvas.addEventListener('lostpointercapture',()=>{if(activePointer!==null){activePointer=null;stop();persist();}});
-canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){refinementTime.wheelCameraChange(performance.now());changed();}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
+canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){refinementTime.wheelCameraChange(performance.now());changed('wheel');}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
 canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();persist();return;}
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key)))return;
   if(e.ctrlKey||e.metaKey||e.altKey)return;
   if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;keys.add(e.key);changed();}});
-canvas.addEventListener('keyup',e=>{if(!keys.delete(e.key))return;if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating)refinementTime.stopHeld(performance.now(),currentFieldComplete());persist();});
+canvas.addEventListener('keyup',e=>{if(!keys.delete(e.key))return;if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();});
 document.addEventListener('keyup',e=>{if(e.key==='Control'&&(rotating||controlDown)){finishRotation();}
-  if(rotationKeys.delete(e.key)){if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating)refinementTime.stopHeld(performance.now(),currentFieldComplete());persist();}});
+  if(rotationKeys.delete(e.key)){if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();}});
 document.addEventListener('keydown',e=>{
   if(e.target instanceof HTMLElement&&(e.target.isContentEditable||e.target.closest('input,textarea,select,[role="combobox"],[role="listbox"]')))return;
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key))){e.preventDefault();keys.delete(e.key);if(e.ctrlKey){controlDown=true;rotationKeys.add(e.key);wheelDirection=0;}return;}
@@ -296,13 +305,12 @@ el('refresh').onclick=refresh;
 el('stop-refinement').onclick=stopRefinement;
 el('reset').onclick=()=>load(homePosition(snapshot()));
 const rotationSlider=el<HTMLInputElement>('rotation');
-const finishSliderRotation=()=>{rotationSliderHeld=false;refinementTime.stopHeld(performance.now(),currentFieldComplete());persist();};
+const finishSliderRotation=()=>{rotationSliderHeld=false;const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);persist();};
 rotationSlider.onpointerdown=()=>{stop();rotationSliderHeld=true;};
 rotationSlider.onkeydown=e=>{if(e.key==='Escape'){stop();persist();return;}if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'].includes(e.key))rotationSliderHeld=true;};
 rotationSlider.oninput=()=>setRotation(Number(rotationSlider.value));
 rotationSlider.onchange=()=>{if(!rotationSliderHeld)finishSliderRotation();};
 rotationSlider.onpointerup=finishSliderRotation;rotationSlider.onpointercancel=finishSliderRotation;rotationSlider.onkeyup=finishSliderRotation;rotationSlider.onblur=finishSliderRotation;
-el('rotation-reset').onclick=()=>{stop();setRotation(0,false);persist();};
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
 el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
@@ -394,6 +402,7 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
   clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);
 });
 syncAppearance=paletteController.sync;
+setupRangeControls();
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;

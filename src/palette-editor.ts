@@ -1,4 +1,4 @@
-import { PRESETS, FORMULAS, EFFECTS, CAPPED, validateColors, stopPositions, cycleFromSlider, cycleToSlider, type ColorSettings } from './logic/colorSettings';
+import { DEFAULT_COLORS, PRESETS, FORMULAS, EFFECTS, CAPPED, validateColors, stopPositions, cycleFromSlider, cycleToSlider, type ColorSettings } from './logic/colorSettings';
 
 type Stop={position:number;color:string;locked:boolean};
 export function paletteStops(c:ColorSettings):Stop[]{return c.stops.map((color,i)=>({color,position:stopPositions(c)[i],locked:c.locks?.[i]??false}));}
@@ -88,7 +88,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   for(const [id,key] of [['color-formula','formula'],['color-effect','effect'],['capped-mode','capped']] as const)el<HTMLSelectElement>(id).onchange=e=>commit({...get(),[key]:Number((e.target as HTMLSelectElement).value)});
   el<HTMLInputElement>('distance-mode').onchange=e=>commit({...get(),mode:(e.target as HTMLInputElement).checked?1:0});
   el<HTMLInputElement>('post-antialias').onchange=e=>commit({...get(),postAntialias:(e.target as HTMLInputElement).checked});
-  el<HTMLInputElement>('cycle').oninput=e=>{const value=cycleFromSlider(Number((e.target as HTMLInputElement).value));change({...get(),cycle:value});el('cycle-value').textContent=value<100?value.toFixed(1):Math.round(value).toString();};
+  el<HTMLInputElement>('cycle').oninput=e=>{const value=e instanceof CustomEvent&&e.detail?.factoryReset?DEFAULT_COLORS.cycle:cycleFromSlider(Number((e.target as HTMLInputElement).value));change({...get(),cycle:value});el('cycle-value').textContent=value<100?value.toFixed(1):Math.round(value).toString();};
   el<HTMLInputElement>('hue-rotation').oninput=e=>{const hueRotation=Number((e.target as HTMLInputElement).value);change({...get(),hueRotation});el('hue-value').textContent=`${hueRotation}°`;};
   for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).oninput=e=>{change({...get(),[key]:Number((e.target as HTMLInputElement).value)});};
   sync();return {sync,reset(){selected=0;dragging=false;undo.length=0;redo.length=0;closePicker();sync();}};

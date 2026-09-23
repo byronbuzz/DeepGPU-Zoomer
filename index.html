@@ -1,9 +1,9 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>WebGPU Zoomer 3</title></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>DeepGPU Zoomer</title></head>
 <body>
   <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Ctrl drag or Ctrl left and right arrows rotate. Keyboard plus and minus zoom; arrows pan. J toggles Julia preview; while preview is open, left click or drag selects its constant. M opens the selected Julia or returns to Mandelbrot."></canvas>
-  <header><div id="title-badge" class="brand" data-panel><strong>WebGPU Zoomer 3</strong></div><button id="toggle" aria-label="Hide controls" title="Hide controls" aria-expanded="true" aria-controls="controls">☰</button></header>
+  <header><div id="title-badge" class="brand" data-panel><strong>DeepGPU Zoomer</strong></div><button id="toggle" aria-label="Hide controls" title="Hide controls" aria-expanded="true" aria-controls="controls">☰</button></header>
   <aside id="controls" data-panel aria-label="Explorer controls">
     <div class="controls-scroll">
     <div class="tabs-shell" data-handle>
@@ -17,7 +17,6 @@
       <label>Zoom speed <output id="speed-value">0.8×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="0.8"></label>
       <label>Iteration limit <output id="iteration-value">5,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
       <label title="Rotate the main view about its centre. Ctrl+drag or hold Ctrl+Left/Right arrows on the fractal.">Rotation <output id="rotation-value">0°</output><input id="rotation" type="range" min="-180" max="180" step="0.1" value="0"></label>
-      <button id="rotation-reset" type="button" title="Reset main-view rotation to zero">Reset rotation</button>
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
       <div class="row main-action-row"><button id="refresh">Refresh</button><button id="stop-refinement">Stop</button></div>
       <div class="row main-action-row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
@@ -79,7 +78,7 @@
     <p class="preview-help">Left-drag on Mandelbrot to select c. Drag this panel’s bottom-right corner to resize.</p>
     <button id="julia-promote" disabled aria-keyshortcuts="M">Open Julia · M</button>
   </section>
-  <footer><span id="freshness">Time taken: 00:00.00</span><span id="depth"></span></footer>
+  <footer><span id="freshness">Refining ·   0% · Time taken: 00:00.00</span><span id="depth"></span></footer>
   <div id="message" role="status" aria-live="polite"></div>
   <script type="module" src="/src/main.ts"></script>
 </body></html>

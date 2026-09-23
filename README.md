@@ -1,4 +1,4 @@
-# GPU-Zoomer-3
+# DeepGPU Zoomer
 
 A browser-only Mandelbrot and quadratic Julia explorer. WebGPU computes
 multiprecision reference orbits and compensated, exponent-carrying pixel deltas.
@@ -315,12 +315,13 @@ retain Julia open/return behaviour; Main has no separate preview button or
 constant form. Home changes only position and scale for the active family to
 the displayed 10^0 view; Full Reset restores defaults. The footer retains a
 numeric Time taken during held navigation, starting at release; wheel timing
-still starts at the last actual wheel change. The controls panel defaults to
+still starts at the last actual wheel change. Ordinary status retains Refining
+and a fixed-width percentage during motion and for 250ms afterward; its timer
+is unaffected. The controls panel defaults to
 286 CSS pixels wide and resizes from its left, right and bottom edges.
 The Iteration limit has no helper line; each tab's content begins with 8px of
-internal top padding below the unchanged tabs. Ordinary preparation shows only
-numeric Time taken; colour-data preparation keeps its established label. Do not
-add status-line words, fields or phases without explicit approval.
+internal top padding below the unchanged tabs. Colour-data preparation keeps
+its established label. No other status-line words or fields are added.
 Stop also cancels optional preview and colour-data
 preparation. An appearance edit that needs missing data holds the previous
 valid image until Refresh, navigation or a numerical-setting change.
@@ -348,8 +349,10 @@ controls hidden and do not change Julia preview visibility. A hard-right
 palette point and light-distance control were cancelled.
 
 Main-view rotation has a −180° to +180° slider, no numerical angle field,
-Ctrl+circular drag or held Ctrl+Left/Right, Shift pan, a centre pivot and zero
-reset. Locations and exact links retain angle; old records default to zero.
+Ctrl+circular drag or held Ctrl+Left/Right, Shift pan and a centre pivot.
+Ctrl+primary click resets any range slider to its factory setting, including
+rotation to zero; wheel over a visible slider changes that slider directly.
+Locations and exact links retain angle; old records default to zero.
 Home preserves angle; Full Reset clears it. Rotation is navigation and the
 Julia preview remains unrotated. Retained images reproject during rotation;
 rotated numerical grids conservatively decline exact sample remapping.

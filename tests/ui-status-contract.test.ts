@@ -12,15 +12,17 @@ describe('bounded controls and footer wording',()=>{
     expect((html.match(/class="tab-panel"/g)??[])).toHaveLength(3);
     expect(css).toContain('.tab-panel{min-width:0;padding:8px 16px 0}');
   });
-  it('keeps ordinary preparation numeric-only, without adding a replacement status',()=>{
-    expect(html).toContain('<span id="freshness">Time taken: 00:00.00</span>');
+  it('keeps the refining percentage in the ordinary footer and the established colour-data preparation',()=>{
+    expect(html).toContain('<span id="freshness">Refining ·   0% · Time taken: 00:00.00</span>');
     expect(html).not.toContain('Preparing first field');
     expect(main).not.toContain('Preparing current view');
-    expect(main).toContain("preparingColourData?`${colourPreparationLabel()} · `:''");
-    expect(main).toContain('refinementTime.text(performance.now())');
+    expect(main).toContain('preparingColourData?colourPreparationLabel(progress):refiningStatus.text(time,actual)');
+    expect(main).toContain('refinementTime.text(time)');
+    expect(css).toContain('#freshness{font-variant-numeric:tabular-nums;white-space:pre}');
   });
   it('keeps the requested controls inside the existing panels without new footer text',()=>{
     expect(html).not.toContain('id="fullscreen"');
+    expect(html).not.toContain('id="rotation-reset"');
     expect(main).not.toContain('requestFullscreen');
     expect(main).not.toContain('fullscreenchange');
     expect(html).toContain('id="rotation" type="range" min="-180" max="180"');
