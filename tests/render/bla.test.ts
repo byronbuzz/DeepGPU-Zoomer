@@ -11,6 +11,7 @@ import {
   multiply,
   normalise,
   readStep,
+  stepRadiusLog2,
   type Scaled,
 } from "../../src/render/bla";
 
@@ -127,5 +128,59 @@ describe("standard linear BLA", () => {
     const table = buildBla(orbit, 8193, 1e-40);
     expect(Array.from(table.data).every(Number.isFinite)).toBe(true);
     expect(table.levels).toBeGreaterThan(10);
+  });
+
+  it("stores every parent radius no larger than its same-start child radius", () => {
+    const { orbit } = makeOrbit(-0.12, 0.74, 4096);
+    for (const epsilonLog2 of [-21, -40]) {
+      for (const maxDelta of [1e-20, 1e-40, 1]) {
+        const table = buildBla(orbit, 4097, maxDelta, { epsilonLog2 });
+        for (let level = 1; level < table.levels; level++) {
+          for (let index = 0; index < table.levelCounts[level]; index++) {
+            const parent = stepRadiusLog2(table, level, index);
+            const sameStartChild = stepRadiusLog2(table, level - 1, index * 2);
+            expect(Number.isFinite(parent)).toBe(true);
+            expect(parent).toBeLessThanOrEqual(sameStartChild);
+          }
+        }
+      }
+    }
+  });
+
+  it("keeps the largest valid skip at radius equality and across eligibility boundaries", () => {
+    const { orbit } = makeOrbit(-0.12, 0.74, 256);
+    const cutoff = -1e29;
+    const choice = (table: ReturnType<typeof buildBla>, at: number, remaining: number, dzLog2: number, guarded: boolean) => {
+      const unit = at - 1;
+      let top = table.levels - 1;
+      if (unit !== 0) top = Math.min(top, 31 - Math.clz32(unit & -unit));
+      if (guarded) {
+        if (top < 1 || remaining < 2 || (unit >> 1) >= table.levelCounts[1]) return 0;
+        const shortest = stepRadiusLog2(table, 1, unit >> 1);
+        if (shortest <= cutoff || dzLog2 > shortest) return 0;
+      }
+      for (let level = top; level >= 1; level--) {
+        const index = unit >> level;
+        if (index >= table.levelCounts[level] || (1 << level) > remaining) continue;
+        const radius = stepRadiusLog2(table, level, index);
+        if (radius > cutoff && dzLog2 <= radius) return 1 << level;
+      }
+      return 0;
+    };
+    for (const epsilonLog2 of [-21, -40]) {
+      for (const maxDelta of [1e-40, 1]) {
+        const table = buildBla(orbit, 257, maxDelta, { epsilonLog2 });
+        for (let at = 1; at < 256; at++) {
+          const shortestIndex = (at - 1) >> 1;
+          const shortest = shortestIndex < table.levelCounts[1] ? stepRadiusLog2(table, 1, shortestIndex) : cutoff;
+          for (const remaining of [0, 1, 2, 3, 8, 64]) {
+            for (const dzLog2 of [shortest - 1, shortest, shortest + 1, cutoff, Infinity]) {
+              expect(choice(table, at, remaining, dzLog2, true))
+                .toBe(choice(table, at, remaining, dzLog2, false));
+            }
+          }
+        }
+      }
+    }
   });
 });

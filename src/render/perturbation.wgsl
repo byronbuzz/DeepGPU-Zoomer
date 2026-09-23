@@ -299,6 +299,15 @@ fn takeSkip(
         level = min(level, i32(countTrailingZeros(unit)));
     }
 
+    // Every longer same-start entry has a radius no greater than level 1's
+    // stored radius. If this shortest multi-step entry fails, no skip can fit.
+    if (level < 1) { return 0u; }
+    let shortestSpan = u.laBaseStep << 1u;
+    let shortestIndex = unit >> 1u;
+    if (shortestSpan > remaining || shortestIndex >= laIndex[u.laLevels + 1u]) { return 0u; }
+    let shortestRadius = la[(laIndex[1u] + shortestIndex) * SKIP_FLOATS + 10u];
+    if (shortestRadius <= LA_NEVER || dzLog2 > shortestRadius) { return 0u; }
+
     loop {
         // A one-iteration BLA does not eliminate an iteration; use the ordinary
         // Wide recurrence instead and reserve BLA application for spans >= 2.
