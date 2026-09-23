@@ -2,7 +2,7 @@
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>WebGPU Zoomer 3</title></head>
 <body>
-  <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Keyboard plus and minus zoom; arrows pan. J toggles Julia preview; while preview is open, left click or drag selects its constant. M opens the selected Julia or returns to Mandelbrot."></canvas>
+  <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Ctrl drag or Ctrl left and right arrows rotate. Keyboard plus and minus zoom; arrows pan. J toggles Julia preview; while preview is open, left click or drag selects its constant. M opens the selected Julia or returns to Mandelbrot."></canvas>
   <header><div id="title-badge" class="brand" data-panel><strong>WebGPU Zoomer 3</strong></div><button id="toggle" aria-label="Hide controls" title="Hide controls" aria-expanded="true" aria-controls="controls">☰</button></header>
   <aside id="controls" data-panel aria-label="Explorer controls">
     <div class="controls-scroll">
@@ -16,17 +16,18 @@
     <div id="panel-main" class="tab-panel" role="tabpanel" aria-labelledby="tab-main">
       <label>Zoom speed <output id="speed-value">0.8×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="0.8"></label>
       <label>Iteration limit <output id="iteration-value">5,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
+      <label title="Rotate the main view about its centre. Ctrl+drag or hold Ctrl+Left/Right arrows on the fractal.">Rotation <output id="rotation-value">0°</output><input id="rotation" type="range" min="-180" max="180" step="0.1" value="0"></label>
+      <button id="rotation-reset" type="button" title="Reset main-view rotation to zero">Reset rotation</button>
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
       <div class="row main-action-row"><button id="refresh">Refresh</button><button id="stop-refinement">Stop</button></div>
       <div class="row main-action-row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
-      <button id="fullscreen" type="button" aria-pressed="false">Enter fullscreen</button>
       <label>Location<input id="location-entry" role="combobox" type="text" maxlength="80" autocomplete="off" aria-autocomplete="list" aria-controls="location-options" aria-expanded="false" placeholder="Choose or name a location"></label>
       <div id="location-options" class="location-options" role="listbox" aria-label="Places and saved locations" hidden></div>
       <div class="row"><button id="save">Save location</button><button id="share">Copy exact link</button></div>
       <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
       <div id="replace-location" class="linked-location" role="group" aria-labelledby="replace-location-text" hidden><p id="replace-location-text"></p><div class="row"><button id="replace-cancel" type="button">Cancel</button><button id="replace-confirm" type="button">Replace location</button></div></div>
       <button id="screenshot" disabled>Save PNG</button>
-      <p class="help">Hold left / right to zoom in / out. Shift-drag to pan. Wheel, + / − and arrows also work. J previews Julia; M opens or returns. Esc stops motion; Stop halts refinement. Refresh recalculates this view.</p>
+      <p class="help">Controls:<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag</p>
     </div>
     <div id="panel-colouring" class="tab-panel" role="tabpanel" aria-labelledby="tab-colouring" hidden>
       <label>Colour spacing <output id="cycle-value">64</output><input id="cycle" type="range" min="0" max="1" value="0.5" step="0.001"></label>

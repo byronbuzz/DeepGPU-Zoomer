@@ -329,9 +329,9 @@ Later, investigate preparing missing effect data after visual 100% only if
 inexpensive: retain 100% and frozen time with a separate Preparing colour data
 status, let Stop halt it, and prioritize navigation.
 
-The editable location chooser/name, Advanced ordering and labels, removal of
-Reset panel layout, and independent fullscreen toggle are complete. Fullscreen
-is independent of panel visibility; Escape exits without resetting the view.
+The editable location chooser/name, Advanced ordering and labels, and removal
+of Reset panel layout are complete. Fullscreen uses the browser's native F11;
+the application fullscreen button was removed.
 The lazy-log optimisation comparison was not adopted.
 
 Approved later UI work: retain Colour spacing and Palette offset at the top of
@@ -347,9 +347,12 @@ use helpful hover-only tooltips. Keep status and the hamburger visible with
 controls hidden and do not change Julia preview visibility. A hard-right
 palette point and light-distance control were cancelled.
 
-Approved rotation is for the main fractal only, with a −180° to +180° slider,
-no numerical angle field, CTRL+circular drag, SHIFT pan, centre pivot, zero
-reset, and angle retained in locations and exact links. Rotation is navigation.
+Main-view rotation has a −180° to +180° slider, no numerical angle field,
+Ctrl+circular drag or held Ctrl+Left/Right, Shift pan, a centre pivot and zero
+reset. Locations and exact links retain angle; old records default to zero.
+Home preserves angle; Full Reset clears it. Rotation is navigation and the
+Julia preview remains unrotated. Retained images reproject during rotation;
+rotated numerical grids conservatively decline exact sample remapping.
 Later antialiasing should be sharper, post-image only, after
 completion, with no extra fractal calculation. PNG should export only the
 fractal, with Current viewport, Monitor size and 2× Monitor size as true render

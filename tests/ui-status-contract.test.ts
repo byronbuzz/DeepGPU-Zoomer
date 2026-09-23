@@ -20,7 +20,13 @@ describe('bounded controls and footer wording',()=>{
     expect(main).toContain('refinementTime.text(performance.now())');
   });
   it('keeps the requested controls inside the existing panels without new footer text',()=>{
-    expect(html).toContain('id="fullscreen"');
+    expect(html).not.toContain('id="fullscreen"');
+    expect(main).not.toContain('requestFullscreen');
+    expect(main).not.toContain('fullscreenchange');
+    expect(html).toContain('id="rotation" type="range" min="-180" max="180"');
+    expect(html.indexOf('id="rotation"')).toBeGreaterThan(html.indexOf('id="iteration-slider"'));
+    expect(html.indexOf('id="rotation"')).toBeLessThan(html.indexOf('id="family"'));
+    expect(html).toContain('Controls:<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag');
     expect(html).toContain('id="location-entry"');
     expect(html).not.toContain('id="location-name"');
     expect(html).not.toContain('id="locations"');

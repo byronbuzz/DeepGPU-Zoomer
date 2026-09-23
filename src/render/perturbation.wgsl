@@ -71,6 +71,8 @@ struct Uniforms {
     repeating: u32,
     retainEndpoints: u32,
     hueRotation: f32,
+    rotationCos: vec4<f32>,
+    rotationSin: vec4<f32>,
 };
 
 // Raw worker output is consumed only by the one-time reference decode pass.
@@ -429,7 +431,10 @@ fn iterateDirect(c0: Hdr, wantDerivative: bool, detectCycle: bool) -> Sample {
 fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     if (JULIA) { return iterateWide(pixel, wantDerivative); }
     if (DIRECT) {
-        let offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
+        var offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
+        if (u.rotationCos.x != 1.0 || u.rotationSin.x != 0.0) {
+            offset = hdrMul(offset, Hdr(vec2<f32>(u.rotationCos.x,u.rotationSin.x),vec2<f32>(u.rotationCos.y,u.rotationSin.y),0));
+        }
         let c = hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset);
         let allowInteriorShortcut = !JULIA && u.mode == 0u && u.retainEndpoints == 0u && u.cappedPattern == 0u;
         if (allowInteriorShortcut &&

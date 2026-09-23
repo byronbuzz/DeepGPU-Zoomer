@@ -21,7 +21,8 @@ import { createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleG
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
 import { splitQuad } from "../arithmetic/quad";
-import { reprojectionFor } from "./reprojection";
+import { mapUv, reprojectionFor, type Reprojection } from "./reprojection";
+import { rotationBasis } from "../rotation";
 import { ReferenceWorkerClient } from "./reference-worker-client";
 import type { ReferenceOrbitInput } from "./reference-orbit";
 
@@ -55,6 +56,7 @@ const MIN_BATCH_SAMPLES = 16_384;
 export interface RenderRequest {
   centerX: Decimal;
   centerY: Decimal;
+  angle?: number;
   family?: "mandelbrot" | "julia";
   juliaX?: Decimal;
   juliaY?: Decimal;
@@ -180,16 +182,23 @@ export function binaryExponent(value: Decimal): number {
 
 /** Exact far-corner distance from the retained reference to this viewport. */
 export function referenceViewportRadius(
-  request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height">,
+  request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle">,
   refX: Decimal,
   refY: Decimal,
 ): number {
+  if(request.angle){
+    const {c,s}=rotationBasis(request.angle),halfX=request.unitsPerPixel.times(request.width/2),halfY=request.unitsPerPixel.times(request.height/2);
+    const dx=request.centerX.minus(refX),dy=request.centerY.minus(refY);
+    return Math.max(...[-1,1].flatMap(x=>[-1,1].map(y=>Decimal.hypot(
+      dx.plus(halfX.times(x*c)).minus(halfY.times(y*s)),
+      dy.plus(halfX.times(x*s)).plus(halfY.times(y*c))).toNumber())));
+  }
   const x = request.unitsPerPixel.times(request.width / 2).plus(request.centerX.minus(refX).abs());
   const y = request.unitsPerPixel.times(request.height / 2).plus(request.centerY.minus(refY).abs());
   return Decimal.hypot(x, y).toNumber();
 }
 
-export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height">, refX: Decimal, refY: Decimal): number {
+export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle">, refX: Decimal, refY: Decimal): number {
   return family === "julia" ? 0 : referenceViewportRadius(request, refX, refY);
 }
 export function approximationEligible(family: "mandelbrot" | "julia", mode: number): boolean {
@@ -258,7 +267,7 @@ export function appearanceUpgradeCompatible(
 ): frame is AppearanceFrameIdentity {
   const family=request.family??"mandelbrot",frameFamily=frame?.family??"mandelbrot";
   return !!frame&&!frame.proxy&&frame.width===request.width&&frame.height===request.height&&
-    frame.centerX.eq(request.centerX)&&frame.centerY.eq(request.centerY)&&frame.unitsPerPixel.eq(request.unitsPerPixel)&&
+    frame.centerX.eq(request.centerX)&&frame.centerY.eq(request.centerY)&&frame.unitsPerPixel.eq(request.unitsPerPixel)&&(frame.angle??0)===(request.angle??0)&&
     frameFamily===family&&frame.maxIterations===request.maxIterations&&frame.useApprox===(request.useApprox===true)&&
     frame.method===method&&frame.grid===grid&&
     (family!=="julia"||!!frame.juliaX?.eq(request.juliaX!)&&!!frame.juliaY?.eq(request.juliaY!));
@@ -460,7 +469,7 @@ export class WebGpuRenderer {
     });
     this.antialiasSampler=ctx.device.createSampler({magFilter:'linear',minFilter:'linear'});
     this.uniformBuffer = ctx.device.createBuffer({
-      size: 368,
+      size: 400,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.stopsBuffer = storageBuffer(ctx.device, MAX_STOPS * 4, "palette-stops");
@@ -528,7 +537,7 @@ export class WebGpuRenderer {
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 /** uv' = uv * xform.xy + xform.zw. Identity is (1, 1, 0, 0). */
-struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32>, units: vec4<f32> };
+struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32>, units: vec4<f32>, cross: vec4<f32>, freshCross: vec4<f32> };
 @group(0) @binding(2) var<uniform> display: Presentation;
 @group(0) @binding(3) var coverage: texture_2d<f32>;
 @group(0) @binding(4) var incoming: texture_2d<f32>;
@@ -549,8 +558,8 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let uv = in.uv * display.front.xy + display.front.zw;
-    let oldUV = in.uv * display.back.xy + display.back.zw;
+    let uv = in.uv * display.front.xy + in.uv.yx * display.cross.xy + display.front.zw;
+    let oldUV = in.uv * display.back.xy + in.uv.yx * display.cross.zw + display.back.zw;
     var frontValid = display.options.z > 0.0 && all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0));
     var backValid = display.options.x > 0.0 && all(oldUV >= vec2<f32>(0.0)) && all(oldUV <= vec2<f32>(1.0));
     // Select an actual determined sample. Never blend the two images, and do
@@ -565,7 +574,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         (display.options.y < 0.0 && backSpacing < frontSpacing));
     var spacing=select(frontSpacing,backSpacing,useBack);
     var result = select(front, back, useBack);
-    let freshUV = in.uv * display.fresh.xy + display.fresh.zw;
+    let freshUV = in.uv * display.fresh.xy + in.uv.yx * display.freshCross.xy + display.fresh.zw;
     let fresh = textureSample(incoming, smp, clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0)));
     let valid = display.freshOptions.x > 0.0 && fresh.a > 0.0 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
     let freshSpacing=display.units.z / max(fresh.a,0.00001);
@@ -820,6 +829,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
     const view = this.currentView ?? request;
     const bounds = (frame: FrameView) => {
+      if((frame.angle??0)!==(view.angle??0))return [0,0,0,0];
       const m = reprojectionFor(frame, view);
       return m ? [Math.max(0, -m.offsetX / m.scaleX), Math.max(0, -m.offsetY / m.scaleY),
         Math.min(1, (1 - m.offsetX) / m.scaleX), Math.min(1, (1 - m.offsetY) / m.scaleY)] : [0,0,0,0];
@@ -909,7 +919,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       pass.dispatchWorkgroups(Math.ceil(request.width * grid / 8), Math.ceil(request.height * grid / 8)); pass.end();
       device.queue.submit([encoder.finish()]);
     }
-    this.fieldView = { centerX: request.centerX, centerY: request.centerY,
+    this.fieldView = { centerX: request.centerX, centerY: request.centerY, angle:request.angle??0,
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height };
     this.sampleKey = key;
     return !!mapping;
@@ -936,7 +946,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private encodeBlit(
     encoder: GPUCommandEncoder,
     source: GPUTexture,
-    xform: Float32Array,
+    xform: Reprojection,
     destination?: GPUTexture,
     allowAppearanceFallback=false,
   ) {
@@ -944,7 +954,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!this.xformBuffer) {
       this.xformBuffer = device.createBuffer({
         label: "blit-xform",
-        size: 96,
+        size: 128,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
@@ -954,16 +964,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.samePresentation(frame,this.appearanceHoldFrame));
     const coverage = source === this.history && this.coverageFrame && matchesView(this.coverageFrame) && this.currentView
       ? reprojectionFor(this.coverageFrame, this.currentView, true) : null;
-    const transforms = new Float32Array(24); transforms.set(xform);
+    const transforms = new Float32Array(32);
+    transforms.set([xform.scaleX,xform.scaleY,xform.offsetX,xform.offsetY]);
+    transforms.set([xform.crossX??0,xform.crossY??0],24);
     transforms[10] = source !== this.history || this.historyValid && matchesView(this.lastFrame) ? 1 : 0;
-    if (xform[0] === 0 || xform[1] === 0) transforms[10] = 0;
+    if (xform.scaleX*xform.scaleY-(xform.crossX??0)*(xform.crossY??0) === 0) transforms[10] = 0;
     if (source === this.target && !this.historyValid) transforms[10] = 0;
     if (coverage && this.coverageHistory) {
       transforms.set([coverage.scaleX, coverage.scaleY, coverage.offsetX, coverage.offsetY], 4);
+      transforms.set([coverage.crossX??0,coverage.crossY??0],26);
       transforms[8] = 1;
       const front = this.lastFrame!, view = this.currentView!;
-      const exactStationary = !front.proxy && front.width === view.width && front.height === view.height &&
-        front.centerX.eq(view.centerX) && front.centerY.eq(view.centerY) && front.unitsPerPixel.eq(view.unitsPerPixel);
+      const exactStationary = !front.proxy && this.sameView(front,view);
       transforms[9] = !front.proxy && !exactStationary && this.coverageFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
     }
     const fresh = this.incomingFrame, view = this.currentView;
@@ -971,9 +983,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const m = reprojectionFor(fresh, view);
       if (m) {
         transforms.set([m.scaleX, m.scaleY, m.offsetX, m.offsetY], 12);
+        transforms.set([m.crossX??0,m.crossY??0],28);
         transforms[16] = 1;
-        const exact = fresh.width === view.width && fresh.height === view.height &&
-          fresh.centerX.eq(view.centerX) && fresh.centerY.eq(view.centerY) && fresh.unitsPerPixel.eq(view.unitsPerPixel);
+        const exact = this.sameView(fresh,view);
         transforms[17] = exact ? 1 : 0;
         transforms[18] = exact ? 1 : 0;
       }
@@ -1081,7 +1093,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.encodeBlit(
       encoder,
       source,
-      new Float32Array([mapping.scaleX, mapping.scaleY, mapping.offsetX, mapping.offsetY]),
+      mapping,
       undefined,
       heldAppearance||stale,
     );
@@ -1101,11 +1113,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
   private sameView(a: FrameView, b: FrameView) {
     return a.width === b.width && a.height === b.height && a.centerX.eq(b.centerX) &&
-      a.centerY.eq(b.centerY) && a.unitsPerPixel.eq(b.unitsPerPixel);
+      a.centerY.eq(b.centerY) && a.unitsPerPixel.eq(b.unitsPerPixel) && (a.angle??0)===(b.angle??0);
   }
 
   private fieldIdentity(request:RenderRequest,family:"mandelbrot"|"julia",constant:string,method:Method,grid:number,retainEndpoints:boolean,approximationLevels:number){
-    return [family,constant,request.centerX.toString(),request.centerY.toString(),request.unitsPerPixel.toString(),
+    return [family,constant,request.centerX.toString(),request.centerY.toString(),request.unitsPerPixel.toString(),request.angle??0,
       request.width,request.height,request.maxIterations,request.colors.mode,retainEndpoints,grid,method,
       this.refLength,approximationLevels].join("|");
   }
@@ -1275,7 +1287,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         device.queue.submit([encoder.finish()]);timingSamples.forEach(sample=>this.timing.collect(sample));
       });
       this.appearanceSubmissions++;
-      const frame={family:request.family,juliaX:request.juliaX,juliaY:request.juliaY,centerX:request.centerX,centerY:request.centerY,
+      const frame={family:request.family,juliaX:request.juliaX,juliaY:request.juliaY,centerX:request.centerX,centerY:request.centerY,angle:request.angle??0,
         unitsPerPixel:request.unitsPerPixel,width:request.width,height:request.height,colors,maxIterations:request.maxIterations,useApprox:request.useApprox===true,method,grid};
       const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.currentView)&&this.samePresentation(frame,this.currentView));
       if(!current||this.deviceLost){return {...this.fieldStats!,completed:false,computed:false,computedSamples:0,reusedSamples:0,renderMs:performance.now()-started};}
@@ -1350,6 +1362,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   /** Conservative rectangle with useful sample density for priority, not mere
    * display coverage. Magnified old pixels must not suppress refinement demand. */
   private coverageIn(frame: NonNullable<WebGpuRenderer["lastFrame"]>, view: FrameView) {
+    // Rotated rectangles must not invent covered corners. The affine image can
+    // still be displayed; omit these scheduling hints across orientations.
+    if((frame.angle??0)!==(view.angle??0))return [];
     const m=reprojectionFor(frame,view,!frame.proxy);
     if (!m) return [];
     const regions=frame.proxy ? frame.coveredRegions??(frame.covered?[{...frame.covered,spacing:frame.coveredSpacing??frame.unitsPerPixel}]:[]) :
@@ -1379,8 +1394,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       return false;
     }
     const { device } = this.ctx;
-    this.retainedAnchor ??= createSampleGridAnchor(this.lastFrame ?? frame);
-    const retained={...frame,...planRetainedView(frame,this.retainedAnchor,{overscan:1})};
+    const rotated=!!frame.angle;
+    if(!rotated)this.retainedAnchor ??= createSampleGridAnchor(this.lastFrame?.angle?frame:this.lastFrame ?? frame);
+    const retained=rotated?{...frame}:{...frame,...planRetainedView(frame,this.retainedAnchor!,{overscan:1})};
     const snapshot = device.createTexture({ label: "retained-progress", size: [retained.width,retained.height],
       format: "rgba16float", usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT });
     const candidates=[...this.coverageIn({...frame,proxy:true,coveredRegions:this.determined.rectangles.map(r=>({...r,spacing:frame.unitsPerPixel.times(r.spacing??1)}))},retained),...[this.historyValid?this.lastFrame:null,this.coverageFrame].flatMap(
@@ -1393,7 +1409,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const source = this.historyValid ? this.history! : this.target;
     const mapping = this.historyValid && this.lastFrame ? reprojectionFor(this.lastFrame,retained,!this.lastFrame.proxy) : null;
     const encoder = device.createCommandEncoder({label:"retain-progress"});
-    this.encodeBlit(encoder,source,mapping ? new Float32Array([mapping.scaleX,mapping.scaleY,mapping.offsetX,mapping.offsetY]) : new Float32Array([0,0,-1,-1]),snapshot,
+    this.encodeBlit(encoder,source,mapping ?? {scaleX:0,scaleY:0,offsetX:-1,offsetY:-1},snapshot,
       allowStaleAppearance&&this.stalePresentationCompatible(this.lastFrame,retained));
     device.queue.submit([encoder.finish()]);
     this.currentView = live;
@@ -1417,8 +1433,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     });
     covered.push(...this.determined.rectangles.map(r=>({...r,spacing:r.spacing??1})));
     const hints=new CoverageRegions();for(const c of covered)hints.add(c);
-    return {x:((m?.offsetX??0)+focus.x*(m?.scaleX??1))*request.width,
-      y:((m?.offsetY??0)+focus.y*(m?.scaleY??1))*request.height,zoom:live.zoom??0,covered:hints.rectangles};
+    const mapped=m?mapUv(m,focus.x,focus.y):focus;
+    return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles};
   }
 
   async render(request: RenderRequest): Promise<RenderStats> {
@@ -1455,7 +1471,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     request = { ...request, colors: this.copyColors(request.colors),
       isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
 
-    const keyFor=(value:RenderRequest)=>[value.centerX,value.centerY,value.unitsPerPixel,value.width,value.height,
+    const keyFor=(value:RenderRequest)=>[value.centerX,value.centerY,value.unitsPerPixel,value.width,value.height,value.angle??0,
       value.family,value.juliaX,value.juliaY,value.maxIterations,value.forceMethod,value.useApprox===true,
       JSON.stringify(value.colors)].join("|");
     let requestKey=keyFor(request);
@@ -1571,7 +1587,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     // Layout must match the Uniforms struct in perturbation.wgsl. vec3 members
     // align to 16 bytes, which is what the gaps below are for.
-    const uniforms = new ArrayBuffer(368);
+    const uniforms = new ArrayBuffer(400);
     const f32 = new Float32Array(uniforms);
     const i32 = new Int32Array(uniforms);
     const u32 = new Uint32Array(uniforms);
@@ -1622,6 +1638,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         request.centerY.minus(this.refY).div(offsetPower), request.centerX, request.centerY,
         request.juliaX ?? new Decimal(0), request.juliaY ?? new Decimal(0)].forEach((value, i) => f32.set(splitQuad(value), 56 + i * 4));
     }
+    const rotation=rotationBasis(request.angle??0);
+    // Four-word coefficients preserve the CPU camera basis; no absolute deep
+    // coordinate is converted to f32 for rotation. Zero keeps the legacy path.
+    f32.set(splitQuad(new Decimal(rotation.c)),92);f32.set(splitQuad(new Decimal(rotation.s)),96);
     const stopData=this.fillAppearance(uniforms,colors,this.retainEndpoints);
     this.partialAppearanceUniforms=uniforms.slice(0);
     device.queue.writeBuffer(this.stopsBuffer,0,stopData);
@@ -1650,7 +1670,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     const frame = {
       family: request.family, juliaX: request.juliaX, juliaY: request.juliaY,
-      centerX: request.centerX, centerY: request.centerY,
+      centerX: request.centerX, centerY: request.centerY, angle:request.angle??0,
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
       colors, maxIterations: request.maxIterations,
       useApprox: request.useApprox===true,

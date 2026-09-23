@@ -42,6 +42,9 @@ export function planRetainedView(
   anchor: SampleGridAnchor,
   options: { overscan?: number } = {},
 ): FrameView {
+  // Keep rotated visual snapshots in their source geometry. This axis-aligned
+  // anchor never determines a rotated numerical sample grid.
+  if(view.angle)return {...view};
   const overscan = options.overscan ?? 1.25;
   if (!Number.isFinite(overscan) || overscan < 1 || view.width <= 0 || view.height <= 0 ||
       view.unitsPerPixel.lte(0) || anchor.unitsPerPixel.lte(0)) {
@@ -79,6 +82,7 @@ export function planRetainedView(
 
 /** Exact source indices only: fractional, off-grid, or unsafe i32 maps cannot reuse. */
 export function sampleGridRemap(previous: FrameView, next: FrameView): SampleGridRemap | null {
+  if(previous.angle||next.angle)return null;
   if (previous.unitsPerPixel.lte(0) || next.unitsPerPixel.lte(0)) return null;
   const D = coordinateDecimal([previous.centerX, previous.centerY, previous.unitsPerPixel,
     next.centerX, next.centerY, next.unitsPerPixel]);
