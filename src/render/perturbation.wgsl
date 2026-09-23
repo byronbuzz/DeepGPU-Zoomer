@@ -566,7 +566,7 @@ fn fieldIndex(col: u32, rowIdx: u32) -> u32 {
 }
 
 /// Iterates every sub-sample and stores what the colouring will need.
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(8, 4)
 fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
     let row = gid.y * max(u.sampleStep, 1u) + u.rowOffset;

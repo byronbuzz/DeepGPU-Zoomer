@@ -1726,7 +1726,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
       pass.setPipeline(calculatePipeline);
       pass.setBindGroup(0, bind);
-      pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 8)); pass.end();
+      pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 4)); pass.end();
       this.timing.resolve(encoder, sample); timingSamples.push(sample);
       if (progressive) shade(encoder, width, rows);
       device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
