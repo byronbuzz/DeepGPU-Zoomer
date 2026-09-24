@@ -618,13 +618,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         let backDistance = dot(oldUV-backEdge,oldUV-backEdge);
         let backNumeric = back.a > 1.5 / 255.0;
         if (display.options.x > 0.0 && back.a > 0.0 &&
-            (backNumeric && !haveNumeric || backNumeric == haveNumeric && backDistance < best)) {
+            ((backNumeric && !haveNumeric) || (backNumeric == haveNumeric && backDistance < best))) {
             held = back; best = backDistance; haveNumeric = backNumeric;
         }
         let freshDistance = dot(freshUV-freshEdge,freshUV-freshEdge);
         let freshNumeric = fresh.a > 1.5 / 255.0;
         if (display.freshOptions.x > 0.0 && fresh.a > 0.0 &&
-            (freshNumeric && !haveNumeric || freshNumeric == haveNumeric && freshDistance < best)) {
+            ((freshNumeric && !haveNumeric) || (freshNumeric == haveNumeric && freshDistance < best))) {
             held = fresh; best = freshDistance; haveNumeric = freshNumeric;
         }
         for (var i = 0u; i < 5u; i = i + 1u) {
@@ -634,7 +634,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 let c = textureLoad(src, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
                 let d = dot(uv-p, uv-p);
                 let numeric = c.a > 1.5 / 255.0;
-                if (c.a > 0.0 && (numeric && !haveNumeric || numeric == haveNumeric && d < best)) {
+                if (c.a > 0.0 && ((numeric && !haveNumeric) || (numeric == haveNumeric && d < best))) {
                     held = c; best = d; haveNumeric = numeric;
                 }
             }
@@ -644,7 +644,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 let c = textureLoad(coverage, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
                 let d = dot(oldUV-p, oldUV-p);
                 let numeric = c.a > 1.5 / 255.0;
-                if (c.a > 0.0 && (numeric && !haveNumeric || numeric == haveNumeric && d < best)) {
+                if (c.a > 0.0 && ((numeric && !haveNumeric) || (numeric == haveNumeric && d < best))) {
                     held = c; best = d; haveNumeric = numeric;
                 }
             }
@@ -654,7 +654,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 let c = textureLoad(incoming, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
                 let d = dot(freshUV-p, freshUV-p);
                 let numeric = c.a > 1.5 / 255.0;
-                if (c.a > 0.0 && (numeric && !haveNumeric || numeric == haveNumeric && d < best)) {
+                if (c.a > 0.0 && ((numeric && !haveNumeric) || (numeric == haveNumeric && d < best))) {
                     held = c; best = d; haveNumeric = numeric;
                 }
             }
