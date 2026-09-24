@@ -101,6 +101,8 @@ export interface RenderRequest {
 export interface RenderStats {
   completed: boolean;
   computed: boolean;
+  /** Existing ordinary field refined from a lower Dynamic iteration cap. */
+  capUpgrade?: boolean;
   computedSamples: number;
   reusedSamples: number;
   sampleWidth: number;
@@ -443,6 +445,8 @@ export class WebGpuRenderer {
    * recolouring would recompute the frame it is trying to avoid.
    */
   private fieldKey = "";
+  /** Old-cap presentation may follow camera motion while an upgrade settles. */
+  private capPresentationTarget:number|null=null;
   /** True when the last render stopped early. */
   private aborted = false;
   private laBuffer: GPUBuffer | null = null;
@@ -1089,7 +1093,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
-    const matchesView = (frame: WebGpuRenderer["lastFrame"]) => !this.currentView || this.samePresentation(frame,this.currentView)||
+    const matchesView = (frame: WebGpuRenderer["lastFrame"]) => !this.currentView || this.presentationCompatible(frame,this.currentView)||
       !!(allowAppearanceFallback&&frame===this.lastFrame)||
       !!(allowAppearanceFallback&&this.appearanceHoldFrame&&this.appearanceHoldActive(this.currentView)&&
         this.samePresentation(frame,this.appearanceHoldFrame));
@@ -1233,6 +1237,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if(this.deviceLost)return false;
     this.validateCoordinates(request);
     this.currentView = request;
+    if(this.capUpgradeBase(request))this.capPresentationTarget=request.maxIterations;
     const heldAppearance=this.appearanceHoldActive(request);
     if(this.appearanceHoldFrame&&!heldAppearance)this.appearanceHoldFrame=null;
     if (this.pendingReferenceDemand?.followView && !this.referenceDemandCompatible(this.pendingReferenceDemand, request)) {
@@ -1248,7 +1253,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!last || !source || !this.blitPipeline) {
       return false;
     }
-    const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
+    const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.presentationCompatible(frame,request);
     const heldCompatible=(frame:WebGpuRenderer["lastFrame"])=>!!(heldAppearance&&this.appearanceHoldFrame&&this.samePresentation(frame,this.appearanceHoldFrame));
     const stale=allowStaleAppearance&&this.historyValid&&this.stalePresentationCompatible(last,request);
     const incomingAvailable = compatible(this.incomingFrame) && reprojectionFor(this.incomingFrame!, request);
@@ -1285,6 +1290,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
     this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
+    this.capPresentationTarget=null;
     this.fieldStats=null;this.fieldDescriptor=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
     this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
     this.abort();
@@ -1351,6 +1357,34 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       frame.useApprox === (request.useApprox === true) &&
       (request.family !== "julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors) === JSON.stringify(request.colors);
+  }
+  /** Only an otherwise-identical, completed ordinary field can be refined in place. */
+  private capUpgradeBase(request:RenderRequest): NonNullable<WebGpuRenderer["lastFrame"]>|null {
+    const frame=this.completedFrame,descriptor=this.fieldDescriptor;
+    const work=this.workRequest(request),family=request.family??'mandelbrot';
+    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
+    const constant=family==='julia'?`${request.juliaX},${request.juliaY}`:'';
+    if(!request.dynamicIterations||!request.followView||!frame||!descriptor||!this.fieldComplete||this.aborted||
+      !this.currentImageValid||!this.fieldBuffer||!this.fieldView||!this.fieldKey||
+      request.maxIterations<=frame.maxIterations||!this.sameView(frame,work)||!this.sameView(this.fieldView,work)||
+      descriptor.maxIterations!==frame.maxIterations||descriptor.family!==family||descriptor.constant!==constant||
+      descriptor.mode!==0||descriptor.grid!==1||descriptor.method!==method||descriptor.retainEndpoints||this.retainEndpoints||
+      descriptor.useApprox!==(request.useApprox===true)||frame.method!==method||frame.useApprox!==(request.useApprox===true)||
+      request.colors.mode!==0||request.colors.supersample!==1||request.colors.postAntialias||
+      (request.colors.capped??0)!==0||needsEndpoints(request.colors)||
+      !this.samePresentation({...frame,maxIterations:request.maxIterations},work))return null;
+    return frame;
+  }
+  /** An old cap is display-compatible only while its exact field is upgrading. */
+  private presentationCompatible(frame:WebGpuRenderer["lastFrame"],request:RenderRequest):frame is NonNullable<WebGpuRenderer["lastFrame"]>{
+    const held=this.completedFrame;
+    const base=this.capUpgradeBase(request)??
+      (request.dynamicIterations&&held&&this.capPresentationTarget===request.maxIterations&&
+        request.maxIterations>held.maxIterations&&
+        this.samePresentation({...held,maxIterations:request.maxIterations},request)?held:null);
+    return !!(base&&frame&&frame.maxIterations===base.maxIterations&&
+      this.samePresentation({...frame,maxIterations:request.maxIterations},request)) ||
+      this.samePresentation(frame,request);
   }
   private stalePresentationCompatible(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>){
     return !!frame&&frame.family===request.family&&frame.maxIterations===request.maxIterations&&
@@ -1480,6 +1514,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.workRequest(this.currentView))&&this.samePresentation(frame,this.currentView));
       if(!current||this.deviceLost){return {...this.fieldStats!,completed:false,computed:false,computedSamples:0,reusedSamples:0,renderMs:performance.now()-started};}
       this.commitHistory(retained,candidate!);candidate=undefined;this.lastFrame=retained;this.completedFrame=frame;this.currentImageValid=true;this.historyValid=true;this.incomingFrame=null;this.appearanceHoldFrame=null;
+      this.capPresentationTarget=null;
       if(candidateAa){this.spareAntialias?.destroy();this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
       this.antialiasFrame=colors.postAntialias?frame:null;this.fieldUniforms=uniforms;this.lastPartialAt=performance.now();this.appearancePublications++;
       const result={...this.fieldStats!,completed:true,computed:false,computedSamples:0,reusedSamples:request.width*request.height,
@@ -1666,7 +1701,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const live = request.followView ? this.currentView ?? request : request;
     const m = reprojectionFor(request,live);
     const focus = live.focus ?? {x:.5,y:.5};
-    const covered = [this.historyValid ? this.lastFrame : null,this.coverageFrame].flatMap(frame => {
+    // Old-cap presentation coverage is not upgraded numerical coverage.
+    const covered = (this.capUpgradeBase(request)?[]:[this.historyValid ? this.lastFrame : null,this.coverageFrame]).flatMap(frame => {
       if (!this.samePresentation(frame,request)) return [];
       return this.coverageIn(frame,request).map(r=>({...r,spacing:r.spacing.div(request.unitsPerPixel).toNumber()}));
     });
@@ -1912,8 +1948,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // only rebuilt when one of these changes.
     const fieldKey = this.fieldIdentity(request,family,constant,method,grid,this.retainEndpoints,u32[20]);
     const fieldStale = fieldKey !== this.fieldKey || this.aborted;
+    const capUpgrade=fieldStale&&!!this.capUpgradeBase(request);
+    if(capUpgrade)this.capPresentationTarget=request.maxIterations;
     const sampleKey = this.sampleIdentity(request,family,constant,method,grid,limbs,u32[20]);
-    if (fieldStale) {
+    if (fieldStale && !capUpgrade) {
       this.currentImageValid=false;
       await checkedGpu(device,()=>this.moveField(request, request.width * request.height * grid * grid, sampleKey,
         grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid));
@@ -1922,6 +1960,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       // sample density: sparse and dense visits use the same numerical policy.
       u32[41] = grid === 1 && colors.mode !== 2 ? 1 : 0;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
+    } else if(capUpgrade) {
+      // Keep the old field and visible target. Reopened regions will visit only
+      // samples stamped with an older cap; no CPU whole-region reuse applies.
+      this.reuseMapping=null;this.reusableComplete=false;
+      u32[41]=2;
+      device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
     }
     this.exactTotalSamples=request.width*request.height;
     this.exactCompletedSamples=fieldStale?0:this.exactTotalSamples;
@@ -1948,7 +1992,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let exactCoverage=fieldStale?0:request.width*request.height;
     u32[40] = 0; u32[42] = 0; u32[43] = request.width;
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-    if (fieldStale) {
+    if (fieldStale && !capUpgrade) {
       // Initialize once: copied exact samples become visible, unknown positions
       // have zero alpha. A recycled allocation never supplies validity.
       const init = device.createCommandEncoder({ label: "initialize-incoming" });
@@ -1958,7 +2002,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
     const batchCostKey=[family,method,request.maxIterations,limbs,colors.mode,grid].join("|");
-    if (this.batchCostKey!==batchCostKey) { this.batchCostKey=batchCostKey; this.batchMsPerSample=0; }
+    if (this.batchCostKey!==batchCostKey) {
+      this.batchCostKey=batchCostKey;
+      this.batchMsPerSample=capUpgrade?
+        Math.max(this.batchMsPerSample,tuning.batchTargetMs/startingBatchVisits(request.maxIterations,tuning.batchMultiplier)):0;
+    }
     if (!fieldStale) this.pending.reset(0,0);
     if (fieldStale) { this.pending.reset(request.width,request.height,previewStride,request.followView); this.determined=new CoverageRegions(); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
     const pipelineStarted=performance.now();
@@ -1997,7 +2045,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const width=region.width, rows=region.height;
       this.latestRegion=region;
       const m = this.reuseMapping, old = this.reusableView;
-      const fullyKnown = this.reusableComplete && m && old && m.denominator === 1 &&
+      const fullyKnown = !capUpgrade && this.reusableComplete && m && old && m.denominator === 1 &&
         m.offsetX + region.x * m.step >= 0 && m.offsetY + region.y * m.step >= 0 &&
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
         m.offsetY + (region.y + rows - 1) * m.step < old.height;
@@ -2112,7 +2160,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if(!shape){
         const elapsed = performance.now() - batchStarted;
         const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
-        this.batchMsPerSample = this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
+        this.batchMsPerSample = capUpgrade ? Math.max(this.batchMsPerSample,cost) :
+          this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
       }
       await yieldToEvents();
       if (!request.isCurrent!() || this.abortRequested) {
@@ -2151,7 +2200,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           const encoder=device.createCommandEncoder({label:'shade'});
           u32[26]=request.height;u32[54]=1;u32[40]=0;u32[42]=0;u32[43]=request.width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
-          if(!fieldStale||!progressive||colors.mode===1||(colors.effect??0)>=7&&(colors.effect??0)<=9)shade(encoder,request.width,request.height);
+          if(capUpgrade||!fieldStale||!progressive||colors.mode===1||(colors.effect??0)>=7&&(colors.effect??0)<=9)shade(encoder,request.width,request.height);
           this.encodeCompletedSnapshot(encoder,frame,retained,candidate);
           if(candidateAa)this.encodeAntialias(encoder,this.target!,candidateAa,timingSamples);
           device.queue.submit([encoder.finish()]);collectTimings();
@@ -2165,11 +2214,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // supplies exact coverage separately; cached recolours have zero visits.
         if(colors.mode!==2&&counters[5]+counters[6]!==submittedVisits)throw Error('GPU sample accounting did not match submitted work.');
         this.fieldKey=fieldKey;this.fieldComplete=true;
+        if(capUpgrade)this.sampleKey=sampleKey;
         const currentPresentation=(!presentationCurrent||presentationCurrent())&&
           (!request.followView||!this.currentView||this.samePresentation(frame,this.currentView));
         if(currentPresentation){
           this.commitHistory(retained,candidate!);candidate=undefined;
           this.lastFrame=retained;this.completedFrame=frame;this.currentImageValid=true;this.appearanceHoldFrame=null;published=true;
+          this.capPresentationTarget=null;
           if(candidateAa){this.spareAntialias?.destroy();this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
           this.antialiasFrame=colors.postAntialias?frame:null;
         }
@@ -2189,7 +2240,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const total = skippedIterations + plainIterations;
 
     const result: RenderStats = {
-      completed, computed: fieldStale,
+      completed, computed: fieldStale, capUpgrade,
       computedSamples: counters[5], reusedSamples: counters[6] + cpuReused,
       sampleWidth: request.width, sampleHeight: request.height,
       limbs,
@@ -2207,7 +2258,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       plainIterations,
       skipRatio: total > 0 ? skippedIterations / total : 0,
       cappedRatio: counters[5] > 0 ? counters[4] / counters[5] : 0,
-      limitHitRatio: counters[5] > 0 ? counters[12] / counters[5] : 0,
+      limitHitRatio: capUpgrade ? counters[12]/(request.width*request.height) : counters[5] > 0 ? counters[12] / counters[5] : 0,
     };
     if(completed&&this.fieldComplete){
       this.fieldDescriptor={family,constant,maxIterations:request.maxIterations,mode:colors.mode,grid,method,useApprox:request.useApprox===true,retainEndpoints:this.retainEndpoints};

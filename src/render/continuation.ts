@@ -13,10 +13,10 @@ export function continuationRegion(width:number,height:number,stride:number,limi
 /** The incumbent module stays byte-for-byte unchanged; only this entry resumes. */
 export function continuationEntry(source:string) {
   const call='let s = iterateAny(pixel, distanceMode);';
-  const known='let determined = field[fieldIndex(col, row)].y >= 0.0;';
+  const known='let previous = field[fieldIndex(col, row)];';
   if(source.split(call).length!==2||source.split(known).length!==2)throw Error('Continuation shader entry no longer matches');
   return source.replace(call,'let s = iterateWideContinued(pixel, stateIndex);\n            if (s.z2 < 0.0) { return; }\n            if (continuation.resume != 0u) { atomicAnd(&continuation.pendingBits[stateIndex / 32u], ~(1u << (stateIndex % 32u))); }')
     .replace(known,known+'\n    let stateIndex = gid.y * continuation.columns + gid.x;\n    if (continuation.resume != 0u && (atomicLoad(&continuation.pendingBits[stateIndex / 32u]) & (1u << (stateIndex % 32u))) == 0u) { return; }')
-    .replace('if ((u.reuseField != 0u || u.sampleStep > 1u) && determined) {',
-      'if (continuation.resume == 0u && (u.reuseField != 0u || u.sampleStep > 1u) && determined) {');
+    .replace('if (skipKnown) {',
+      'if (continuation.resume == 0u && skipKnown) {');
 }

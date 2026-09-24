@@ -22,6 +22,7 @@ let dynamicEnabled=true;
 try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
 let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0;
 let capTarget=0,capRevision=-1,sliderEditing=false;
+let deferredDynamicDecrease:number|null=null;
 let baseEditTimer:ReturnType<typeof setTimeout>|undefined,baseEditing=false;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let stopped=false, refreshPending=false, refreshHolding=false, stoppedAppearancePending=false;
@@ -119,7 +120,7 @@ function currentDepth(){
   return Math.log10(2.8)-Math.log10(Number(mantissa))-Number(exponent);
 }
 function resetDynamicAnchor(){
-  anchorDepth=currentDepth();capTarget=0;capRevision=camera.revision;lastDynamicUpdate=0;
+  anchorDepth=currentDepth();capTarget=0;capRevision=camera.revision;lastDynamicUpdate=0;deferredDynamicDecrease=null;
 }
 function changeEffectiveLimit(limit:number,atBatchBoundary=false){
   const next=Math.max(1,Math.min(MAX_ITERATIONS,Math.round(limit)));
@@ -135,7 +136,10 @@ function setManualBase(limit:number){
   syncIterationLabel();persist(false);return true;
 }
 function maybeUpdateDynamicLimit(time:number){
-  if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing||time-lastDynamicUpdate<500)return;
+  if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing||busy||time-lastDynamicUpdate<500)return;
+  // An upgrade starts only from a settled exact field. A running old-cap
+  // calculation is allowed to finish before the next cap decision.
+  if(!currentFieldComplete())return;
   // A new reference demand is allowed to finish; the live view is then picked
   // up by the renderer's existing bounded retarget after a numerical batch.
   const progress=engine?.debugProgress();
@@ -145,6 +149,8 @@ function maybeUpdateDynamicLimit(time:number){
   const desired=Math.min(MAX_ITERATIONS,Math.max(baseIterations,depthTarget,capTarget));
   const difference=desired-view.iterations;
   if(Math.abs(difference)<16)return;
+  if(difference<0){deferredDynamicDecrease=desired;lastDynamicUpdate=time;return;}
+  deferredDynamicDecrease=null;
   const step=Math.max(128,Math.ceil(view.iterations*.15));
   lastDynamicUpdate=time;
   changeEffectiveLimit(Math.abs(difference)<=step?desired:view.iterations+Math.sign(difference)*step,true);
@@ -211,7 +217,15 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||rotating||rotationSliderHeld||controlDown&&rotationKeys.size>0||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;capTarget=0;capRevision=camera.revision;preparing(now);}
+function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;capTarget=0;capRevision=camera.revision;
+  if(dynamicEnabled&&deferredDynamicDecrease!==null){
+    // The camera already requires a new field, so apply the pending lower cap
+    // at this natural numerical boundary rather than invalidating in place.
+    view={...view,iterations:Math.max(1,Math.min(MAX_ITERATIONS,Math.round(baseIterations+tuning.dynamicDepthGain*Math.max(0,currentDepth()-anchorDepth))))};
+    deferredDynamicDecrease=null;syncIterationLabel();syncTuningLabels();
+  }
+  preparing(now);
+}
 function syncRotation(){el<HTMLInputElement>('rotation').value=String(camera.angle);el('rotation-value').textContent=`${Number(camera.angle.toFixed(1))}°`;}
 function setRotation(angle:number,held=true){const previous=camera.revision;camera.setAngle(angle);if(camera.revision===previous)return;
   if(held)refinementTime.heldCameraChange();else refinementTime.demand(performance.now());changed();syncRotation();}
@@ -314,7 +328,7 @@ async function compute(){
     const result=await engine.render(request());
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;stats=result;if(result.computed)fields++;else recolours++;
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
-      if(dynamicEnabled&&result.computed&&result.computedSamples>0){
+      if(dynamicEnabled&&result.computed&&(result.computedSamples>0||result.capUpgrade)){
         if(capRevision!==camera.revision){capRevision=camera.revision;capTarget=0;}
         capTarget=baseIterations+tuning.dynamicCapGain*Math.max(0,result.limitHitRatio*100-.5);
       }

@@ -89,17 +89,17 @@ struct Uniforms {
  * [4] non-escaped samples (including known interiors), [5] samples total,
  * [12] unknown samples that actually reached the iteration limit.
  *
- * [4] and [5] are what tells the caller whether the budget was the binding
- * constraint. A sample that hit the cap either is interior or simply ran out
- * of iterations, and only raising the cap distinguishes them.
+ * [12] distinguishes an unproven cap hit from an analytic or exact periodic
+ * interior. Upgrade stamps ensure each reprocessed cap hit is counted once.
  */
 @group(0) @binding(6) var<storage, read_write> stats: array<atomic<u32>>;
 /**
  * One entry per sub-sample, holding everything the colouring needs and
  * nothing about how it should look:
  *
- *   iteration mode  x = iteration count, negative when the point never
- *                       escaped; y = |z|^2 at bail-out, for smooth shading
+ *   iteration mode  x = escape iteration, -1 for proven interior, or
+ *                       -(iteration cap + 2) for cap-unresolved; y = |z|^2
+ *                       at bail-out, for smooth shading
  *   distance mode   x = height field; y = 1 when the point escaped
  *
  * Filling this is the expensive half. Changing a palette, a light angle or a
@@ -613,8 +613,14 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     // The remap pass may have retained a compatible sample. Sparse work must
     // also leave any already determined anchor alone: regions can interleave,
     // and later visits do not recompute a sample merely because density changed.
-    let determined = field[fieldIndex(col, row)].y >= 0.0;
-    if ((u.reuseField != 0u || u.sampleStep > 1u) && determined) {
+    let previous = field[fieldIndex(col, row)];
+    let determined = previous.y >= 0.0;
+    // In cap-upgrade mode, old cap hits need another opportunity. A hit
+    // already stamped with this cap is skipped on overlapping sparse visits.
+    let resolved = previous.x >= -1.0 || previous.x <= -(f32(u.maxIterations) + 2.0);
+    let skipKnown = determined && ((u.reuseField == 2u && resolved) ||
+        (u.reuseField != 2u && (u.reuseField != 0u || u.sampleStep > 1u)));
+    if (skipKnown) {
         atomicAdd(&stats[6], 1u);
         return;
     }
@@ -662,7 +668,8 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (distanceMode) {
                 entry = vec2<f32>(heightOf(s), select(0.0, 1.0, s.escaped));
             } else {
-                entry = vec2<f32>(select(-1.0, f32(s.n), s.escaped), s.z2);
+                let interior = select(-(f32(u.maxIterations) + 2.0), -1.0, s.n < u.maxIterations);
+                entry = vec2<f32>(select(interior, f32(s.n), s.escaped), s.z2);
             }
             field[fieldIndex(col * grid + sx, row * grid + sy)] = entry;
             if(u.retainEndpoints!=0u){endpoints[fieldIndex(col*grid+sx,row*grid+sy)]=vec4<f32>(s.z,f32(s.n),s.z2);}
