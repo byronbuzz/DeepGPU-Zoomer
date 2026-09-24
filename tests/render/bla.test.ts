@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   BASE_STEP,
   ENTRY_FLOATS,
@@ -57,6 +57,26 @@ describe("standard linear BLA", () => {
     expect(checkpoints).toBeGreaterThan(1);
     await expect(buildBlaAsync(orbit, 10001, 1e-20, async () => { throw Error("cancelled"); }))
       .rejects.toThrow("cancelled");
+  });
+
+  it("keeps fixed checkpoints when off and adds time checkpoints only when enabled", async () => {
+    const orbit = new Float32Array(257 * 6);
+    for (let i = 0; i < 257; i++) { orbit[i * 6] = 0.3; orbit[i * 6 + 3] = 0.4; }
+    let fixedCheckpoints = 0, offCheckpoints = 0, timedCheckpoints = 0;
+    const fixed = await buildBlaAsync(orbit, 257, 1e-20, async () => { fixedCheckpoints++; });
+    const off = await buildBlaAsync(orbit, 257, 1e-20, async () => { offCheckpoints++; }, {}, () => 0);
+    expect(offCheckpoints).toBe(fixedCheckpoints);
+    expect(off).toEqual(fixed);
+
+    let clock = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => ++clock);
+    try {
+      const timed = await buildBlaAsync(orbit, 257, 1e-20, async () => { timedCheckpoints++; }, {}, () => 1);
+      expect(timedCheckpoints).toBeGreaterThan(fixedCheckpoints);
+      expect(timed).toEqual(fixed);
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("starts at reference index one and packs only A, B and radius", () => {

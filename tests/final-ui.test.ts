@@ -4,6 +4,7 @@ import { RefiningStatus } from '../src/refining-status';
 import { RANGE_DEFAULTS, wheelRangeValue } from '../src/range-controls';
 import { DEFAULT_COLORS, cycleFromSlider } from '../src/logic/colorSettings';
 import { HOME, iterationFromSlider } from '../src/state';
+import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS } from '../src/tuning';
 
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 
@@ -50,6 +51,16 @@ describe('range defaults and hover wheel', () => {
     expect(RANGE_DEFAULTS.rotation).toBe(0);
     expect(RANGE_DEFAULTS.speed).toBe(0.8);
     expect(RANGE_DEFAULTS['panel-opacity']).toBe(0.8);
+    expect(RANGE_DEFAULTS['tuning-direct']).toBe(DEFAULT_TUNING.directExponent);
+    expect(RANGE_DEFAULTS['tuning-batch-target']).toBe(DEFAULT_TUNING.batchTargetMs);
+    expect(RANGE_DEFAULTS['tuning-batch-multiplier']).toBe(DEFAULT_TUNING.batchMultiplier);
+    expect(RANGE_DEFAULTS['tuning-hdr']).toBe(DEFAULT_TUNING.hdrExponent);
+    expect(RANGE_DEFAULTS['tuning-pointer-weight']).toBe(DEFAULT_TUNING.pointerWeight);
+    expect(RANGE_DEFAULTS['tuning-distributed-weight']).toBe(DEFAULT_TUNING.distributedWeight);
+    expect(RANGE_DEFAULTS['tuning-oldest-weight']).toBe(DEFAULT_TUNING.oldestWeight);
+    expect(2 ** RANGE_DEFAULTS['tuning-pointer-radius']).toBe(DEFAULT_TUNING.pointerRadius);
+    expect(HARD_PIXEL_BUDGETS[RANGE_DEFAULTS['tuning-hard-budget']]).toBe(DEFAULT_TUNING.hardPixelBudget);
+    expect(RANGE_DEFAULTS['tuning-bla-rebuild']).toBe(DEFAULT_TUNING.blaRebuildPercent);
     for (const [id, key] of [['color-offset','offset'],['hue-rotation','hueRotation'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)
       expect(RANGE_DEFAULTS[id]).toBe(DEFAULT_COLORS[key]);
   });

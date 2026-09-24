@@ -10,11 +10,13 @@ import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
 import { setupRangeControls } from './range-controls';
+import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS, loadTuning, modifiedTuningCount, normalizeTuning, saveTuning, startingBatchVisits, type TuningSettings } from './tuning';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
 const canvas=el<HTMLCanvasElement>('fractal');
 const camera=new Camera();
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
+let tuning:TuningSettings=loadTuning();
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let stopped=false, refreshPending=false, refreshHolding=false, stoppedAppearancePending=false;
 let retainedRequest:RenderRequest|null=null;
@@ -75,6 +77,40 @@ function preparing(time=performance.now()){
 function syncIterationLabel(){
   el('iteration-value').textContent=view.iterations.toLocaleString();
 }
+function syncTuningLabels(iterations=view.iterations){
+  const count=modifiedTuningCount(tuning);
+  setText(el('tuning-status'),count?`${count} tuning settings modified`:'All settings match 5183');
+  const fields:[keyof TuningSettings,string][]=[
+    ['directExponent','direct'],['batchTargetMs','batch-target'],['batchMultiplier','batch-multiplier'],
+    ['hdrExponent','hdr'],['pointerWeight','pointer-weight'],['distributedWeight','distributed-weight'],
+    ['oldestWeight','oldest-weight'],['pointerRadius','pointer-radius'],['hardPixelBudget','hard-budget'],
+    ['blaRebuildPercent','bla-rebuild'],['blaChunkMs','bla-chunk'],
+  ];
+  for(const [key,id] of fields){
+    el<HTMLInputElement|HTMLSelectElement>(`tuning-${id}`).value=key==='pointerRadius'?String(Math.log2(tuning.pointerRadius)):key==='hardPixelBudget'?String(HARD_PIXEL_BUDGETS.indexOf(tuning.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number])):String(tuning[key]);
+    el(`tuning-${id}-modified`).hidden=tuning[key]===DEFAULT_TUNING[key];
+  }
+  const depthAt=(exponent:number)=>`depth ~10^${(exponent+Math.log10(2.8/Math.max(1,canvas.height))).toFixed(2)}`;
+  setText(el('tuning-direct-value'),`10^-${tuning.directExponent} units/px · ${depthAt(tuning.directExponent)}`);
+  setText(el('tuning-batch-target-value'),`${tuning.batchTargetMs} ms`);
+  setText(el('tuning-batch-multiplier-value'),`${tuning.batchMultiplier}× · ${startingBatchVisits(iterations,tuning.batchMultiplier).toLocaleString()} starting/minimum visits at ${iterations.toLocaleString()} iterations`);
+  setText(el('tuning-hdr-value'),`10^-${tuning.hdrExponent} units/px · ${depthAt(tuning.hdrExponent)}`);
+  setText(el('tuning-pointer-weight-value'),String(tuning.pointerWeight));
+  setText(el('tuning-distributed-weight-value'),String(tuning.distributedWeight));
+  setText(el('tuning-oldest-weight-value'),String(tuning.oldestWeight));
+  setText(el('tuning-pointer-radius-value'),`${tuning.pointerRadius} px`);
+  setText(el('tuning-hard-budget-value'),tuning.hardPixelBudget?`${tuning.hardPixelBudget.toLocaleString()} operations per slice`:'Off');
+  setText(el('tuning-bla-rebuild-value'),`${tuning.blaRebuildPercent}%`);
+  setText(el('tuning-bla-chunk-value'),tuning.blaChunkMs?`${tuning.blaChunkMs} ms while moving`:'Off');
+}
+function changeTuning(key:keyof TuningSettings,value:number){
+  const next=normalizeTuning({...tuning,[key]:value},key);
+  if((Object.keys(DEFAULT_TUNING) as (keyof TuningSettings)[]).every(field=>next[field]===tuning[field]))return;
+  tuning=next;
+  if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
+  syncTuningLabels();
+  refresh();
+}
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
 function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();heldKeyActions.clear();rotationKeys.clear();releasePointer();}
@@ -121,6 +157,7 @@ function syncControls(){
   depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
   syncJuliaPreview();
   syncAppearance();
+  syncTuningLabels();
 }
 function load(next:SavedView,record=true){
   dismissReplacement();
@@ -227,7 +264,7 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),tuning:{...tuning},isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
@@ -247,7 +284,7 @@ async function recolorStopped(){
   catch(e){if(g===generation){error=String(e);message(error);}}
   finally{busy=false;if(stopped)captureStoppedPartial();}
 }
-function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;if(resetTimer){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;}preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());preparing();return true;}
+function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;if(resetTimer){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;}preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());syncTuningLabels();preparing();return true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
@@ -258,6 +295,7 @@ function tick(time:number){
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);refinementTime.heldCameraChange();changed();}
     if(engine){
+      if(!stopped&&!refreshPending&&!error&&tuning.blaRebuildPercent<100&&!moving()&&engine.consumeSettledBlaRetry())refresh();
       if(refreshPending&&!busy)void refreshCalculation();
       engine.reproject(request(),stopped||refreshHolding);
       // Give the latest preview one turn between main jobs, without awaiting it.
@@ -328,8 +366,24 @@ rotationSlider.onchange=()=>{if(!rotationSliderHeld)finishSliderRotation();};
 rotationSlider.onpointerup=finishSliderRotation;rotationSlider.onpointercancel=finishSliderRotation;rotationSlider.onkeyup=finishSliderRotation;rotationSlider.onblur=finishSliderRotation;
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
-el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
+el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();syncTuningLabels(n);};
 el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
+const tuningInputs:[keyof TuningSettings,string,(value:number)=>number][]=[
+  ['directExponent','direct',Number],['batchTargetMs','batch-target',Number],['batchMultiplier','batch-multiplier',Number],
+  ['hdrExponent','hdr',Number],['pointerWeight','pointer-weight',Number],['distributedWeight','distributed-weight',Number],
+  ['oldestWeight','oldest-weight',Number],['pointerRadius','pointer-radius',value=>Math.round(2**value)],
+  ['hardPixelBudget','hard-budget',value=>HARD_PIXEL_BUDGETS[value]??0],['blaRebuildPercent','bla-rebuild',Number],['blaChunkMs','bla-chunk',Number],
+];
+for(const [key,id,parse] of tuningInputs){
+  const control=el<HTMLInputElement|HTMLSelectElement>(`tuning-${id}`);
+  control.oninput=()=>changeTuning(key,parse(Number(control.value)));
+}
+el('tuning-reset').onclick=()=>{
+  if(!modifiedTuningCount(tuning))return;
+  tuning={...DEFAULT_TUNING};
+  if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
+  syncTuningLabels();refresh();
+};
 el<HTMLFormElement>('coordinates').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),x:el<HTMLInputElement>('cx').value,y:el<HTMLInputElement>('cy').value,span:el<HTMLInputElement>('span').value});}catch(err){message(String(err));}};
 const locationEntry=el<HTMLInputElement>('location-entry'),locationOptions=el<HTMLElement>('location-options');
 const replaceLocation=el<HTMLElement>('replace-location');
@@ -424,6 +478,7 @@ el('full-reset').onclick=()=>{
   speed=.8;el<HTMLInputElement>('speed').value='.8';el('speed-value').textContent='0.8×';
   selectedLocation=null;locationEntry.value='';dismissReplacement();closeLocationOptions();el<HTMLSelectElement>('random-style').value='harmonious';
   profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
+  tuning={...DEFAULT_TUNING};saveTuning(tuning);syncTuningLabels();
   try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}
   history.replaceState(null,'',location.pathname+location.search);el('linked-location').hidden=true;
   panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message('Defaults restored. Saved locations were kept.',true);

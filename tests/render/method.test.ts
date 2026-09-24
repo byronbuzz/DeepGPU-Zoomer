@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import Decimal from "decimal.js";
 import { binaryExponent, Method, methodForScale, limbsForScale } from "../../src/render/webgpu-renderer";
+import { DEFAULT_TUNING } from "../../src/tuning";
 
 const upp = (span: string, height = 1080) => new Decimal(span).div(height);
 
@@ -50,5 +51,14 @@ describe("methodForScale", () => {
     // stronger method.
     expect(methodForScale(new Decimal("1e-2").div(100))).toBe(Method.Direct);
     expect(methodForScale(new Decimal("1e-2").div(100000))).toBe(Method.Plain);
+  });
+
+  it("keeps 5183 boundaries by default and moves only the selected crossovers", () => {
+    for (const spacing of ["1e-4", "1e-5", "1e-6", "1e-24", "1e-25", "1e-26"])
+      expect(methodForScale(new Decimal(spacing), DEFAULT_TUNING)).toBe(methodForScale(new Decimal(spacing)));
+    const tuned={...DEFAULT_TUNING,directExponent:8,hdrExponent:20};
+    expect(methodForScale(new Decimal("1e-6"),tuned)).toBe(Method.Direct);
+    expect(methodForScale(new Decimal("1e-9"),tuned)).toBe(Method.Plain);
+    expect(methodForScale(new Decimal("1e-21"),tuned)).toBe(Method.Hdr);
   });
 });

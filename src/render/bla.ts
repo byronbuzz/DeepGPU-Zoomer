@@ -106,6 +106,7 @@ function* buildBlaSteps(
   length: number,
   maxDelta: number | Decimal,
   options: BuildOptions = {},
+  shouldYield?: () => boolean,
 ): Generator<void, BlaTable> {
   // Reference index zero has X=0, so its perturbation step contains only the
   // nonlinear w^2 term plus d and cannot be represented by a linear BLA.
@@ -114,7 +115,7 @@ function* buildBlaSteps(
   const count = Math.max(0, length - 2);
   const refX = new Float64Array(count), refY = new Float64Array(count);
   for (let i = 0; i < count; i++) {
-    if (i % 8192 === 0) yield;
+    if (i % 8192 === 0 || shouldYield?.()) yield;
     if (options.sampleWords === 20) {
       const at = (i + 1) * 20;
       refX[i] = (orbit[at] + orbit[at + 1] + orbit[at + 2] + orbit[at + 3]) * 2 ** orbit[at + 4];
@@ -129,7 +130,7 @@ function* buildBlaSteps(
   const maxDeltaLog2 = deltaBoundLog2(maxDelta);
   const levels: Step[][] = [[]];
   for (let i = 0; i < count; i++) {
-    if (i % 4096 === 0) yield;
+    if (i % 4096 === 0 || shouldYield?.()) yield;
     const a = normalise(2 * refX[i], 2 * refY[i], 0);
     const magnitude = log2Magnitude(a);
     levels[0].push({ a, b: ONE, radiusLog2: Number.isFinite(magnitude) ? magnitude + (options.epsilonLog2 ?? EPSILON_LOG2) : NEVER });
@@ -141,7 +142,7 @@ function* buildBlaSteps(
     if (mergedCount < 1) break;
     const merged: Step[] = [];
     for (let i = 0; i < mergedCount; i++) {
-      if (i % 2048 === 0) yield;
+      if (i % 2048 === 0 || shouldYield?.()) yield;
       const first = previous[2 * i], second = previous[2 * i + 1];
       const injectedLog2 = log2Magnitude(first.b) + maxDeltaLog2;
       let radiusLog2 = NEVER;
@@ -163,7 +164,7 @@ function* buildBlaSteps(
     const level = levels[levelIndex];
     levelOffsets.push(offset); levelCounts.push(level.length);
     for (let index = 0; index < level.length; index++) {
-      if (index % 4096 === 0) yield;
+      if (index % 4096 === 0 || shouldYield?.()) yield;
       const target = (offset + index) * ENTRY_FLOATS, step = level[index];
       const put = (slot: number, value: Scaled) => {
         data[target + slot * 5] = value.x;
@@ -187,9 +188,26 @@ export function buildBla(orbit: Float32Array, length: number, maxDelta: number |
   for (;;) { const next = steps.next(); if (next.done) return next.value; }
 }
 
-export async function buildBlaAsync(orbit: Float32Array, length: number, maxDelta: number | Decimal, checkpoint: () => Promise<void>, options: BuildOptions = {}): Promise<BlaTable> {
-  const steps = buildBlaSteps(orbit, length, maxDelta, options);
-  for (;;) { const next = steps.next(); if (next.done) return next.value; await checkpoint(); }
+export async function buildBlaAsync(
+  orbit: Float32Array,
+  length: number,
+  maxDelta: number | Decimal,
+  checkpoint: () => Promise<void>,
+  options: BuildOptions = {},
+  interactionChunkMs?: () => number,
+): Promise<BlaTable> {
+  let lastCheckpointAt = interactionChunkMs ? performance.now() : 0;
+  const shouldYield = interactionChunkMs ? () => {
+    const chunkMs = interactionChunkMs();
+    return chunkMs > 0 && performance.now() - lastCheckpointAt >= chunkMs;
+  } : undefined;
+  const steps = buildBlaSteps(orbit, length, maxDelta, options, shouldYield);
+  for (;;) {
+    const next = steps.next();
+    if (next.done) return next.value;
+    await checkpoint();
+    if (shouldYield) lastCheckpointAt = performance.now();
+  }
 }
 
 export function readStep(table: BlaTable, level: number, index: number): Step {

@@ -6,6 +6,12 @@ export interface Demand {
   zoom: number;
   covered: { x: number; y: number; width: number; height: number; spacing?: number }[];
 }
+export interface RegionTuning {
+  pointer: number;
+  distributed: number;
+  oldest: number;
+  pointerRadius: number;
+}
 /** Flatten once per selection, so every candidate uses the same weighted union. */
 function disjointCoverage(covered: Demand['covered']) {
   const pieces=covered.filter(c=>c.width>0&&c.height>0).map(c=>({...c,right:c.x+c.width,bottom:c.y+c.height,quality:1/(c.spacing??1)}));
@@ -36,8 +42,26 @@ function disjointDeficit(r:Region,covered:Demand['covered']){
 export function coverageDeficit(r:Region,covered:Demand['covered']){
   return disjointDeficit(r,disjointCoverage(covered));
 }
-export function schedulerService(turn:number,distributed:boolean,rows=false):'pointer'|'distributed'|'oldest'{
-  return turn%4===0?'oldest':distributed&&turn%2===0&&!rows?'distributed':'pointer';
+export function schedulerService(turn:number,distributed:boolean,rows=false,tuning?:RegionTuning):'pointer'|'distributed'|'oldest'{
+  // The incumbent 4:2:2 sequence is intentional, including its row fallback.
+  if(!tuning || tuning.pointer===8 && tuning.distributed===4 && tuning.oldest===4)
+    return turn%4===0?'oldest':distributed&&turn%2===0&&!rows?'distributed':'pointer';
+  const weights=[tuning.pointer,distributed&&!rows?tuning.distributed:0,tuning.oldest]
+    .map(n=>Number.isFinite(n)?Math.max(0,Math.min(16,Math.trunc(n))):0);
+  // Distributed work cannot run in row mode or without sparse refinement.
+  if(!weights.some(Boolean))weights[0]=1;
+  const total=weights[0]+weights[1]+weights[2];
+  const balance=[0,0,0];
+  let chosen=0;
+  // Smooth weighted round robin repeats within at most 48 turns. Deriving the
+  // current turn avoids scheduler state changes across compatible retargets.
+  for(let n=0;n<((turn-1)%total)+1;n++){
+    for(let i=0;i<3;i++)balance[i]+=weights[i];
+    chosen=0;
+    for(let i=1;i<3;i++)if(balance[i]>balance[chosen])chosen=i;
+    balance[chosen]-=total;
+  }
+  return (['pointer','distributed','oldest'] as const)[chosen];
 }
 
 /** Bounded, conservative presentation coverage; never establishes scalar validity. */
@@ -58,13 +82,14 @@ export class PendingRegions {
   private width=0;
   private height=0;
   private distributed=false;
+  private distributedTurns=0;
   private deficits=new Map<Region,number>();
   private coverage:Demand['covered']=[];
   reset(width: number, height: number, previewStride=1, compatible=false) {
     this.width=width;this.height=height;
     this.distributed=previewStride>1;
     this.pending = width && height ? [{ x: 0, y: 0, width, height, order: 0, stride: 1 }] : [];
-    if(!compatible)this.turns=0;
+    if(!compatible){this.turns=0;this.distributedTurns=0;}
     for(let stride=2;width&&height&&stride<=previewStride;stride*=2)
       this.pending.push({x:0,y:0,width,height,order:0,stride});
   }
@@ -74,35 +99,38 @@ export class PendingRegions {
     if(value===undefined){value=disjointDeficit(r,this.coverage);this.deficits.set(r,value);}
     return value;
   }
-  private score(r: Region, d: Demand) {
+  private score(r: Region, d: Demand, pointerRadius=64) {
     const dx = Math.max(r.x - d.x, 0, d.x - r.x - r.width + 1);
     const dy = Math.max(r.y - d.y, 0, d.y - r.y - r.height + 1);
     const deficit=this.deficit(r,d);
     // Sparse samples cover stride squared pixels per calculation, but only
     // improve linear resolution by stride. Use that conservative cost benefit.
-    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + .5 / (1 + Math.hypot(dx,dy) / 64);
+    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + .5 / (1 + Math.hypot(dx,dy) / pointerRadius);
     const focusWeight=this.distributed&&this.turns%2===1?4:1;
-    return deficit * 4 + focusWeight / (1 + Math.hypot(dx,dy) / 64);
+    return deficit * 4 + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
   }
-  take(budget: number, demand: Demand, rows?: number): Region | undefined {
+  take(budget: number, demand: Demand, rows?: number, tuning?: RegionTuning): Region | undefined {
     this.deficits.clear();
     this.coverage=disjointCoverage(demand.covered);
     this.pending=this.pending.filter(r=>r.stride===1 || this.deficit(r,demand)>0);
     if (!this.pending.length) return;
     // Two oldest turns per eight prevent a moving focus from starving gaps.
-    const service=schedulerService(++this.turns,this.distributed,!!rows);
+    const service=schedulerService(++this.turns,this.distributed,!!rows,tuning);
     const oldest=service==='oldest';
+    const pointerRadius=service==='pointer' && tuning && Number.isFinite(tuning.pointerRadius)
+      ? Math.max(16,Math.min(512,tuning.pointerRadius)) : 64;
     // Deterministic spatial service survives compatible retargets. The pointer
     // retains alternate turns; broad refinement is never gated on a full stage.
     if(service==='distributed'){
-      const k=((this.turns-2)/4)%16;
+      const incumbentWeights=!tuning || tuning.pointer===8 && tuning.distributed===4 && tuning.oldest===4;
+      const k=incumbentWeights?((this.turns-2)/4)%16:this.distributedTurns++%16;
       const x=((k&1)<<1)|((k>>2)&1), y=(((k>>1)&1)<<1)|((k>>3)&1);
       demand={...demand,x:(x+.5)*this.width/4,y:(y+.5)*this.height/4};
     }
     let index = 0;
     for (let i=1; i<this.pending.length; i++) {
       if (oldest ? this.pending[i].order < this.pending[index].order :
-        this.score(this.pending[i],demand) > this.score(this.pending[index],demand)) index=i;
+        this.score(this.pending[i],demand,pointerRadius) > this.score(this.pending[index],demand,pointerRadius)) index=i;
     }
     let region = this.pending.splice(index,1)[0];
     while (Math.ceil(region.width/region.stride)*Math.ceil(region.height/region.stride) > budget || rows && region.height > rows) {
@@ -114,7 +142,7 @@ export class PendingRegions {
       const a = {...region}, b = {...region};
       if (horizontal) { a.width=half; b.x+=half; b.width-=half; }
       else { a.height=half; b.y+=half; b.height-=half; }
-      const first = rows || oldest || this.score(a,demand) >= this.score(b,demand);
+      const first = rows || oldest || this.score(a,demand,pointerRadius) >= this.score(b,demand,pointerRadius);
       region = first ? a : b;
       this.pending.push({...(first ? b : a), order:this.turns});
     }

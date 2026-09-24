@@ -1,12 +1,58 @@
 import { describe, it, expect } from 'vitest';
-import { PendingRegions, coverageDeficit, schedulerService, type Demand } from '../../src/render/regions';
+import { PendingRegions, coverageDeficit, schedulerService, type Demand, type Region, type RegionTuning } from '../../src/render/regions';
 
 const demand: Demand = {x:180,y:80,zoom:1,covered:[]};
+const defaultTuning: RegionTuning={pointer:8,distributed:4,oldest:4,pointerRadius:64};
 describe('exact pending regions',()=>{
   it('allocates eight turns 4 pointer, 2 distributed, 2 oldest',()=>{
     expect(Array.from({length:8},(_,i)=>schedulerService(i+1,true))).toEqual([
       'pointer','distributed','pointer','oldest','pointer','distributed','pointer','oldest',
     ]);
+  });
+  it('keeps the incumbent service sequence and selections at 5183 defaults',()=>{
+    for(const distributed of [false,true])for(const rows of [false,true])
+      for(let turn=1;turn<=64;turn++)
+        expect(schedulerService(turn,distributed,rows,defaultTuning))
+          .toBe(schedulerService(turn,distributed,rows));
+    const incumbent=new PendingRegions(),tuned=new PendingRegions();
+    incumbent.reset(512,512,4);tuned.reset(512,512,4);
+    for(let i=0;i<12;i++){
+      const target={...demand,x:(i*37)%512,y:(i*73)%512};
+      expect(tuned.take(1024,target,undefined,defaultTuning)).toEqual(incumbent.take(1024,target));
+    }
+  });
+  it('interleaves modified weights smoothly and accepts zero weights',()=>{
+    const tuning={...defaultTuning,pointer:6,distributed:4,oldest:2};
+    const sequence=Array.from({length:12},(_,i)=>schedulerService(i+1,true,false,tuning));
+    expect(sequence.filter(s=>s==='pointer')).toHaveLength(6);
+    expect(sequence.filter(s=>s==='distributed')).toHaveLength(4);
+    expect(sequence.filter(s=>s==='oldest')).toHaveLength(2);
+    expect(sequence.join(',')).not.toMatch(/(pointer,){3}|(distributed,){3}|(oldest,){3}/);
+    expect(Array.from({length:8},(_,i)=>schedulerService(i+1,true,false,{...defaultTuning,pointer:0,distributed:0,oldest:8})))
+      .toEqual(Array(8).fill('oldest'));
+  });
+  it('never schedules structurally unavailable distributed work',()=>{
+    const onlyDistributed={...defaultTuning,pointer:0,distributed:8,oldest:0};
+    for(const distributed of [false,true])for(const rows of [false,true]){
+      const sequence=Array.from({length:16},(_,i)=>schedulerService(i+1,distributed,rows,onlyDistributed));
+      expect(sequence).toEqual(Array(16).fill(distributed&&!rows?'distributed':'pointer'));
+    }
+    const zero={...defaultTuning,pointer:0,distributed:0,oldest:0};
+    expect(schedulerService(1,true,false,zero)).toBe('pointer');
+  });
+  it('uses pointer radius only for pointer service scoring',()=>{
+    const near:Region={x:0,y:0,width:32,height:32,order:0,stride:1};
+    const far:Region={x:160,y:0,width:32,height:32,order:0,stride:1};
+    const select=(radius:number)=>{
+      const queue=new PendingRegions();queue.reset(192,32);
+      // Give each radius the same two pending rectangles so this isolates the
+      // proximity score from subdivision and previous service decisions.
+      Reflect.set(queue,'pending',[near,far]);
+      return queue.take(1024,{x:0,y:0,zoom:1,covered:[{x:0,y:0,width:7,height:32}]},undefined,
+        {...defaultTuning,pointerRadius:radius});
+    };
+    expect(select(16)).toEqual(near);
+    expect(select(512)).toEqual(far);
   });
   it('reaches an off-centre focus before the far corner and responds to a new focus',()=>{
     const queue=new PendingRegions(); queue.reset(256,256);

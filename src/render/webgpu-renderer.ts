@@ -15,6 +15,8 @@ import compensatedSource from "../arithmetic/compensated.wgsl?raw";
 import quadSource from "../arithmetic/quad.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
+import continuationSource from "./continuation.wgsl?raw";
+import { continuationEntry, continuationRegion, CONTINUATION_MAX_LANES, CONTINUATION_HEADER_BYTES, CONTINUATION_STATE_BYTES } from "./continuation";
 import reuseSource from "./reuse.wgsl?raw";
 import antialiasSource from "./antialias.wgsl?raw";
 export const ANTIALIAS_SHADER=antialiasSource;
@@ -45,11 +47,10 @@ function yieldToEvents(): Promise<void> {
 const IDENTITY_XFORM = new Float32Array([1, 1, 0, 0]);
 import { hexToRgb, MAX_STOPS, stopPositions, needsEndpoints, type ColorSettings } from "../logic/colorSettings";
 import { BASE_STEP, ENTRY_FLOATS, buildBlaAsync } from "./bla";
+import { DEFAULT_TUNING, startingBatchVisits, type TuningSettings } from "../tuning";
 
 /** Precision profiles, chosen from the zoom depth. */
 const LIMB_PROFILES = [8, 16, 32, 64, 128, 256] as const;
-const SUBMIT_BUDGET_MS = 8;
-
 // 64K expensive samples measured >120ms; 16K preserved presentation cadence.
 // Grow cheap batches from measured cost, without changing policy on release.
 const MIN_BATCH_SAMPLES = 16_384;
@@ -82,6 +83,8 @@ export interface RenderRequest {
   /** Follow live demand until its exact field is complete. Preview/one-shot
    * callers use the same region queue without following another camera. */
   followView?: boolean;
+  /** Local experimental controls; omitted requests use the 5183 defaults. */
+  tuning?: Readonly<TuningSettings>;
   betweenBatches?: () => Promise<void>;
   /** Preview callers publish only complete images and matching metadata. */
   publishPartial?: boolean;
@@ -142,10 +145,10 @@ export const enum Method {
  * BLA. The historical plain-f32 timing claims no longer describe this shader.
  * The measured 10,000-iteration workload did not justify changing this gate.
  */
-export function methodForScale(unitsPerPixel: Decimal): Method {
+export function methodForScale(unitsPerPixel: Decimal, tuning: Pick<TuningSettings,'directExponent'|'hdrExponent'> = DEFAULT_TUNING): Method {
   const upp = unitsPerPixel.toNumber();
-  if (upp > 1e-5) return Method.Direct;
-  if (upp > 1e-25) return Method.Plain;
+  if (upp > (tuning.directExponent===5 ? 1e-5 : 10 ** -tuning.directExponent)) return Method.Direct;
+  if (upp > (tuning.hdrExponent===25 ? 1e-25 : 10 ** -tuning.hdrExponent)) return Method.Plain;
   return Method.Hdr;
 }
 
@@ -309,6 +312,9 @@ export class WebGpuRenderer {
   private retainFloatPipeline: GPURenderPipeline | null = null;
   private antialiasPipeline: GPURenderPipeline | null = null;
   private renderModule: GPUShaderModule | null = null;
+  private continuationModule: GPUShaderModule | null = null;
+  private continuationLayout: GPUBindGroupLayout | null = null;
+  private continuationPipelines = new Map<string,GPUComputePipeline>();
   private reuseModule: GPUShaderModule | null = null;
   private blitModule: GPUShaderModule | null = null;
   private pipelineLayout: GPUPipelineLayout | null = null;
@@ -435,6 +441,7 @@ export class WebGpuRenderer {
   private laIndexBuffer: GPUBuffer | null = null;
   private laLevels = 0;
   private laHasUsableMultiStep = false;
+  private deferredBlaRetry = false;
   private statsBuffer: GPUBuffer;
   private orbitBuffer: GPUBuffer | null = null;
   private orbitCapacity = 0;
@@ -633,6 +640,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return this[field]!;
   }
 
+  private async ensureContinuationPipeline(kind:'plain'|'approx'|'julia'|'juliaApprox') {
+    await this.oncePipeline('continuation-'+kind,()=>this.continuationPipelines.has(kind),async()=>{
+      const device=this.ctx.device;
+      if(device.limits.maxStorageBuffersPerShaderStage<8)throw Error('Continuation requires eight storage bindings');
+      this.continuationModule??=await compileShader(device,
+        [compensatedSource,quadSource,continuationEntry(perturbationSource),wideSource,continuationSource].join('\n'),
+        'continuation');
+      this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
+        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
+      const constants={JULIA:kind.startsWith('julia')?1:0,APPROX:kind==='approx'||kind==='juliaApprox'?1:0};
+      const pipeline=await device.createComputePipelineAsync({label:'continuation-'+kind,
+        layout:device.createPipelineLayout({bindGroupLayouts:[this.bindLayout!,this.continuationLayout]}),
+        compute:{module:this.continuationModule,entryPoint:'compute',constants}});
+      if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+      this.continuationPipelines.set(kind,pipeline);
+    });
+    return this.continuationPipelines.get(kind)!;
+  }
+
   private async ensureRenderPipeline(kind:'blit'|'retain'|'retainFloat'|'antialias') {
     const field=kind==='blit'?'blitPipeline':kind==='retain'?'retainPipeline':kind==='retainFloat'?'retainFloatPipeline':'antialiasPipeline';
     await this.oncePipeline(kind,()=>!!this[field],async()=>{
@@ -664,7 +690,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private referenceDemandCompatible(demand: ReferenceDemand, request: RenderRequest): boolean {
-    const method = request.forceMethod ?? methodForScale(request.unitsPerPixel);
+    const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
     if (method === Method.Direct) return false;
     const family = request.family ?? "mandelbrot";
     if (family !== demand.input.family || request.maxIterations > demand.input.maxIterations) return false;
@@ -769,6 +795,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    */
   private async buildApproxTable(request: RenderRequest) {
     const { device } = this.ctx;
+    const tuning=request.tuning??DEFAULT_TUNING;
     const started = performance.now();
 
     const maxDelta = approximationDeltaBound(request.family ?? "mandelbrot", request, this.refX, this.refY);
@@ -780,7 +807,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const table = await buildBlaAsync(samples, this.refLength, maxDelta, async()=>{
       await yieldToEvents();
       if(this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException("Superseded table","AbortError");
-    }, { sampleWords: 20, epsilonLog2: request.family === "julia" ? -40 : undefined });
+    }, { sampleWords: 20, epsilonLog2: request.family === "julia" ? -40 : undefined },
+      tuning.blaChunkMs>0 ? () => this.isInteracting(request) ? tuning.blaChunkMs : 0 : undefined);
     if(table.data.byteLength>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('The approximation table exceeds this GPU’s buffer capacity.');
     this.tableMaxDelta = maxDelta;
 
@@ -790,6 +818,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.laLevels = 0;
       this.laHasUsableMultiStep = false;
     }
+    this.deferredBlaRetry=false;
     this.tableMs = performance.now() - started;
 
     this.laBuffer?.destroy();
@@ -1080,6 +1109,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.cancelPendingReference("Reference generation aborted");
   }
 
+  /** One settled restart is enough to recheck a retry deferred during motion. */
+  consumeSettledBlaRetry() {
+    const pending=this.deferredBlaRetry;
+    this.deferredBlaRetry=false;
+    return pending;
+  }
+
   /** Starts a fresh calculation without discarding the displayed history. */
   restartCalculation() {
     this.abort();
@@ -1139,6 +1175,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   invalidateHistory() {
     this.publicationEpoch++; this.historyValid=false; this.refValid=false; this.refSamples=null;
+    this.deferredBlaRetry=false;
     this.currentImageValid=false;this.completedFrame=null;
     this.incomingFrame=null; this.appearanceHoldFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
     this.retainEndpoints=false;
@@ -1187,7 +1224,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private appearanceHoldActive(request:RenderRequest){
     const frame=this.appearanceHoldFrame;
-    const method=request.forceMethod??methodForScale(request.unitsPerPixel);
+    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
     const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     return this.historyValid&&frame===this.completedFrame&&appearanceUpgradeCompatible(frame,request,method,grid)&&
       !this.samePresentation(frame,request);
@@ -1198,6 +1235,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const frame=this.completedFrame;
     return this.fieldComplete && this.currentImageValid && !this.finalizing && !!frame && !frame.proxy &&
       this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
+      frame.method===(request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning)) &&
       frame.useApprox===(request.useApprox===true) &&
       (request.family!=="julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors)===JSON.stringify(request.colors) && (!request.colors.postAntialias||!!this.antialiasFrame);
@@ -1261,7 +1299,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       (base.useApprox===true)===(latest.useApprox===true)&&
       (family!=="julia"||!!base.juliaX?.eq(latest.juliaX!)&&!!base.juliaY?.eq(latest.juliaY!))&&
       base.colors.mode===latest.colors.mode&&grid===this.affordableGrid(Math.max(1,Math.min(3,latest.colors.supersample)),latest.width,latest.height)&&
-      method===(latest.forceMethod??methodForScale(latest.unitsPerPixel))&&(!needsEndpoints(latest.colors)||retainEndpoints);
+      method===(latest.forceMethod??methodForScale(latest.unitsPerPixel,latest.tuning))&&(!needsEndpoints(latest.colors)||retainEndpoints);
   }
 
   private fieldSupportsAppearance(request:RenderRequest,method:Method,grid:number){
@@ -1347,7 +1385,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   /** Recolours only channels already present after an explicit Stop. Never starts orbit or region work. */
   async recolorRetained(request:RenderRequest):Promise<boolean>{
     if(this.deviceLost)return false;
-    const method=request.forceMethod??methodForScale(request.unitsPerPixel);
+    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
     const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     if(!this.fieldSupportsAppearance(request,method,grid))await this.convertDistanceToIteration(request,method,grid);
     if(this.fieldSupportsAppearance(request,method,grid)){
@@ -1481,6 +1519,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return true;
   }
 
+  private isInteracting(request: RenderRequest): boolean {
+    return !!(request.followView ? this.currentView ?? request : request).interacting;
+  }
+
   private regionDemand(request: RenderRequest): Demand {
     const live = request.followView ? this.currentView ?? request : request;
     const m = reprojectionFor(request,live);
@@ -1519,6 +1561,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private async renderTarget(request: RenderRequest): Promise<RenderStats> {
 
     const { device } = this.ctx;
+    const tuning=request.tuning??DEFAULT_TUNING;
     this.validateCoordinates(request);
     await this.pendingRetain;
     validateRenderSize(device.limits,request.width,request.height,needsEndpoints(request.colors)||request.colors.mode===1?16:8);
@@ -1533,7 +1576,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       isCurrent: () => epoch === this.publicationEpoch && (!originalCurrent || originalCurrent()) };
 
     const keyFor=(value:RenderRequest)=>[value.centerX,value.centerY,value.unitsPerPixel,value.width,value.height,value.angle??0,
-      value.family,value.juliaX,value.juliaY,value.maxIterations,value.forceMethod,value.useApprox===true,
+      value.family,value.juliaX,value.juliaY,value.maxIterations,
+      value.forceMethod??methodForScale(value.unitsPerPixel,value.tuning),value.useApprox===true,
       JSON.stringify(value.colors)].join("|");
     let requestKey=keyFor(request);
     if (requestKey === this.cachedRequest && this.cachedStats && this.isComplete(request) && request.isCurrent!()) {
@@ -1546,7 +1590,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       throw new Error("WebGpuRenderer.init() was not awaited");
     }
 
-    const method = request.forceMethod ?? methodForScale(request.unitsPerPixel);
+    const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
     const initialGrid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     let recoloured=await this.recolorCompleted(request,requestKey,method,initialGrid);
     if(recoloured)return recoloured;
@@ -1608,9 +1652,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Conversely, a table with no usable multi-step entry can become useful
     // when the same orbit is viewed through a narrower domain.
     const requiredDelta = approximationDeltaBound(family, request, this.refX, this.refY);
+    const narrowRetry=!this.laHasUsableMultiStep && requiredDelta.lt(this.tableMaxDelta.times(1 - 1e-12));
+    const deferNarrowRetry=tuning.blaRebuildPercent<100 && this.isInteracting(request) && narrowRetry &&
+      requiredDelta.gt(this.tableMaxDelta.times(tuning.blaRebuildPercent/100));
+    this.deferredBlaRetry=method!==Method.Direct && request.useApprox===true &&
+      approximationEligible(family,request.colors.mode) && deferNarrowRetry;
     if (method !== Method.Direct && request.useApprox === true && approximationEligible(family, request.colors.mode) &&
         (requiredDelta.gt(this.tableMaxDelta.times(1 + 1e-12)) ||
-         !this.laHasUsableMultiStep && requiredDelta.lt(this.tableMaxDelta.times(1 - 1e-12)))) {
+         narrowRetry && !deferNarrowRetry)) {
       await this.buildApproxTable(request);
     }
 
@@ -1743,6 +1792,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       method, grid,
     };
     const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
+    const continuationEligible=tuning.hardPixelBudget>0 && request.followView && progressive && method!==Method.Direct &&
+      colors.mode===0 && grid===1 && !request.tileRows && device.limits.maxStorageBuffersPerShaderStage>=8;
     let timingSamples: (TimingSample | undefined)[] = [];
     const collectTimings = () => { timingSamples.forEach(s => this.timing.collect(s)); timingSamples = []; };
     const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height,timingSamples);
@@ -1788,11 +1839,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if(progressive){this.incomingFrame=frame;this.lastPartialAt=performance.now();this.reproject(latest);this.appearancePublications++;}
       return true;
     };
-    while (this.pending.size) {
-      const minimum=Math.max(64,Math.floor(MIN_BATCH_SAMPLES*Math.min(1,10000/request.maxIterations)/64)*64);
+    let scratch:GPUBuffer|undefined,scratchBind:GPUBindGroup|undefined,scratchCapacity=0;
+    const continuationOrbit=this.orbitBuffer;
+    try { while (this.pending.size) {
+      const minimum=startingBatchVisits(request.maxIterations,tuning.batchMultiplier);
       const budget = this.batchMsPerSample > 0 ?
-        Math.max(minimum,SUBMIT_BUDGET_MS/this.batchMsPerSample) : minimum;
-      const region = this.pending.take(budget,this.regionDemand(request),request.tileRows);
+        Math.max(minimum,tuning.batchTargetMs/this.batchMsPerSample) : minimum;
+      const region = this.pending.take(budget,this.regionDemand(request),request.tileRows,{
+        pointer:tuning.pointerWeight,distributed:tuning.distributedWeight,
+        oldest:tuning.oldestWeight,pointerRadius:tuning.pointerRadius});
       if(!region) break;
       const width=region.width, rows=region.height;
       this.latestRegion=region;
@@ -1802,38 +1857,118 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
         m.offsetY + (region.y + rows - 1) * m.step < old.height;
       if (fullyKnown) { if(region.stride===1){cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;} continue; }
-      u32[54]=region.stride; u32[26]=region.y+rows;
-      u32[40] = region.y; u32[42] = region.x; u32[43] = region.x + width;
-      device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-      const batchStarted = performance.now();
-      const encoder = device.createCommandEncoder({ label: "calculate-region" });
-      const sample = this.timing.begin("calculate");
-      const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
-      pass.setPipeline(calculatePipeline);
-      pass.setBindGroup(0, bind);
-      pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 4)); pass.end();
-      this.timing.resolve(encoder, sample); timingSamples.push(sample);
-      if (progressive) shade(encoder, width, rows);
-      device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
-      submittedVisits+=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride)*grid*grid;
-      collectTimings();
-      if (progressive && request.isCurrent!()) {
-        this.incomingFrame = frame; this.partialSerial++; this.partialRegions++;
-        this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:region.stride});
-        if (!this.determinedRegion || width*rows >= this.determinedRegion.width*this.determinedRegion.height) {
-          this.determinedRegion={x:region.x,y:region.y,width,height:rows};
-          this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
-        }
-        this.lastPartialAt=performance.now(); this.firstPartialAt ||= this.lastPartialAt;
-        // A render can also be used outside the application's animation loop.
-        // Queue order presents only finished regions, never in-flight writes.
-        this.reproject(this.currentView ?? request);
+      const visits=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride);
+      const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
+      // Only a naturally selected costly region may use the separate shader.
+      // Ordinary spatial budgets and CPU feedback remain exactly the baseline.
+      let shape=continuationEligible && this.isInteracting(request) && this.batchMsPerSample>0 &&
+        this.batchMsPerSample*minimum>tuning.batchTargetMs &&
+        visits<=CONTINUATION_MAX_LANES && CONTINUATION_HEADER_BYTES+visits*CONTINUATION_STATE_BYTES<=limit
+        ? continuationRegion(width,rows,region.stride,limit) : null;
+      let regionPipeline=calculatePipeline;
+      if(shape){
+        const preparing=performance.now();
+        regionPipeline=await this.ensureContinuationPipeline(pipelineKind as 'plain'|'approx'|'julia'|'juliaApprox');
+        this.pipelineWaitMs+=performance.now()-preparing;
+        if(this.abortRequested||!request.isCurrent!()||continuationOrbit!==this.orbitBuffer)throw new DOMException('Superseded continuation','AbortError');
+        if(!this.isInteracting(request))shape=null;
       }
-      await device.queue.onSubmittedWorkDone();
+      if(shape&&shape.bytes>scratchCapacity){
+        scratch?.destroy();scratch=storageBuffer(device,shape.bytes/4,'wide-continuation');scratchCapacity=shape.bytes;
+        scratchBind=device.createBindGroup({layout:this.continuationLayout!,entries:[{binding:0,resource:{buffer:scratch}}]});
+      }
+      let batchStarted=0;
+      if(shape){
+        let resume=false,unfinished=0,publishedCompleted=submittedVisits;
+        do {
+          // Appearance service may rewrite full-frame uniforms between slices.
+          u32[54]=region.stride;u32[26]=region.y+rows;
+          u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+width;
+          device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+          const control=new Uint32Array(resume?4:CONTINUATION_HEADER_BYTES/4);
+          control.set([this.isInteracting(request)?tuning.hardPixelBudget:request.maxIterations,resume?1:0,shape.columns,0]);
+          device.queue.writeBuffer(scratch!,0,control);
+          device.queue.writeBuffer(this.statsBuffer,28,new Uint32Array(1));
+          const encoder=device.createCommandEncoder({label:'calculate-region'});
+          const sample=this.timing.begin('calculate');
+          const pass=encoder.beginComputePass({label:'calculate-region',timestampWrites:this.timing.writes(sample)});
+          pass.setPipeline(regionPipeline);pass.setBindGroup(0,bind);pass.setBindGroup(1,scratchBind!);
+          pass.dispatchWorkgroups(Math.ceil(width/region.stride/8),Math.ceil(rows/region.stride/4));pass.end();
+          this.timing.resolve(encoder,sample);timingSamples.push(sample);
+          if(progressive)shade(encoder,width,rows);
+          device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
+          if(!resume)submittedVisits+=visits;
+          collectTimings();
+          // Mapping the counter copy fences this slice and identifies survivors.
+          const counters=new Uint32Array(await readBuffer(device,this.statsBuffer,48));
+          unfinished=counters[7];
+          if(epoch!==this.publicationEpoch||continuationOrbit!==this.orbitBuffer||
+              !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
+          const completedSamples=counters[5]+counters[6];
+          if(progressive&&completedSamples>publishedCompleted){
+            publishedCompleted=completedSamples;
+            this.incomingFrame=frame;this.partialSerial++;this.partialRegions++;
+            if(!unfinished){
+              this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:region.stride});
+              if(!this.determinedRegion||width*rows>=this.determinedRegion.width*this.determinedRegion.height){
+                this.determinedRegion={x:region.x,y:region.y,width,height:rows};
+                this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
+              }
+            }
+            this.lastPartialAt=performance.now();this.firstPartialAt||=this.lastPartialAt;
+            this.reproject(this.currentView??request);
+          }
+          if(!unfinished)break;
+          await yieldToEvents();
+          if(epoch!==this.publicationEpoch||continuationOrbit!==this.orbitBuffer||
+              !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
+          await request.betweenBatches?.();
+          if(epoch!==this.publicationEpoch||continuationOrbit!==this.orbitBuffer||
+              !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
+          if(!serviceAppearance()){this.retarget=true;completed=false;break;}
+          const live=this.currentView;
+          if(request.followView&&live&&!this.sameView(request,live)&&performance.now()-targetStarted>=64){
+            this.retarget=true;completed=false;break;
+          }
+          resume=true;
+        }while(unfinished);
+        if(!completed)break;
+      }else{
+        u32[54]=region.stride; u32[26]=region.y+rows;
+        u32[40] = region.y; u32[42] = region.x; u32[43] = region.x + width;
+        device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
+        batchStarted=performance.now();
+        const encoder = device.createCommandEncoder({ label: "calculate-region" });
+        const sample = this.timing.begin("calculate");
+        const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
+        pass.setPipeline(calculatePipeline);
+        pass.setBindGroup(0, bind);
+        pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 4)); pass.end();
+        this.timing.resolve(encoder, sample); timingSamples.push(sample);
+        if (progressive) shade(encoder, width, rows);
+        device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
+        submittedVisits+=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride)*grid*grid;
+        collectTimings();
+        if (progressive && request.isCurrent!()) {
+          this.incomingFrame = frame; this.partialSerial++; this.partialRegions++;
+          this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:region.stride});
+          if (!this.determinedRegion || width*rows >= this.determinedRegion.width*this.determinedRegion.height) {
+            this.determinedRegion={x:region.x,y:region.y,width,height:rows};
+            this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
+          }
+          this.lastPartialAt=performance.now(); this.firstPartialAt ||= this.lastPartialAt;
+          // A render can also be used outside the application's animation loop.
+          // Queue order presents only finished regions, never in-flight writes.
+          this.reproject(this.currentView ?? request);
+        }
+        await device.queue.onSubmittedWorkDone();
+      }
       if(region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
-      const elapsed = performance.now() - batchStarted;
-      const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
-      this.batchMsPerSample = this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
+      if(!shape){
+        const elapsed = performance.now() - batchStarted;
+        const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
+        this.batchMsPerSample = this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
+      }
       await yieldToEvents();
       if (!request.isCurrent!() || this.abortRequested) {
         completed = false; this.aborted = true; break;
@@ -1853,7 +1988,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           (performance.now()-targetStarted >= 64 || !this.pending.size)) {
         this.retarget=true; completed=false; break;
       }
-    }
+    }}finally{scratch?.destroy();}
     if (!request.isCurrent!()||this.abortRequested) completed = false;
     if(completed&&!serviceAppearance()){this.retarget=true;completed=false;}
     if(completed&&(this.pending.size!==0||exactCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
