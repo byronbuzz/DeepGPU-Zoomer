@@ -437,7 +437,10 @@ fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
             offset = hdrMul(offset, Hdr(vec2<f32>(u.rotationCos.x,u.rotationSin.x),vec2<f32>(u.rotationCos.y,u.rotationSin.y),0));
         }
         let c = hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset);
-        let allowInteriorShortcut = !JULIA && u.mode == 0u && u.retainEndpoints == 0u && u.cappedPattern == 0u;
+        // Exterior formulas may retain endpoints; solid interior colour never
+        // reads them. Only distance/diagnostic or patterned interiors need the
+        // full interior orbit.
+        let allowInteriorShortcut = !JULIA && u.mode == 0u && u.cappedPattern == 0u;
         if (allowInteriorShortcut &&
             analyticMandelbrotInterior(wideFromHdr(c))) {
             return emptySample();

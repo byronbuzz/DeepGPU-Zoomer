@@ -16,6 +16,7 @@ export const RANGE_DEFAULTS: Record<string, number> = {
   'ambient-light': DEFAULT_COLORS.ambientLight,
   'specular-strength': DEFAULT_COLORS.specularStrength,
   'panel-opacity': 0.8,
+  'tuning-batch-target': DEFAULT_TUNING.batchTargetMs,
   'tuning-batch-multiplier': DEFAULT_TUNING.batchMultiplier,
   'tuning-hard-budget': HARD_PIXEL_BUDGETS.indexOf(DEFAULT_TUNING.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number]),
   'tuning-overscan-base': DEFAULT_TUNING.overscanBase,

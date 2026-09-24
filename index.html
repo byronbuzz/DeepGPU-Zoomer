@@ -61,19 +61,20 @@
     </div>
     <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
       <label>Panel opacity<input id="panel-opacity" type="range" min="0.15" max="1" step="0.01" value="0.8"></label>
+      <label class="panel-accent-label" for="panel-accent">Panel Accent Colour<input id="panel-accent" type="color" value="#9cdcd6"></label>
       <label class="check"><input id="post-antialias" type="checkbox"> Completed-image antialiasing</label>
       <p class="help compact">A low-cost final image filter. It does not rerun or recover missing fractal samples.</p>
-      <form id="coordinates"><label>Centre · real<textarea id="cx" rows="2" spellcheck="false"></textarea></label><label>Imaginary<textarea id="cy" rows="2" spellcheck="false"></textarea></label><label title="Top-to-bottom distance in the complex plane. Smaller means deeper zoom; 2.8 corresponds to 10^0×.">View height (complex units)<input id="span" spellcheck="false" title="Top-to-bottom distance in the complex plane. Smaller means deeper zoom; 2.8 corresponds to 10^0×."></label><button>Go to coordinates</button></form>
       <label class="profiling-switch"><input id="profiling" type="checkbox"> Measure GPU timings</label><p id="profiling-data">GPU timings are off.</p>
       <section id="tuning" aria-labelledby="tuning-title">
         <h2 id="tuning-title">Tuning</h2>
         <p id="tuning-status" role="status">Navigation defaults</p>
+        <label class="tuning-control">GPU batch target <span id="tuning-batch-target-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-target-value"></output><input id="tuning-batch-target" type="range" min="2" max="16" step="1" value="8"></label>
         <label class="tuning-control">Batch size multiplier <span id="tuning-batch-multiplier-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-multiplier-value"></output><input id="tuning-batch-multiplier" type="range" min="1" max="16" step="1" value="4"></label>
-        <label class="tuning-control">Hard-pixel operations/slice <span id="tuning-hard-budget-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-hard-budget-value"></output><input id="tuning-hard-budget" type="range" min="0" max="11" step="1" value="5"></label>
-        <label class="tuning-control">Zoom-out overscan base <span id="tuning-overscan-base-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-base-value"></output><input id="tuning-overscan-base" type="range" min="0" max="128" step="1" value="64"></label>
-        <label class="tuning-control">Overscan max <span id="tuning-overscan-max-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-max-value"></output><input id="tuning-overscan-max" type="range" min="64" max="256" step="1" value="192"></label>
-        <label class="tuning-control">Dynamic depth gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="3000" step="50" value="2000"></label>
-        <label class="tuning-control">Dynamic cap gain <span id="tuning-cap-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-cap-gain-value"></output><input id="tuning-cap-gain" type="range" min="0" max="3000" step="50" value="1000"></label>
+        <label class="tuning-control">Hard-pixel operations/slice <span id="tuning-hard-budget-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-hard-budget-value"></output><input id="tuning-hard-budget" type="range" min="0" max="8" step="1" value="2"></label>
+        <label class="tuning-control">Zoom-out overscan base <span id="tuning-overscan-base-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-base-value"></output><input id="tuning-overscan-base" type="range" min="0" max="128" step="1" value="0"></label>
+        <label class="tuning-control">Overscan max <span id="tuning-overscan-max-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-max-value"></output><input id="tuning-overscan-max" type="range" min="0" max="256" step="1" value="0"></label>
+        <label class="tuning-control">Dynamic depth gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="3000" step="50" value="1000"></label>
+        <label class="tuning-control">Dynamic cap gain <span id="tuning-cap-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-cap-gain-value"></output><input id="tuning-cap-gain" type="range" min="0" max="3000" step="50" value="0"></label>
         <button id="tuning-reset" type="button">Reset tuning</button>
       </section>
     </div>

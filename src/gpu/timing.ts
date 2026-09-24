@@ -17,7 +17,9 @@ export class GpuTiming {
     this.values.clear(); this.invalid = 0; this.missed = 0;
   }
   begin(phase: string): TimingSample | undefined {
-    if (!this.enabled) return;
+    // Calculation timings also drive the batch controller when the optional
+    // profiling display is off.
+    if (!this.supported || (!this.enabled && phase !== 'calculate')) return;
     let slot = this.slots.find(s => !s.busy);
     if (!slot && this.slots.length < 6) {
       slot = {
@@ -39,15 +41,18 @@ export class GpuTiming {
     encoder.resolveQuerySet(sample.slot.query, 0, 2, sample.slot.resolve, 0);
     encoder.copyBufferToBuffer(sample.slot.resolve, 0, sample.slot.read, 0, 16);
   }
-  collect(sample: TimingSample | undefined) {
+  collect(sample: TimingSample | undefined, onElapsed?: (ms:number)=>void, onUnavailable?:()=>void) {
     if (!sample) return;
     const { slot } = sample;
     void slot.read.mapAsync(GPUMapMode.READ).then(() => {
       const data = new BigUint64Array(slot.read.getMappedRange());
       const elapsed = Number(data[1] - data[0]) / 1e6;
-      if (this.enabled && sample.generation === this.generation) {
-        if (data[1] < data[0] || !Number.isFinite(elapsed) || elapsed < 0) this.invalid++;
-        else {
+      if (data[1] < data[0] || !Number.isFinite(elapsed) || elapsed < 0) {
+        if(this.enabled&&sample.generation===this.generation)this.invalid++;
+        onUnavailable?.();
+      } else {
+        onElapsed?.(elapsed);
+        if (this.enabled&&sample.generation===this.generation) {
           const values = this.values.get(sample.phase) ?? [];
           values.push(elapsed); if (values.length > 120) values.shift();
           this.values.set(sample.phase, values);
@@ -56,6 +61,7 @@ export class GpuTiming {
       slot.read.unmap();
     }).catch(() => {
       if (this.enabled && sample.generation === this.generation) this.invalid++;
+      onUnavailable?.();
     }).finally(() => { slot.busy = false; });
   }
   snapshot() {

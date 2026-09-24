@@ -258,6 +258,7 @@ interface FieldDescriptor {
   method: Method;
   useApprox: boolean;
   retainEndpoints: boolean;
+  interiorEndpoints: boolean;
 }
 
 export interface AppearanceFrameIdentity extends FrameView {
@@ -327,6 +328,13 @@ export class WebGpuRenderer {
   private continuationPipelines = new Map<string,GPUComputePipeline>();
   private reuseModule: GPUShaderModule | null = null;
   private blitModule: GPUShaderModule | null = null;
+  private screenHold: GPUTexture | null = null;
+  private screenHoldValid = false;
+  private screenHoldSize = {width:0,height:0};
+  private lastPresentedKey = '';
+  private lastPresentedFrame: WebGpuRenderer['lastFrame'] = null;
+  private lastPresentedSource: GPUTexture | null = null;
+  private lastPresentedCoverage: WebGpuRenderer['coverageFrame'] = null;
   private pipelineLayout: GPUPipelineLayout | null = null;
   private pendingPipelines = new Map<string, Promise<void>>();
   private antialiasTexture: GPUTexture | null = null;
@@ -475,7 +483,7 @@ export class WebGpuRenderer {
 
   constructor(ctx: GpuContext, canvas: HTMLCanvasElement) {
     this.ctx = ctx;
-    void ctx.lost.then(()=>{this.deviceLost=true;this.abort();});
+    void ctx.lost.then(()=>{this.deviceLost=true;this.screenHold?.destroy();this.screenHold=null;this.screenHoldValid=false;this.abort();});
     this.timing = new GpuTiming(ctx.device);
     this.canvas = canvas;
 
@@ -487,6 +495,7 @@ export class WebGpuRenderer {
       device: ctx.device,
       format: this.format,
       alphaMode: "opaque",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
 
     this.sampler = ctx.device.createSampler({
@@ -562,8 +571,9 @@ export class WebGpuRenderer {
       `
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
+@group(0) @binding(5) var screenHold: texture_2d<f32>;
 /** uv' = uv * xform.xy + xform.zw. Identity is (1, 1, 0, 0). */
-struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32>, units: vec4<f32>, cross: vec4<f32>, freshCross: vec4<f32>, fallbackCounts: vec4<f32>, frontRects: array<vec4<f32>,5>, backRects: array<vec4<f32>,5>, freshRects: array<vec4<f32>,5> };
+struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32>, units: vec4<f32>, cross: vec4<f32>, freshCross: vec4<f32>, fallbackCounts: vec4<f32> };
 @group(0) @binding(2) var<uniform> display: Presentation;
 @group(0) @binding(3) var coverage: texture_2d<f32>;
 @group(0) @binding(4) var incoming: texture_2d<f32>;
@@ -608,62 +618,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let prefer = (fresh.a > 0.99 && select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0) || freshSpacing < spacing;
     if (valid && (prefer || (!frontValid && !backValid))) { result = fresh; spacing=freshSpacing; }
     if (!frontValid && !backValid && !valid) {
-        // Clamp to known covered rectangles, not merely a proxy texture edge:
-        // its border may be transparent. Keep one low-alpha provenance marker
-        // so a later retained snapshot can hold this colour without making it
-        // numerically valid. Black is accepted by alpha like every other RGB.
-        var held = vec4<f32>(0.0);
-        var best = 1e30;
-        var haveNumeric = false;
-        let frontEdge = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
-        let backEdge = clamp(oldUV, vec2<f32>(0.0), vec2<f32>(1.0));
-        let freshEdge = clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0));
-        if (display.options.z > 0.0 && front.a > 0.0) { held = front; best = dot(uv-frontEdge,uv-frontEdge); haveNumeric = front.a > 1.5 / 255.0; }
-        let backDistance = dot(oldUV-backEdge,oldUV-backEdge);
-        let backNumeric = back.a > 1.5 / 255.0;
-        if (display.options.x > 0.0 && back.a > 0.0 &&
-            ((backNumeric && !haveNumeric) || (backNumeric == haveNumeric && backDistance < best))) {
-            held = back; best = backDistance; haveNumeric = backNumeric;
+        if (display.fallbackCounts.w > 0.0) {
+            let dims = vec2<i32>(textureDimensions(screenHold));
+            let held = textureLoad(screenHold, clamp(vec2<i32>(floor(in.uv * vec2<f32>(dims))),vec2<i32>(0),dims-vec2<i32>(1)),0);
+            return vec4<f32>(held.rgb, 1.0 / 255.0);
         }
-        let freshDistance = dot(freshUV-freshEdge,freshUV-freshEdge);
-        let freshNumeric = fresh.a > 1.5 / 255.0;
-        if (display.freshOptions.x > 0.0 && fresh.a > 0.0 &&
-            ((freshNumeric && !haveNumeric) || (freshNumeric == haveNumeric && freshDistance < best))) {
-            held = fresh; best = freshDistance; haveNumeric = freshNumeric;
-        }
-        for (var i = 0u; i < 5u; i = i + 1u) {
-            if (i < u32(display.fallbackCounts.x)) {
-                let p = clamp(uv, display.frontRects[i].xy, display.frontRects[i].zw);
-                let dims = vec2<i32>(textureDimensions(src));
-                let c = textureLoad(src, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
-                let d = dot(uv-p, uv-p);
-                let numeric = c.a > 1.5 / 255.0;
-                if (c.a > 0.0 && ((numeric && !haveNumeric) || (numeric == haveNumeric && d < best))) {
-                    held = c; best = d; haveNumeric = numeric;
-                }
-            }
-            if (i < u32(display.fallbackCounts.y)) {
-                let p = clamp(oldUV, display.backRects[i].xy, display.backRects[i].zw);
-                let dims = vec2<i32>(textureDimensions(coverage));
-                let c = textureLoad(coverage, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
-                let d = dot(oldUV-p, oldUV-p);
-                let numeric = c.a > 1.5 / 255.0;
-                if (c.a > 0.0 && ((numeric && !haveNumeric) || (numeric == haveNumeric && d < best))) {
-                    held = c; best = d; haveNumeric = numeric;
-                }
-            }
-            if (i < u32(display.fallbackCounts.z)) {
-                let p = clamp(freshUV, display.freshRects[i].xy, display.freshRects[i].zw);
-                let dims = vec2<i32>(textureDimensions(incoming));
-                let c = textureLoad(incoming, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
-                let d = dot(freshUV-p, freshUV-p);
-                let numeric = c.a > 1.5 / 255.0;
-                if (c.a > 0.0 && ((numeric && !haveNumeric) || (numeric == haveNumeric && d < best))) {
-                    held = c; best = d; haveNumeric = numeric;
-                }
-            }
-        }
-        return vec4<f32>(held.rgb, select(0.0, 1.0 / 255.0, held.a > 0.0));
+        return vec4<f32>(0.0);
     }
     return vec4<f32>(result.rgb, min(1.0, 1.0 / max(spacing,0.00001)));
 }
@@ -702,7 +662,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return this[field]!;
   }
 
-  private async ensureContinuationPipeline(kind:'plain'|'approx'|'julia'|'juliaApprox') {
+  private async ensureContinuationPipeline(kind:'direct'|'plain'|'approx'|'julia'|'juliaApprox') {
     await this.oncePipeline('continuation-'+kind,()=>this.continuationPipelines.has(kind),async()=>{
       const device=this.ctx.device;
       if(device.limits.maxStorageBuffersPerShaderStage<8)throw Error('Continuation requires eight storage bindings');
@@ -711,7 +671,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         'continuation');
       this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
         {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
-      const constants={JULIA:kind.startsWith('julia')?1:0,APPROX:kind==='approx'||kind==='juliaApprox'?1:0};
+      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')?1:0,APPROX:kind==='approx'||kind==='juliaApprox'?1:0};
       const pipeline=await device.createComputePipelineAsync({label:'continuation-'+kind,
         layout:device.createPipelineLayout({bindGroupLayouts:[this.bindLayout!,this.continuationLayout]}),
         compute:{module:this.continuationModule,entryPoint:'compute',constants}});
@@ -1086,10 +1046,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     completedSnapshot=false,
   ) {
     const { device } = this.ctx;
+    if(!destination && (!this.screenHold || this.screenHoldSize.width!==this.canvas.width || this.screenHoldSize.height!==this.canvas.height)){
+      this.screenHold?.destroy();
+      this.screenHoldSize={width:this.canvas.width,height:this.canvas.height};
+      this.screenHold=device.createTexture({label:'last-presented-screen',size:this.screenHoldSize,
+        format:this.format,usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+      this.screenHoldValid=false;
+    }
     if (!this.xformBuffer) {
       this.xformBuffer = device.createBuffer({
         label: "blit-xform",
-        size: 384,
+        size: 144,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
@@ -1103,7 +1070,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       ? reprojectionFor(secondaryFrame, this.currentView, true, true) : null;
     const frontFrame=source===this.history?this.lastFrame:source===this.antialiasTexture?this.antialiasFrame:
       source===this.target?this.incomingFrame??this.completedFrame:null;
-    const transforms = new Float32Array(96);
+    const transforms = new Float32Array(36);
+    transforms[35]=!destination&&this.screenHoldValid?1:0;
     transforms.set([xform.scaleX,xform.scaleY,xform.offsetX,xform.offsetY]);
     transforms.set([xform.crossX??0,xform.crossY??0],24);
     transforms[10] = source !== this.history || this.historyValid && matchesView(this.lastFrame) ? 1 : 0;
@@ -1134,33 +1102,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     transforms[21]=pixelUnit ? secondaryFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
     transforms[22]=pixelUnit ? this.incomingFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
     if(frontFrame?.proxy) transforms[9]=-1;
-    const knownRects=(frame:WebGpuRenderer['lastFrame'],partial=false)=>{
-      if(!frame)return [] as {x:number;y:number;width:number;height:number}[];
-      const regions=partial?this.determined.rectangles:frame.proxy?
-        frame.coveredRegions??(frame.covered?[frame.covered]:[]):
-        [{x:0,y:0,width:frame.width,height:frame.height}];
-      const candidates=regions.filter(r=>r.width>=1&&r.height>=1);
-      if(!candidates.length)return [];
-      const largest=[...candidates].sort((a,b)=>b.width*b.height-a.width*a.height)[0];
-      const selected=[largest,
-        [...candidates].sort((a,b)=>a.x-b.x)[0],
-        [...candidates].sort((a,b)=>(b.x+b.width)-(a.x+a.width))[0],
-        [...candidates].sort((a,b)=>a.y-b.y)[0],
-        [...candidates].sort((a,b)=>(b.y+b.height)-(a.y+a.height))[0]];
-      return [...new Set(selected)].map(r=>({
-        x:(Math.max(0,Math.ceil(r.x))+.5)/frame.width,
-        y:(Math.max(0,Math.ceil(r.y))+.5)/frame.height,
-        width:(Math.min(frame.width,Math.floor(r.x+r.width))-.5)/frame.width,
-        height:(Math.min(frame.height,Math.floor(r.y+r.height))-.5)/frame.height,
-      })).filter(r=>r.width>=r.x&&r.height>=r.y);
-    };
-    const bounds=[transforms[10]>0?knownRects(frontFrame,source===this.target&&!this.currentImageValid):[],
-      transforms[8]>0?knownRects(secondaryFrame):[],
-      transforms[16]>0?knownRects(this.incomingFrame,true):[]];
-    for(let slot=0;slot<3;slot++){
-      transforms[32+slot]=bounds[slot].length;
-      bounds[slot].forEach((r,i)=>transforms.set([r.x,r.y,r.width,r.height],36+slot*20+i*4));
-    }
     device.queue.writeBuffer(this.xformBuffer, 0, transforms);
 
     const pipeline=destination ? destination.format === "rgba16float" ? this.retainFloatPipeline! : this.retainPipeline! : this.blitPipeline!;
@@ -1172,12 +1113,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         { binding: 2, resource: { buffer: this.xformBuffer } },
         { binding: 3, resource: (secondaryTexture ?? source).createView() },
         { binding: 4, resource: (this.target ?? source).createView() },
+        { binding: 5, resource: (this.screenHold ?? source).createView() },
       ],
     });
+    const presented=destination??this.context.getCurrentTexture();
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: (destination ?? this.context.getCurrentTexture()).createView(),
+          view: presented.createView(),
           loadOp: "clear",
           storeOp: "store",
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -1188,6 +1131,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     pass.setBindGroup(0, bind);
     pass.draw(4);
     pass.end();
+    // Keep the last colour at each screen pixel as fresh partial regions arrive.
+    // This copy follows the pass and never enters numerical history or exports.
+    if(!destination&&this.screenHold){
+      encoder.copyTextureToTexture({texture:presented},{texture:this.screenHold},this.screenHoldSize);
+      this.screenHoldValid=true;
+    }
   }
 
   /**
@@ -1224,6 +1173,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   restartCalculation() {
     this.abort();
     this.publicationEpoch++;
+    this.lastPresentedKey='';
     this.currentImageValid=false;
     this.cachedRequest='';this.cachedStats=null;this.fieldKey='';this.sampleKey='';
     this.fieldComplete=false;this.fieldDescriptor=null;this.fieldUniforms=null;this.fieldStats=null;
@@ -1270,6 +1220,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       mapping=heldMap??{scaleX:0,scaleY:0,offsetX:-1,offsetY:-1};
     }
 
+    const presentationKey=[request.width,request.height,request.centerX.toString(),request.centerY.toString(),
+      request.unitsPerPixel.toString(),request.angle??0,request.maxIterations,request.family,
+      request.juliaX?.toString(),request.juliaY?.toString(),JSON.stringify(request.colors),
+      this.partialSerial,this.publicationEpoch,this.appearanceSubmissions,
+      source===this.target?'target':source===this.history?'history':'antialias',
+      last===this.incomingFrame?'incoming':last===this.completedFrame?'completed':last===this.lastFrame?'history':'other',
+      allowStaleAppearance,this.canvas.width,this.canvas.height].join('|');
+    if(this.lastPresentedKey===presentationKey&&this.lastPresentedFrame===last&&
+      this.lastPresentedSource===source&&this.lastPresentedCoverage===this.coverageFrame)return true;
     const encoder = this.ctx.device.createCommandEncoder({ label: "reproject" });
     this.encodeBlit(
       encoder,
@@ -1279,10 +1238,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       heldAppearance||stale,
     );
     this.ctx.device.queue.submit([encoder.finish()]);
+    this.lastPresentedKey=presentationKey;
+    this.lastPresentedFrame=last;this.lastPresentedSource=source;this.lastPresentedCoverage=this.coverageFrame;
     return true;
   }
 
   invalidateHistory() {
+    this.screenHold?.destroy();this.screenHold=null;this.screenHoldValid=false;
+    this.lastPresentedKey='';
     this.publicationEpoch++; this.historyValid=false; this.refValid=false; this.refSamples=null;
     this.deferredBlaRetry=false;
     this.currentImageValid=false;this.completedFrame=null;
@@ -1439,7 +1402,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       (base.useApprox===true)===(latest.useApprox===true)&&
       (family!=="julia"||!!base.juliaX?.eq(latest.juliaX!)&&!!base.juliaY?.eq(latest.juliaY!))&&
       base.colors.mode===latest.colors.mode&&grid===this.affordableGrid(Math.max(1,Math.min(3,latest.colors.supersample)),latest.width,latest.height)&&
-      method===(latest.forceMethod??methodForScale(latest.unitsPerPixel,latest.tuning))&&(!needsEndpoints(latest.colors)||retainEndpoints);
+      method===(latest.forceMethod??methodForScale(latest.unitsPerPixel,latest.tuning))&&(!needsEndpoints(latest.colors)||retainEndpoints)&&
+      !((base.colors.capped??0)===0&&(latest.colors.capped??0)>0&&base.colors.mode===0);
   }
 
   private fieldSupportsAppearance(request:RenderRequest,method:Method,grid:number){
@@ -1449,7 +1413,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.sameView(view,request)&&descriptor.family===family&&descriptor.constant===constant&&descriptor.maxIterations===request.maxIterations&&
       descriptor.mode===request.colors.mode&&descriptor.grid===grid&&descriptor.method===method&&request.colors.mode!==2&&
       descriptor.useApprox===(request.useApprox===true)&&
-      (!needsEndpoints(request.colors)||descriptor.retainEndpoints));
+      (!needsEndpoints(request.colors)||descriptor.retainEndpoints)&&
+      ((request.colors.capped??0)===0||descriptor.interiorEndpoints));
   }
 
   /** Converts a complete distance field back to iteration scalars in place. */
@@ -1545,7 +1510,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       frame.family!==request.family||frame.maxIterations!==request.maxIterations||
       frame.useApprox!==(request.useApprox===true)||frame.method!==method||frame.grid!==grid||
       (request.family==='julia'&&(!frame.juliaX?.eq(request.juliaX!)||!frame.juliaY?.eq(request.juliaY!)))||
-      frame.colors.mode!==request.colors.mode||(needsEndpoints(request.colors)&&!this.retainEndpoints))return false;
+      frame.colors.mode!==request.colors.mode||(needsEndpoints(request.colors)&&!this.retainEndpoints)||
+      ((frame.colors.capped??0)===0&&(request.colors.capped??0)>0&&frame.colors.mode===0))return false;
     const {device}=this.ctx,epoch=this.publicationEpoch,colors=this.copyColors(request.colors);
     const uniforms=base.slice(0),u32=new Uint32Array(uniforms);
     u32[26]=request.height;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;
@@ -1801,7 +1767,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       family !== this.refFamily || constant !== this.refConstant ||
       !this.refValid ||
       limbs !== this.refLimbs ||
-      this.referenceBudget(request.maxIterations,request.dynamicIterations) > this.refIterations ||
+      // Once the reference itself escaped, more requested iterations cannot
+      // extend it; keep its validated family, precision and domain checks.
+      (!this.refEscaped&&this.referenceBudget(request.maxIterations,request.dynamicIterations) > this.refIterations) ||
       drift.greaterThan(halfSpan.times(0.5));
 
     // Geometric drift, precision, family and iteration requirements apply
@@ -1899,7 +1867,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     i32[6] = offset.exponent;
     u32[7] = request.maxIterations;
     const wantsEndpoints=needsEndpoints(colors)||colors.mode===1;
-    if(this.retainEndpoints&&!wantsEndpoints&&this.fieldView&&!this.sameView(this.fieldView,request)){
+    // Appearance-only recolouring returned above if its cached channels were
+    // useful. A fresh ordinary calculation must not inherit endpoint demand
+    // from an earlier colour mode at this same geometry.
+    if(this.retainEndpoints&&!wantsEndpoints){
       this.retainEndpoints=false;this.endpointBuffer?.destroy();this.endpointBuffer=null;this.endpointCapacity=0;
     }
     this.retainEndpoints ||= wantsEndpoints;
@@ -1981,8 +1952,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       method, grid,
     };
     const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
-    const continuationEligible=tuning.hardPixelBudget>0 && request.followView && progressive && method!==Method.Direct &&
-      colors.mode===0 && grid===1 && !request.tileRows && device.limits.maxStorageBuffersPerShaderStage>=8;
+    const continuationSupported=request.followView && colors.mode===0 && grid===1 &&
+      !request.tileRows && device.limits.maxStorageBuffersPerShaderStage>=8;
     let timingSamples: (TimingSample | undefined)[] = [];
     const collectTimings = () => { timingSamples.forEach(s => this.timing.collect(s)); timingSamples = []; };
     const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height,timingSamples);
@@ -2001,11 +1972,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       collectTimings();
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
-    const batchCostKey=[family,method,request.maxIterations,limbs,colors.mode,grid].join("|");
+    const batchCostKey=[family,method,pipelineKind,limbs,colors.mode,grid].join("|");
     if (this.batchCostKey!==batchCostKey) {
       this.batchCostKey=batchCostKey;
-      this.batchMsPerSample=capUpgrade?
-        Math.max(this.batchMsPerSample,tuning.batchTargetMs/startingBatchVisits(request.maxIterations,tuning.batchMultiplier)):0;
+      this.batchMsPerSample=0;
     }
     if (!fieldStale) this.pending.reset(0,0);
     if (fieldStale) { this.pending.reset(request.width,request.height,previewStride,request.followView); this.determined=new CoverageRegions(); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
@@ -2034,13 +2004,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     };
     let scratch:GPUBuffer|undefined,scratchBind:GPUBindGroup|undefined,scratchCapacity=0;
     const continuationOrbit=this.orbitBuffer;
+    const learnCost=(key:string,cost:number)=>{
+      if(this.batchCostKey!==key||!Number.isFinite(cost)||cost<0)return;
+      const bounded=Math.max(0.000001,cost);
+      this.batchMsPerSample=this.batchMsPerSample ? .75*this.batchMsPerSample+.25*bounded : bounded;
+    };
     try { while (this.pending.size) {
-      const minimum=startingBatchVisits(request.maxIterations,tuning.batchMultiplier);
+      const batchTuning=this.currentView?.tuning??tuning;
+      const minimum=startingBatchVisits(request.maxIterations,batchTuning.batchMultiplier);
+      const costly=continuationSupported && batchTuning.hardPixelBudget>0 && (this.batchMsPerSample>0 ?
+        this.batchMsPerSample*minimum>batchTuning.batchTargetMs : request.maxIterations>batchTuning.hardPixelBudget*4);
       const budget = this.batchMsPerSample > 0 ?
-        Math.max(minimum,tuning.batchTargetMs/this.batchMsPerSample) : minimum;
-      const region = this.pending.take(budget,this.regionDemand(request),request.tileRows,{
-        pointer:tuning.pointerWeight,distributed:tuning.distributedWeight,
-        oldest:tuning.oldestWeight,pointerRadius:tuning.pointerRadius});
+        Math.max(64,Math.min(65_536,batchTuning.batchTargetMs/this.batchMsPerSample)) : minimum;
+      // Bound the selected area before take(); its queue splits larger regions.
+      const spatialBudget=costly?Math.min(budget,CONTINUATION_MAX_LANES):budget;
+      const region = this.pending.take(spatialBudget,this.regionDemand(request),request.tileRows,{
+        pointer:batchTuning.pointerWeight,distributed:batchTuning.distributedWeight,
+        oldest:batchTuning.oldestWeight,pointerRadius:batchTuning.pointerRadius});
       if(!region) break;
       const width=region.width, rows=region.height;
       this.latestRegion=region;
@@ -2054,24 +2034,29 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
       // Only a naturally selected costly region may use the separate shader.
       // Ordinary spatial budgets and CPU feedback remain exactly the baseline.
-      let shape=continuationEligible && this.isInteracting(request) && this.batchMsPerSample>0 &&
-        this.batchMsPerSample*minimum>tuning.batchTargetMs &&
+      let shape=costly &&
         visits<=CONTINUATION_MAX_LANES && CONTINUATION_HEADER_BYTES+visits*CONTINUATION_STATE_BYTES<=limit
         ? continuationRegion(width,rows,region.stride,limit) : null;
       let regionPipeline=calculatePipeline;
       if(shape){
         const preparing=performance.now();
-        regionPipeline=await this.ensureContinuationPipeline(pipelineKind as 'plain'|'approx'|'julia'|'juliaApprox');
+        regionPipeline=await this.ensureContinuationPipeline(pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox');
         this.pipelineWaitMs+=performance.now()-preparing;
         if(this.abortRequested||!request.isCurrent!()||continuationOrbit!==this.orbitBuffer)throw new DOMException('Superseded continuation','AbortError');
-        if(!this.isInteracting(request))shape=null;
       }
       if(shape&&shape.bytes>scratchCapacity){
         scratch?.destroy();scratch=storageBuffer(device,shape.bytes/4,'wide-continuation');scratchCapacity=shape.bytes;
         scratchBind=device.createBindGroup({layout:this.continuationLayout!,entries:[{binding:0,resource:{buffer:scratch}}]});
       }
-      let batchStarted=0;
+      let batchStarted=0,timingUnavailable=false,timingInvalid=false,fallbackApplied=false,baselineWallMs=0;
       if(shape){
+        const measuredKey=this.batchCostKey,regionStarted=performance.now();
+        let sliceExpected=0,sliceReported=0,sliceGpuMs=0,sliceUnavailable=false,slicesFinished=false,costApplied=false,regionWallMs=0;
+        const learnRegion=()=>{
+          if(!slicesFinished||costApplied)return;
+          if(sliceUnavailable){costApplied=true;learnCost(measuredKey,regionWallMs/visits);}
+          else if(sliceReported===sliceExpected){costApplied=true;learnCost(measuredKey,sliceGpuMs/visits);}
+        };
         let resume=false,unfinished=0,publishedCompleted=submittedVisits;
         do {
           // Appearance service may rewrite full-frame uniforms between slices.
@@ -2079,7 +2064,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
           const control=new Uint32Array(resume?4:CONTINUATION_HEADER_BYTES/4);
-          control.set([this.isInteracting(request)?tuning.hardPixelBudget:request.maxIterations,resume?1:0,shape.columns,0]);
+          const liveSliceBudget=this.currentView?.tuning?.hardPixelBudget??batchTuning.hardPixelBudget;
+          // Off drains an already-paused region; it never dispatches zero work.
+          control.set([liveSliceBudget>0?liveSliceBudget:request.maxIterations,resume?1:0,shape.columns,0]);
           device.queue.writeBuffer(scratch!,0,control);
           device.queue.writeBuffer(this.statsBuffer,28,new Uint32Array(1));
           const encoder=device.createCommandEncoder({label:'calculate-region'});
@@ -2087,10 +2074,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           const pass=encoder.beginComputePass({label:'calculate-region',timestampWrites:this.timing.writes(sample)});
           pass.setPipeline(regionPipeline);pass.setBindGroup(0,bind);pass.setBindGroup(1,scratchBind!);
           pass.dispatchWorkgroups(Math.ceil(width/region.stride/8),Math.ceil(rows/region.stride/4));pass.end();
-          this.timing.resolve(encoder,sample);timingSamples.push(sample);
+          this.timing.resolve(encoder,sample);
           if(progressive)shade(encoder,width,rows);
           device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
           if(!resume)submittedVisits+=visits;
+          if(sample){
+            sliceExpected++;
+            this.timing.collect(sample,ms=>{sliceReported++;sliceGpuMs+=ms;learnRegion();},
+              ()=>{sliceReported++;sliceUnavailable=true;learnRegion();});
+          }else sliceUnavailable=true;
           collectTimings();
           // Mapping the counter copy fences this slice and identifies survivors.
           const counters=new Uint32Array(await readBuffer(device,this.statsBuffer,56));
@@ -2126,6 +2118,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           resume=true;
         }while(unfinished);
         if(!completed)break;
+        regionWallMs=performance.now()-regionStarted;slicesFinished=true;learnRegion();
       }else{
         u32[54]=region.stride; u32[26]=region.y+rows;
         u32[40] = region.y; u32[42] = region.x; u32[43] = region.x + width;
@@ -2133,14 +2126,25 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         batchStarted=performance.now();
         const encoder = device.createCommandEncoder({ label: "calculate-region" });
         const sample = this.timing.begin("calculate");
+        timingUnavailable=!sample;
         const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
         pass.setPipeline(calculatePipeline);
         pass.setBindGroup(0, bind);
         pass.dispatchWorkgroups(Math.ceil(width / region.stride / 8), Math.ceil(rows / region.stride / 4)); pass.end();
-        this.timing.resolve(encoder, sample); timingSamples.push(sample);
+        this.timing.resolve(encoder, sample);
         if (progressive) shade(encoder, width, rows);
         device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
         submittedVisits+=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride)*grid*grid;
+        if(sample){
+          const measuredKey=this.batchCostKey;
+          const measuredVisits=visits;
+          this.timing.collect(sample,ms=>{
+            if(measuredVisits)learnCost(measuredKey,ms/measuredVisits);
+          },()=>{
+            timingInvalid=true;
+            if(baselineWallMs>0&&!fallbackApplied){fallbackApplied=true;learnCost(measuredKey,baselineWallMs/visits);}
+          });
+        }
         collectTimings();
         if (progressive && request.isCurrent!()) {
           this.incomingFrame = frame; this.partialSerial++; this.partialRegions++;
@@ -2159,9 +2163,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if(region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
       if(!shape){
         const elapsed = performance.now() - batchStarted;
-        const cost = elapsed / (Math.ceil(width/region.stride) * Math.ceil(rows/region.stride));
-        this.batchMsPerSample = capUpgrade ? Math.max(this.batchMsPerSample,cost) :
-          this.batchMsPerSample ? .75 * this.batchMsPerSample + .25 * cost : cost;
+        baselineWallMs=elapsed;
+        // Queue fences include unrelated work; use this only as a conservative
+        // fallback when timestamp queries are unavailable.
+        if((timingUnavailable||timingInvalid)&&!fallbackApplied){fallbackApplied=true;learnCost(this.batchCostKey,elapsed/visits);}
       }
       await yieldToEvents();
       if (!request.isCurrent!() || this.abortRequested) {
@@ -2261,7 +2266,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       limitHitRatio: capUpgrade ? counters[12]/(request.width*request.height) : counters[5] > 0 ? counters[12] / counters[5] : 0,
     };
     if(completed&&this.fieldComplete){
-      this.fieldDescriptor={family,constant,maxIterations:request.maxIterations,mode:colors.mode,grid,method,useApprox:request.useApprox===true,retainEndpoints:this.retainEndpoints};
+      this.fieldDescriptor={family,constant,maxIterations:request.maxIterations,mode:colors.mode,grid,method,useApprox:request.useApprox===true,retainEndpoints:this.retainEndpoints,
+        interiorEndpoints:colors.mode!==0||(colors.capped??0)>0};
       this.fieldUniforms=uniforms.slice(0);this.fieldStats=result;this.partialAppearanceUniforms=null;
     }
     if (completed && request.isCurrent!() && published) {

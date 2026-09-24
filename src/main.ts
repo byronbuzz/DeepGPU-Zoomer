@@ -10,7 +10,7 @@ import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
 import { setupRangeControls } from './range-controls';
-import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, HARD_PIXEL_BUDGETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, startingBatchVisits, type EditableTuningKey, type TuningSettings } from './tuning';
+import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, HARD_PIXEL_BUDGETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
 const canvas=el<HTMLCanvasElement>('fractal');
@@ -87,11 +87,11 @@ function syncIterationLabel(){
   if(!baseEditing)el<HTMLInputElement>('iteration-base').value=String(baseIterations);
   el<HTMLButtonElement>('iteration-dynamic').setAttribute('aria-pressed',String(dynamicEnabled));
 }
-function syncTuningLabels(iterations=view.iterations){
+function syncTuningLabels(){
   const count=modifiedTuningCount(tuning);
   setText(el('tuning-status'),count?`${count} tuning settings modified`:'Navigation defaults');
   const fields:[EditableTuningKey,string][]=[
-    ['batchMultiplier','batch-multiplier'],['hardPixelBudget','hard-budget'],
+    ['batchTargetMs','batch-target'],['batchMultiplier','batch-multiplier'],['hardPixelBudget','hard-budget'],
     ['overscanBase','overscan-base'],['overscanMax','overscan-max'],
     ['dynamicDepthGain','depth-gain'],['dynamicCapGain','cap-gain'],
   ];
@@ -99,7 +99,8 @@ function syncTuningLabels(iterations=view.iterations){
     el<HTMLInputElement>(`tuning-${id}`).value=key==='hardPixelBudget'?String(HARD_PIXEL_BUDGETS.indexOf(tuning.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number])):String(tuning[key]);
     el(`tuning-${id}-modified`).hidden=tuning[key]===DEFAULT_TUNING[key];
   }
-  setText(el('tuning-batch-multiplier-value'),`${tuning.batchMultiplier}× · ${startingBatchVisits(iterations,tuning.batchMultiplier).toLocaleString()} starting/minimum visits at ${iterations.toLocaleString()} iterations`);
+  setText(el('tuning-batch-target-value'),`${tuning.batchTargetMs} ms`);
+  setText(el('tuning-batch-multiplier-value'),`${tuning.batchMultiplier}×`);
   setText(el('tuning-hard-budget-value'),tuning.hardPixelBudget?`${tuning.hardPixelBudget.toLocaleString()} operations per slice`:'Off');
   setText(el('tuning-overscan-base-value'),`${tuning.overscanBase} CSS px`);
   setText(el('tuning-overscan-max-value'),`${tuning.overscanMax} CSS px`);
@@ -113,7 +114,8 @@ function changeTuning(key:EditableTuningKey,value:number){
   if(key==='dynamicCapGain')capTarget=0;
   if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
   syncTuningLabels();
-  refresh();
+  // Navigation controls apply to the next scheduling decision. They do not
+  // invalidate already calculated pixels or restart the current view.
 }
 function currentDepth(){
   const [mantissa,exponent]=camera.span.toExponential(14).split('e');
@@ -130,10 +132,19 @@ function changeEffectiveLimit(limit:number,atBatchBoundary=false){
   dirty=true;completedQuality=0;lastRevision=-1;stats=undefined;
   refinementTime.demand(performance.now());syncIterationLabel();syncTuningLabels();preparing();
 }
-function setManualBase(limit:number){
+function setManualBase(limit:number,beforeRefresh=false){
   if(!Number.isInteger(limit)||limit<1||limit>MAX_ITERATIONS){message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);return false;}
-  clearTimeout(baseEditTimer);baseEditing=false;baseIterations=limit;resetDynamicAnchor();changeEffectiveLimit(limit);
+  clearTimeout(baseEditTimer);baseEditTimer=undefined;baseEditing=false;baseIterations=limit;resetDynamicAnchor();
+  if(beforeRefresh)view={...view,iterations:limit};
+  else changeEffectiveLimit(limit);
   syncIterationLabel();persist(false);return true;
+}
+function commitPendingBaseForRefresh(){
+  if(!baseEditing)return;
+  clearTimeout(baseEditTimer);baseEditTimer=undefined;
+  const raw=el<HTMLInputElement>('iteration-base').value.trim();
+  if(raw&&/^\d+$/.test(raw))setManualBase(Number(raw),true);
+  else message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);
 }
 function maybeUpdateDynamicLimit(time:number){
   if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing||busy||time-lastDynamicUpdate<500)return;
@@ -196,7 +207,6 @@ function syncControls(){
   syncRotation();
   el<HTMLSelectElement>('family').value=view.family;
   syncIterationLabel();
-  el<HTMLTextAreaElement>('cx').value=camera.x.toString();el<HTMLTextAreaElement>('cy').value=camera.y.toString();el<HTMLInputElement>('span').value=camera.span.toString();
   depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
   syncJuliaPreview();
   syncAppearance();
@@ -418,7 +428,7 @@ window.addEventListener('blur',()=>{stop();persist();});document.addEventListene
 el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelectElement).value as Family;if(family===view.family)return;if(family==='mandelbrot'&&juliaReturn){switchJuliaView();return;}if(family==='julia')juliaReturn=snapshot();load({...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations,angle:camera.angle});};
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
 el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(String(err));}};
-el('refresh').onclick=refresh;
+el('refresh').onclick=()=>{commitPendingBaseForRefresh();refresh();};
 el('stop-refinement').onclick=stopRefinement;
 el('reset').onclick=()=>load(homePosition(snapshot()));
 const rotationSlider=el<HTMLInputElement>('rotation');
@@ -430,12 +440,12 @@ rotationSlider.onchange=()=>{if(!rotationSliderHeld)finishSliderRotation();};
 rotationSlider.onpointerup=finishSliderRotation;rotationSlider.onpointercancel=finishSliderRotation;rotationSlider.onkeyup=finishSliderRotation;rotationSlider.onblur=finishSliderRotation;
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
-el<HTMLInputElement>('iteration-slider').oninput=e=>{sliderEditing=true;const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();syncTuningLabels(n);};
+el<HTMLInputElement>('iteration-slider').oninput=e=>{sliderEditing=true;const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
 el<HTMLInputElement>('iteration-slider').onchange=e=>{sliderEditing=false;const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));setManualBase(n);};
 const baseInput=el<HTMLInputElement>('iteration-base');
 baseInput.oninput=()=>{
   baseEditing=true;clearTimeout(baseEditTimer);
-  baseEditTimer=setTimeout(()=>{const raw=baseInput.value.trim();if(raw&&/^\d+$/.test(raw))setManualBase(Number(raw));else message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);},2000);
+  baseEditTimer=setTimeout(()=>{baseEditTimer=undefined;const raw=baseInput.value.trim();if(raw&&/^\d+$/.test(raw))setManualBase(Number(raw));else message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);},1000);
 };
 el<HTMLButtonElement>('iteration-dynamic').onclick=()=>{
   dynamicEnabled=!dynamicEnabled;
@@ -445,6 +455,7 @@ el<HTMLButtonElement>('iteration-dynamic').onclick=()=>{
   syncIterationLabel();
 };
 const tuningInputs:[EditableTuningKey,string,(value:number)=>number][]=[
+  ['batchTargetMs','batch-target',Number],
   ['batchMultiplier','batch-multiplier',Number],
   ['hardPixelBudget','hard-budget',value=>HARD_PIXEL_BUDGETS[value]??0],
   ['overscanBase','overscan-base',Number],['overscanMax','overscan-max',Number],
@@ -457,10 +468,10 @@ for(const [key,id,parse] of tuningInputs){
 el('tuning-reset').onclick=()=>{
   if(!modifiedTuningCount(tuning))return;
   tuning={...DEFAULT_TUNING};
+  capTarget=0;
   if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
   syncTuningLabels();refresh();
 };
-el<HTMLFormElement>('coordinates').onsubmit=e=>{e.preventDefault();try{load({...snapshot(),x:el<HTMLInputElement>('cx').value,y:el<HTMLInputElement>('cy').value,span:el<HTMLInputElement>('span').value});}catch(err){message(String(err));}};
 const locationEntry=el<HTMLInputElement>('location-entry'),locationOptions=el<HTMLElement>('location-options');
 const replaceLocation=el<HTMLElement>('replace-location');
 let visibleLocations:LocationChoice[]=[],locationOptionsOpen=false,filterLocations=false,activeLocation=-1;

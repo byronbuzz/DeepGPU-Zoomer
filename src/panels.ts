@@ -2,9 +2,10 @@
 export interface PanelController { reset():void }
 export function setupPanels():PanelController{
   const panels=Array.from(document.querySelectorAll<HTMLElement>('[data-panel]'));
-  let saved:Record<string,{x:number;y:number;width?:number;height?:number}>={};let opacity=.8;
-  try{const v=JSON.parse(localStorage.getItem('gpu-zoomer-layout')||'{}');saved=v.positions??{};opacity=Number.isFinite(v.opacity)?Math.max(.15,Math.min(1,v.opacity)):.8;}catch{}
-  const persist=()=>{try{localStorage.setItem('gpu-zoomer-layout',JSON.stringify({positions:saved,opacity}));}catch{}};
+  const defaultAccent='#9cdcd6';
+  let saved:Record<string,{x:number;y:number;width?:number;height?:number}>={};let opacity=.8,accent=defaultAccent;
+  try{const v=JSON.parse(localStorage.getItem('gpu-zoomer-layout')||'{}');saved=v.positions??{};opacity=Number.isFinite(v.opacity)?Math.max(.15,Math.min(1,v.opacity)):.8;accent=typeof v.accent==='string'&&/^#[0-9a-fA-F]{6}$/.test(v.accent)?v.accent:defaultAccent;}catch{}
+  const persist=()=>{try{localStorage.setItem('gpu-zoomer-layout',JSON.stringify({positions:saved,opacity,accent}));}catch{}};
   const clamp=(p:HTMLElement,x:number,y:number)=>{
     const r=p.getBoundingClientRect();
     const pos={x:Math.max(8,Math.min(innerWidth-r.width-8,x)),y:Math.max(8,Math.min(innerHeight-r.height-8,y))};
@@ -68,6 +69,9 @@ export function setupPanels():PanelController{
   const input=document.getElementById('panel-opacity') as HTMLInputElement;
   const setOpacity=()=>{document.documentElement.style.setProperty('--panel-opacity',String(opacity));input.value=String(opacity);};setOpacity();
   input.oninput=()=>{opacity=Number(input.value);setOpacity();persist();};
+  const accentInput=document.getElementById('panel-accent') as HTMLInputElement;
+  const setAccent=()=>{document.documentElement.style.setProperty('--accent',accent);accentInput.value=accent;};setAccent();
+  accentInput.oninput=()=>{if(!/^#[0-9a-fA-F]{6}$/.test(accentInput.value))return;accent=accentInput.value;setAccent();persist();};
   const resetLayout=(save=true)=>{saved={};panels.forEach(p=>{p.style.left='';p.style.top='';p.style.right='';p.style.bottom='';if(p.id==='controls'){p.style.width='';p.style.height='';}});restore();if(save)persist();};
   const tabs=Array.from(document.querySelectorAll<HTMLButtonElement>('[role=tab]'));
   const selectTab=(tab:HTMLButtonElement,focus=false)=>{for(const item of tabs){const selected=item===tab;item.setAttribute('aria-selected',String(selected));item.tabIndex=selected?0:-1;const panel=document.getElementById(item.getAttribute('aria-controls')!);if(panel)panel.hidden=!selected;}if(focus)tab.focus();};
@@ -76,7 +80,7 @@ export function setupPanels():PanelController{
   const syncToggle=(hidden:boolean)=>{const label=hidden?'Show controls':'Hide controls';toggle.setAttribute('aria-label',label);toggle.title=label;toggle.setAttribute('aria-expanded',String(!hidden));};
   toggle.onclick=()=>syncToggle(document.body.classList.toggle('controls-hidden'));
   return {reset(){
-    opacity=.8;setOpacity();resetLayout(false);document.body.classList.remove('controls-hidden');syncToggle(false);
+    opacity=.8;accent=defaultAccent;setOpacity();setAccent();resetLayout(false);document.body.classList.remove('controls-hidden');syncToggle(false);
     selectTab(tabs[0]);document.querySelectorAll<HTMLDetailsElement>('#controls details').forEach(details=>details.open=false);
   }};
 }

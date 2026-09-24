@@ -31,6 +31,20 @@ it('does not allocate or profile without the optional capability', () => {
   expect(f.allocated).toBe(0);
 });
 
+it('collects calculate timings for scheduling while the profiling display is off', async () => {
+  const f = device(), timing = new GpuTiming(f.gpu);
+  expect(timing.begin('shade')).toBeUndefined();
+  const sample = timing.begin('calculate');
+  expect(sample).toBeDefined();
+  let measured = -1;
+  timing.collect(sample, ms => { measured = ms; });
+  const buffer = f.buffers.find(b => b.succeed)!;
+  new BigUint64Array(buffer.bytes).set([100n, 1_000_100n]); buffer.succeed!();
+  await flush();
+  expect(measured).toBe(1);
+  expect(timing.snapshot().phases).toEqual({});
+});
+
 it('keeps pending buffers reserved across reset and discards their old results', async () => {
   const f = device(), timing = new GpuTiming(f.gpu);
   timing.setEnabled(true);

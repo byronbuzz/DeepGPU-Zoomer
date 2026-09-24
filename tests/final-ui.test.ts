@@ -51,6 +51,7 @@ describe('range defaults and hover wheel', () => {
     expect(RANGE_DEFAULTS.rotation).toBe(0);
     expect(RANGE_DEFAULTS.speed).toBe(0.7);
     expect(RANGE_DEFAULTS['panel-opacity']).toBe(0.8);
+    expect(RANGE_DEFAULTS['tuning-batch-target']).toBe(DEFAULT_TUNING.batchTargetMs);
     expect(RANGE_DEFAULTS['tuning-batch-multiplier']).toBe(DEFAULT_TUNING.batchMultiplier);
     expect(HARD_PIXEL_BUDGETS[RANGE_DEFAULTS['tuning-hard-budget']]).toBe(DEFAULT_TUNING.hardPixelBudget);
     expect(RANGE_DEFAULTS['tuning-overscan-base']).toBe(DEFAULT_TUNING.overscanBase);

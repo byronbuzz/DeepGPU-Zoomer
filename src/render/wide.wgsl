@@ -161,7 +161,7 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var delta = injection;
     if (!JULIA) { delta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     var z = wideAdd(wideNorm(Wide(u.wideCentreX, u.wideCentreY, 0)), pixelDelta);
-    if (!JULIA && u.mode == 0u && u.retainEndpoints == 0u && u.cappedPattern == 0u &&
+    if (!JULIA && u.mode == 0u && u.cappedPattern == 0u &&
         analyticMandelbrotInterior(z)) {
         // The caller already represents a determined capped sample as (-1,0).
         // n=0 records that no recurrence iterations were executed.
@@ -183,10 +183,9 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var zValue = wideValue(z);
     var z2 = dot(zValue, zValue);
     var escaped = z2 > ESCAPE_R2;
-    // Only the ordinary no-skip/no-endpoint path can terminate on an exact
-    // repeated numerical state. Check sparsely; approximation depends on the
-    // remaining budget and continuation does not retain this checkpoint.
-    let detectPeriodic = !APPROX && u.mode == 0u && u.retainEndpoints == 0u &&
+    // The ordinary no-skip path can terminate on an exact repeated numerical
+    // state. Check sparsely; approximation depends on the remaining budget.
+    let detectPeriodic = !APPROX && u.mode == 0u &&
         u.cappedPattern == 0u && !wantDerivative;
     var checkpointZ = z;
     var checkpointDelta = delta;

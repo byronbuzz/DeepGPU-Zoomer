@@ -1,5 +1,5 @@
-/** WGSL WideContinuation: three 48-byte Wide values, scalar state, vec2 alignment. */
-export const CONTINUATION_STATE_BYTES = 192;
+/** WGSL WideContinuation: five 48-byte Wide values plus exact-cycle state. */
+export const CONTINUATION_STATE_BYTES = 304;
 export const CONTINUATION_MAX_LANES = 4096;
 export const CONTINUATION_HEADER_BYTES = 16 + CONTINUATION_MAX_LANES / 8;
 
