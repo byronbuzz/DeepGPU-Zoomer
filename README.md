@@ -19,7 +19,7 @@ TypeScript and builds `dist`; `npm run preview` serves that build locally.
 ## Explore
 
 - Hold left/right mouse to zoom in/out, steering with the pointer. The default
-  zoom speed is 0.8x. Shift-drag
+  zoom speed is 0.7x. Shift-drag
   or middle-drag pans; the wheel zooms. On the focused canvas, +/− zoom,
   arrow keys pan, and Esc stops motion.
 - Refresh recalculates the exact current view and starts a new Time taken
@@ -244,9 +244,11 @@ or correctly delivered display frames. Expensive views magnify known samples
 while refinement runs; newly exposed areas use the nearest available edge
 until coverage arrives. New detail may change pixels abruptly, with no blur
 to hide it. Deep fields can take seconds to refine at high resolution.
-The one-million cap is supported, not a speed promise. Work counters use paired
-words so high-cap totals do not wrap at 32 bits. Reference/table allocations
-check actual device capacity; BLA preparation yields cooperatively and high-cap
+The configured ten-million pixel-iteration ceiling is not a speed promise. The
+reference orbit remains separately bounded by device storage and one million
+samples; reference-end rebasing lets pixels continue beyond it. Work counters
+use paired words so high-cap totals do not wrap at 32 bits. Reference/table
+allocations check actual device capacity; BLA preparation yields cooperatively and high-cap
 batches shrink. Cancellation still waits for an already submitted GPU batch.
 GPU loss requires a reload. There is no built-in recording or public deploy.
 

@@ -86,7 +86,8 @@ struct Uniforms {
 @group(0) @binding(5) var<storage, read> laIndex: array<u32>;
 /**
  * [0] iterations skipped, [1] LA steps taken, [2] rebases, [3] plain steps,
- * [4] samples that used the whole iteration budget, [5] samples total.
+ * [4] non-escaped samples (including known interiors), [5] samples total,
+ * [12] unknown samples that actually reached the iteration limit.
  *
  * [4] and [5] are what tells the caller whether the budget was the binding
  * constraint. A sample that hit the cap either is interior or simply ran out
@@ -627,6 +628,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rebases: u32 = 0u;
     var plain: u32 = 0u;
     var capped: u32 = 0u;
+    var limitHits: u32 = 0u;
     var total: u32 = 0u;
 
     for (var sy: u32 = 0u; sy < grid; sy = sy + 1u) {
@@ -641,6 +643,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
             plain = plain + (s.n - s.skipped);
             total = total + 1u;
             if (!s.escaped) { capped = capped + 1u; }
+            if (!s.escaped && s.n == u.maxIterations) { limitHits = limitHits + 1u; }
 
             // mode 2 is a diagnostic view: red = iterations used, green =
             // escaped, blue = log2 of the final delta, alpha = rebases. It
@@ -672,6 +675,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let beforePlain=atomicAdd(&stats[3], plain);
     atomicAdd(&stats[4], capped);
     atomicAdd(&stats[5], total);
+    atomicAdd(&stats[12], limitHits);
     // Fixed addresses preserve the incumbent counter path. Every low-word wrap
     // contributes one carry; host readback fences all independent atomics.
     if(beforeSkipped>0xffffffffu-skipped){atomicAdd(&stats[8],1u);}

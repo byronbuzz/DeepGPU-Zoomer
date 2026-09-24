@@ -49,18 +49,14 @@ describe('range defaults and hover wheel', () => {
     expect(iterationFromSlider(RANGE_DEFAULTS['iteration-slider'])).toBe(HOME.iterations);
     expect(cycleFromSlider(RANGE_DEFAULTS.cycle)).toBeCloseTo(DEFAULT_COLORS.cycle);
     expect(RANGE_DEFAULTS.rotation).toBe(0);
-    expect(RANGE_DEFAULTS.speed).toBe(0.8);
+    expect(RANGE_DEFAULTS.speed).toBe(0.7);
     expect(RANGE_DEFAULTS['panel-opacity']).toBe(0.8);
-    expect(RANGE_DEFAULTS['tuning-direct']).toBe(DEFAULT_TUNING.directExponent);
-    expect(RANGE_DEFAULTS['tuning-batch-target']).toBe(DEFAULT_TUNING.batchTargetMs);
     expect(RANGE_DEFAULTS['tuning-batch-multiplier']).toBe(DEFAULT_TUNING.batchMultiplier);
-    expect(RANGE_DEFAULTS['tuning-hdr']).toBe(DEFAULT_TUNING.hdrExponent);
-    expect(RANGE_DEFAULTS['tuning-pointer-weight']).toBe(DEFAULT_TUNING.pointerWeight);
-    expect(RANGE_DEFAULTS['tuning-distributed-weight']).toBe(DEFAULT_TUNING.distributedWeight);
-    expect(RANGE_DEFAULTS['tuning-oldest-weight']).toBe(DEFAULT_TUNING.oldestWeight);
-    expect(2 ** RANGE_DEFAULTS['tuning-pointer-radius']).toBe(DEFAULT_TUNING.pointerRadius);
     expect(HARD_PIXEL_BUDGETS[RANGE_DEFAULTS['tuning-hard-budget']]).toBe(DEFAULT_TUNING.hardPixelBudget);
-    expect(RANGE_DEFAULTS['tuning-bla-rebuild']).toBe(DEFAULT_TUNING.blaRebuildPercent);
+    expect(RANGE_DEFAULTS['tuning-overscan-base']).toBe(DEFAULT_TUNING.overscanBase);
+    expect(RANGE_DEFAULTS['tuning-overscan-max']).toBe(DEFAULT_TUNING.overscanMax);
+    expect(RANGE_DEFAULTS['tuning-depth-gain']).toBe(DEFAULT_TUNING.dynamicDepthGain);
+    expect(RANGE_DEFAULTS['tuning-cap-gain']).toBe(DEFAULT_TUNING.dynamicCapGain);
     for (const [id, key] of [['color-offset','offset'],['hue-rotation','hueRotation'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)
       expect(RANGE_DEFAULTS[id]).toBe(DEFAULT_COLORS[key]);
   });

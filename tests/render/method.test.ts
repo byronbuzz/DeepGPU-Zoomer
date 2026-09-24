@@ -26,22 +26,21 @@ describe("methodForScale", () => {
     expect(methodForScale(upp("0.02"))).toBe(Method.Direct);
   });
 
-  it("switches to perturbation before f32 loses the pixel grid", () => {
-    // 6e-8 is roughly f32's resolution near |c| ~ 1; direct iteration has to
-    // be gone well before the pixel spacing gets there.
-    expect(methodForScale(upp("1e-3"))).toBe(Method.Plain);
-    expect(methodForScale(upp("6e-6"))).toBe(Method.Plain);
+  it("uses the user-selected 10^-14.75 direct crossover", () => {
+    expect(methodForScale(upp("1e-3"))).toBe(Method.Direct);
+    expect(methodForScale(upp("6e-6"))).toBe(Method.Direct);
+    expect(methodForScale(upp("1e-13"))).toBe(Method.Plain);
   });
 
   it("keeps the plain delta across the range where it is fastest", () => {
-    expect(methodForScale(upp("1e-8"))).toBe(Method.Plain);
-    expect(methodForScale(upp("3e-11"))).toBe(Method.Plain);
+    expect(methodForScale(upp("1e-8"))).toBe(Method.Direct);
+    expect(methodForScale(upp("3e-11"))).toBe(Method.Direct);
     expect(methodForScale(upp("1e-18"))).toBe(Method.Plain);
   });
 
   it("gives the delta its own exponent well above the f32 floor", () => {
-    // A plain f32 denormalises at 1.2e-38; the handover is 13 decades early.
-    expect(methodForScale(upp("1e-25"))).toBe(Method.Hdr);
+    expect(methodForScale(upp("1e-25"))).toBe(Method.Plain);
+    expect(methodForScale(upp("1e-30"))).toBe(Method.Hdr);
     expect(methodForScale(upp("6e-42"))).toBe(Method.Hdr);
     expect(methodForScale(upp("1e-300"))).toBe(Method.Hdr);
   });
@@ -50,10 +49,10 @@ describe("methodForScale", () => {
     // The same span on a taller viewport resolves finer and can need a
     // stronger method.
     expect(methodForScale(new Decimal("1e-2").div(100))).toBe(Method.Direct);
-    expect(methodForScale(new Decimal("1e-2").div(100000))).toBe(Method.Plain);
+    expect(methodForScale(new Decimal("1e-2").div(100000))).toBe(Method.Direct);
   });
 
-  it("keeps 5183 boundaries by default and moves only the selected crossovers", () => {
+  it("uses the fixed navigation crossovers unless explicitly overridden by a caller", () => {
     for (const spacing of ["1e-4", "1e-5", "1e-6", "1e-24", "1e-25", "1e-26"])
       expect(methodForScale(new Decimal(spacing), DEFAULT_TUNING)).toBe(methodForScale(new Decimal(spacing)));
     const tuned={...DEFAULT_TUNING,directExponent:8,hdrExponent:20};

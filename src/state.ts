@@ -5,7 +5,7 @@ import { parseCoordinateInput } from './coordinate';
 
 export type Family = 'mandelbrot' | 'julia';
 export interface SavedView { family: Family; x: string; y: string; span: string; jx: string; jy: string; iterations: number; angle?: number; appearance?: ColorSettings }
-export const MAX_ITERATIONS=1_000_000;
+export const MAX_ITERATIONS=10_000_000;
 export function iterationFromSlider(value:number){return Math.round(Math.pow(MAX_ITERATIONS,Math.max(0,Math.min(1,value))));}
 export function iterationToSlider(value:number){return Math.log(value)/Math.log(MAX_ITERATIONS);}
 export function depthLabel(span:Decimal){const ratio=new Decimal(2.8).div(span);return `10^${(ratio.e+Math.log10(Number(ratio.toExponential(14).split('e')[0]))).toFixed(2)}×`;}
@@ -21,7 +21,7 @@ export function validateView(value: unknown): SavedView {
   // 256 u32 limbs provide 8160 fractional bits. Leave room for pixels and
   // the orbit guard precision before allocating decimal camera arithmetic.
   if(new Decimal(v.span).e < -2400) throw Error('This view exceeds the current GPU precision profiles');
-  if(!Number.isInteger(v.iterations)||v.iterations<1||v.iterations>MAX_ITERATIONS) throw Error('Iteration limit must be 1–1000000');
+  if(!Number.isInteger(v.iterations)||v.iterations<1||v.iterations>MAX_ITERATIONS) throw Error('Iteration limit must be 1–10000000');
   if(v.angle!==undefined&&(!Number.isFinite(v.angle)||v.angle < -180||v.angle > 180))throw Error('Rotation must be between −180° and 180°');
   for(const k of ['x','y','jx','jy'] as const) if(new Decimal(v[k]).abs().gt(16)) throw Error('Coordinates must be within ±16');
   // Old links may contain iterationMode; fixed limits are now the only policy.

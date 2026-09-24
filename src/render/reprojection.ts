@@ -65,6 +65,8 @@ export function reprojectionFor(
   next: FrameView,
   /** A broader completed source may still fill holes after heavy magnification. */
   coarseFallback = false,
+  /** Presentation only: keep a finite held-colour map after numerical reuse expires. */
+  presentationOnly = false,
 ): Reprojection | null {
   if (last.width <= 0 || last.height <= 0 || next.width <= 0 || next.height <= 0) {
     return null;
@@ -78,7 +80,8 @@ export function reprojectionFor(
   const scaleY = nextSpanY.div(lastSpanY).toNumber();
   const scaleX = next.unitsPerPixel.times(next.width).div(lastSpanX).toNumber();
   if (![scaleX, scaleY].every(scale => Number.isFinite(scale) && scale > 0 &&
-      (coarseFallback || scale >= MAX_SHRINK) && scale <= MAX_MAGNIFY)) return null;
+      (presentationOnly || coarseFallback || scale >= MAX_SHRINK) &&
+      (presentationOnly || scale <= MAX_MAGNIFY))) return null;
 
   if ((last.angle??0)===(next.angle??0)) {
     // Same orientation, including the legacy zero-angle identity path.
@@ -86,7 +89,8 @@ export function reprojectionFor(
     const dxWorld=next.centerX.minus(last.centerX),dyWorld=next.centerY.minus(last.centerY);
     const dx=(last.angle??0)===0?dxWorld.div(lastSpanX).toNumber():dxWorld.times(c).plus(dyWorld.times(s)).div(lastSpanX).toNumber();
     const dy=(last.angle??0)===0?last.centerY.minus(next.centerY).div(lastSpanY).toNumber():dxWorld.times(s).minus(dyWorld.times(c)).div(lastSpanY).toNumber();
-    if (!Number.isFinite(dx)||!Number.isFinite(dy)||Math.abs(dx)>MAX_PAN_SCREENS||Math.abs(dy)>MAX_PAN_SCREENS)return null;
+    if (!Number.isFinite(dx)||!Number.isFinite(dy)||
+        !presentationOnly&&(Math.abs(dx)>MAX_PAN_SCREENS||Math.abs(dy)>MAX_PAN_SCREENS))return null;
     return {scaleX,scaleY,offsetX:0.5*(1-scaleX)+dx,offsetY:0.5*(1-scaleY)+dy};
   }
 
@@ -97,7 +101,7 @@ export function reprojectionFor(
   const dx=worldX.times(old.c).plus(worldY.times(old.s)).div(lastSpanX).toNumber();
   const dy=worldX.times(old.s).minus(worldY.times(old.c)).div(lastSpanY).toNumber();
   if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
-  if (Math.abs(dx) > MAX_PAN_SCREENS || Math.abs(dy) > MAX_PAN_SCREENS) return null;
+  if (!presentationOnly&&(Math.abs(dx) > MAX_PAN_SCREENS || Math.abs(dy) > MAX_PAN_SCREENS)) return null;
 
   // Cross terms use complex units per pixel and the opposite source axis.
   const crossX=next.unitsPerPixel.times(next.height).div(lastSpanX).toNumber()*relative.s;

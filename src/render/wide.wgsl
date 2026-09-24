@@ -183,6 +183,17 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var zValue = wideValue(z);
     var z2 = dot(zValue, zValue);
     var escaped = z2 > ESCAPE_R2;
+    // Only the ordinary no-skip/no-endpoint path can terminate on an exact
+    // repeated numerical state. Check sparsely; approximation depends on the
+    // remaining budget and continuation does not retain this checkpoint.
+    let detectPeriodic = !APPROX && u.mode == 0u && u.retainEndpoints == 0u &&
+        u.cappedPattern == 0u && !wantDerivative;
+    var checkpointZ = z;
+    var checkpointDelta = delta;
+    var checkpointReference = referenceIndex;
+    var checkpointPower = 1u;
+    var checkpointLength = 0u;
+    var haveCheckpoint = false;
 
     while (n < u.maxIterations && !escaped) {
         var span = 0u;
@@ -234,6 +245,21 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
                 referenceIndex = 0u;
                 reference = wideReference(0u, false);
                 rebases += 1u;
+            }
+        }
+        if (detectPeriodic && !escaped && (n & 63u) == 0u) {
+            if (haveCheckpoint && referenceIndex == checkpointReference &&
+                sameWideBits(delta, checkpointDelta) && sameWideBits(z, checkpointZ)) { break; }
+            checkpointLength += 1u;
+            // Brent checkpoints on the sparse sample stream also catch exact
+            // cycles whose period does not divide the 64-iteration stride.
+            if (!haveCheckpoint || checkpointLength >= checkpointPower) {
+                checkpointZ = z;
+                checkpointDelta = delta;
+                checkpointReference = referenceIndex;
+                haveCheckpoint = true;
+                checkpointLength = 0u;
+                checkpointPower = min(checkpointPower * 2u, 262144u);
             }
         }
     }

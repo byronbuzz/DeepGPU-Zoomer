@@ -17,7 +17,7 @@ const settle=async()=>{const start=Date.now();for(;;){const s=await status();if(
 
 try{
   await page.goto(base);await page.waitForFunction(async()=>{const a=await import(document.querySelector('script[type="module"][src*="/src/main.ts"]').src);await a.ready;return !!a.testing?.engine;});await settle();
-  check('safe fixed Home startup',(await snapshot()).iterations===5000&&await page.locator('#speed').inputValue()==='0.8'&&await page.locator('#iteration-mode').count()===0);
+  check('safe Home startup',(await snapshot()).iterations===5000&&await page.locator('#speed').inputValue()==='0.7'&&await page.locator('#iteration-dynamic').getAttribute('aria-pressed')==='true');
   check('edge-connected keyboard tabs',await page.locator('[role=tab]').count()===3&&await page.locator('.panel-heading,#back,#forward,#palette-panel,#open-palette').count()===0);
   await page.locator('#tab-main').focus();await page.keyboard.press('ArrowRight');
   check('tab keyboard navigation',await page.locator('#tab-colouring').getAttribute('aria-selected')==='true');
@@ -57,7 +57,7 @@ try{
   check('held zoom and Escape settle at the fixed cap',(await snapshot()).iterations===5000&&settled.effectiveLimit===5000&&settled.lastRevision===settled.revision&&settled.progress.percentage===100&&await page.locator('#freshness').innerText().then(text=>text.includes('Time taken:')),{effective:settled.effectiveLimit,revision:settled.revision});
   await page.locator('#full-reset').click();await settle();const reset=await snapshot();
   await page.locator('#location-entry').focus();
-  check('full reset restores defaults and preserves saved locations',reset.iterations===5000&&reset.span==='2.8'&&reset.appearance.postAntialias===false&&await page.locator('#speed').inputValue()==='0.8'&&await page.locator('#location-options [data-location-kind="saved"]').filter({hasText:'Keep me'}).count()===1&&await page.locator('#tab-main').getAttribute('aria-selected')==='true',reset);
+  check('full reset restores defaults and preserves saved locations',reset.iterations===5000&&reset.span==='2.8'&&reset.appearance.postAntialias===false&&await page.locator('#speed').inputValue()==='0.7'&&await page.locator('#location-options [data-location-kind="saved"]').filter({hasText:'Keep me'}).count()===1&&await page.locator('#tab-main').getAttribute('aria-selected')==='true',reset);
   await page.screenshot({path:path.join(output,'reset-main.png')});
 }catch(error){errors.push(String(error));console.error(error);}finally{
   const report={checks,errors,browser:context.browser()?.version()};fs.writeFileSync(path.join(output,'results.json'),JSON.stringify(report,null,2));await context.close();

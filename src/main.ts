@@ -3,26 +3,32 @@ import Decimal from 'decimal.js';
 import { acquireGpu, backingSize, type GpuContext } from './gpu/device';
 import { WebGpuRenderer, type RenderRequest, type RenderStats } from './render/webgpu-renderer';
 import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './logic/colorSettings';
-import { Camera, HOME, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
+import { Camera, HOME, MAX_ITERATIONS, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
 import { setupPanels } from './panels';
 import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
 import { setupRangeControls } from './range-controls';
-import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS, loadTuning, modifiedTuningCount, normalizeTuning, saveTuning, startingBatchVisits, type TuningSettings } from './tuning';
+import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, HARD_PIXEL_BUDGETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, startingBatchVisits, type EditableTuningKey, type TuningSettings } from './tuning';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
 const canvas=el<HTMLCanvasElement>('fractal');
 const camera=new Camera();
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
 let tuning:TuningSettings=loadTuning();
+const DYNAMIC_STORAGE_KEY='gpu-zoomer-dynamic-v1';
+let dynamicEnabled=true;
+try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
+let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0;
+let capTarget=0,capRevision=-1,sliderEditing=false;
+let baseEditTimer:ReturnType<typeof setTimeout>|undefined,baseEditing=false;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let stopped=false, refreshPending=false, refreshHolding=false, stoppedAppearancePending=false;
 let retainedRequest:RenderRequest|null=null;
 let stopSnapshotPending=false,retainedPartialCaptured=false;
 let fields=0, recolours=0, stats:RenderStats|undefined, completedQuality=0, preparingColourData=false, colourDataTarget=0;
-let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=.8, previousTime=0, statusTime=0;
+let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=.7, previousTime=0, statusTime=0;
 let rotating=false,rotationSliderHeld=false,controlDown=false,rotationPointerAngle:number|null=null,activePointer:number|null=null;
 const rotationKeys=new Set<string>();
 let juliaReturn:SavedView|null=null;
@@ -76,40 +82,72 @@ function preparing(time=performance.now()){
 }
 function syncIterationLabel(){
   el('iteration-value').textContent=view.iterations.toLocaleString();
+  el<HTMLInputElement>('iteration-slider').value=String(iterationToSlider(view.iterations));
+  if(!baseEditing)el<HTMLInputElement>('iteration-base').value=String(baseIterations);
+  el<HTMLButtonElement>('iteration-dynamic').setAttribute('aria-pressed',String(dynamicEnabled));
 }
 function syncTuningLabels(iterations=view.iterations){
   const count=modifiedTuningCount(tuning);
-  setText(el('tuning-status'),count?`${count} tuning settings modified`:'All settings match 5183');
-  const fields:[keyof TuningSettings,string][]=[
-    ['directExponent','direct'],['batchTargetMs','batch-target'],['batchMultiplier','batch-multiplier'],
-    ['hdrExponent','hdr'],['pointerWeight','pointer-weight'],['distributedWeight','distributed-weight'],
-    ['oldestWeight','oldest-weight'],['pointerRadius','pointer-radius'],['hardPixelBudget','hard-budget'],
-    ['blaRebuildPercent','bla-rebuild'],['blaChunkMs','bla-chunk'],
+  setText(el('tuning-status'),count?`${count} tuning settings modified`:'Navigation defaults');
+  const fields:[EditableTuningKey,string][]=[
+    ['batchMultiplier','batch-multiplier'],['hardPixelBudget','hard-budget'],
+    ['overscanBase','overscan-base'],['overscanMax','overscan-max'],
+    ['dynamicDepthGain','depth-gain'],['dynamicCapGain','cap-gain'],
   ];
   for(const [key,id] of fields){
-    el<HTMLInputElement|HTMLSelectElement>(`tuning-${id}`).value=key==='pointerRadius'?String(Math.log2(tuning.pointerRadius)):key==='hardPixelBudget'?String(HARD_PIXEL_BUDGETS.indexOf(tuning.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number])):String(tuning[key]);
+    el<HTMLInputElement>(`tuning-${id}`).value=key==='hardPixelBudget'?String(HARD_PIXEL_BUDGETS.indexOf(tuning.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number])):String(tuning[key]);
     el(`tuning-${id}-modified`).hidden=tuning[key]===DEFAULT_TUNING[key];
   }
-  const depthAt=(exponent:number)=>`depth ~10^${(exponent+Math.log10(2.8/Math.max(1,canvas.height))).toFixed(2)}`;
-  setText(el('tuning-direct-value'),`10^-${tuning.directExponent} units/px · ${depthAt(tuning.directExponent)}`);
-  setText(el('tuning-batch-target-value'),`${tuning.batchTargetMs} ms`);
   setText(el('tuning-batch-multiplier-value'),`${tuning.batchMultiplier}× · ${startingBatchVisits(iterations,tuning.batchMultiplier).toLocaleString()} starting/minimum visits at ${iterations.toLocaleString()} iterations`);
-  setText(el('tuning-hdr-value'),`10^-${tuning.hdrExponent} units/px · ${depthAt(tuning.hdrExponent)}`);
-  setText(el('tuning-pointer-weight-value'),String(tuning.pointerWeight));
-  setText(el('tuning-distributed-weight-value'),String(tuning.distributedWeight));
-  setText(el('tuning-oldest-weight-value'),String(tuning.oldestWeight));
-  setText(el('tuning-pointer-radius-value'),`${tuning.pointerRadius} px`);
   setText(el('tuning-hard-budget-value'),tuning.hardPixelBudget?`${tuning.hardPixelBudget.toLocaleString()} operations per slice`:'Off');
-  setText(el('tuning-bla-rebuild-value'),`${tuning.blaRebuildPercent}%`);
-  setText(el('tuning-bla-chunk-value'),tuning.blaChunkMs?`${tuning.blaChunkMs} ms while moving`:'Off');
+  setText(el('tuning-overscan-base-value'),`${tuning.overscanBase} CSS px`);
+  setText(el('tuning-overscan-max-value'),`${tuning.overscanMax} CSS px`);
+  setText(el('tuning-depth-gain-value'),`${tuning.dynamicDepthGain.toLocaleString()} iterations/decade`);
+  setText(el('tuning-cap-gain-value'),`${tuning.dynamicCapGain.toLocaleString()} iterations/percentage point`);
 }
-function changeTuning(key:keyof TuningSettings,value:number){
+function changeTuning(key:EditableTuningKey,value:number){
   const next=normalizeTuning({...tuning,[key]:value},key);
-  if((Object.keys(DEFAULT_TUNING) as (keyof TuningSettings)[]).every(field=>next[field]===tuning[field]))return;
+  if(EDITABLE_TUNING_KEYS.every(field=>next[field]===tuning[field]))return;
   tuning=next;
+  if(key==='dynamicCapGain')capTarget=0;
   if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
   syncTuningLabels();
   refresh();
+}
+function currentDepth(){
+  const [mantissa,exponent]=camera.span.toExponential(14).split('e');
+  return Math.log10(2.8)-Math.log10(Number(mantissa))-Number(exponent);
+}
+function resetDynamicAnchor(){
+  anchorDepth=currentDepth();capTarget=0;capRevision=camera.revision;lastDynamicUpdate=0;
+}
+function changeEffectiveLimit(limit:number,atBatchBoundary=false){
+  const next=Math.max(1,Math.min(MAX_ITERATIONS,Math.round(limit)));
+  if(next===view.iterations)return;
+  view={...view,iterations:next};
+  if(!atBatchBoundary){generation++;engine?.abort();}
+  dirty=true;completedQuality=0;lastRevision=-1;stats=undefined;
+  refinementTime.demand(performance.now());syncIterationLabel();syncTuningLabels();preparing();
+}
+function setManualBase(limit:number){
+  if(!Number.isInteger(limit)||limit<1||limit>MAX_ITERATIONS){message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);return false;}
+  clearTimeout(baseEditTimer);baseEditing=false;baseIterations=limit;resetDynamicAnchor();changeEffectiveLimit(limit);
+  syncIterationLabel();persist(false);return true;
+}
+function maybeUpdateDynamicLimit(time:number){
+  if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing||time-lastDynamicUpdate<500)return;
+  // A new reference demand is allowed to finish; the live view is then picked
+  // up by the renderer's existing bounded retarget after a numerical batch.
+  const progress=engine?.debugProgress();
+  if(progress?.referenceWorkerActive||progress?.referencePreparing)return;
+  if(capRevision!==camera.revision){capRevision=camera.revision;capTarget=0;}
+  const depthTarget=baseIterations+tuning.dynamicDepthGain*Math.max(0,currentDepth()-anchorDepth);
+  const desired=Math.min(MAX_ITERATIONS,Math.max(baseIterations,depthTarget,capTarget));
+  const difference=desired-view.iterations;
+  if(Math.abs(difference)<16)return;
+  const step=Math.max(128,Math.ceil(view.iterations*.15));
+  lastDynamicUpdate=time;
+  changeEffectiveLimit(Math.abs(difference)<=step?desired:view.iterations+Math.sign(difference)*step,true);
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
@@ -151,7 +189,6 @@ function refresh(){
 function syncControls(){
   syncRotation();
   el<HTMLSelectElement>('family').value=view.family;
-  el<HTMLInputElement>('iteration-slider').value=String(iterationToSlider(view.iterations));
   syncIterationLabel();
   el<HTMLTextAreaElement>('cx').value=camera.x.toString();el<HTMLTextAreaElement>('cy').value=camera.y.toString();el<HTMLInputElement>('span').value=camera.span.toString();
   depth.textContent=`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`;
@@ -161,7 +198,8 @@ function syncControls(){
 }
 function load(next:SavedView,record=true){
   dismissReplacement();
-  const valid=validateView(next);stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);generation++;
+  clearTimeout(baseEditTimer);baseEditing=false;
+  const valid=validateView(next);stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;baseIterations=valid.iterations;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);resetDynamicAnchor();generation++;
   if(view.family==='julia')setPreview(false);
   resize();
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';refinementTime.demand(performance.now());preparing();message('');syncControls();
@@ -173,7 +211,7 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||rotating||rotationSliderHeld||controlDown&&rotationKeys.size>0||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;preparing(now);}
+function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;capTarget=0;capRevision=camera.revision;preparing(now);}
 function syncRotation(){el<HTMLInputElement>('rotation').value=String(camera.angle);el('rotation-value').textContent=`${Number(camera.angle.toFixed(1))}°`;}
 function setRotation(angle:number,held=true){const previous=camera.revision;camera.setAngle(angle);if(camera.revision===previous)return;
   if(held)refinementTime.heldCameraChange();else refinementTime.demand(performance.now());changed();syncRotation();}
@@ -264,7 +302,11 @@ function switchJuliaView(){
 }
 function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom:direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0),tuning:{...tuning},isCurrent:()=>generation===g};
+  const zoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:performance.now()-lastInteraction<180?wheelDirection:0);
+  const margin=zoom<0?overscanCssPx(speed,tuning.overscanBase,tuning.overscanMax):0;
+  const overscanPixels={x:Math.floor(margin*width/Math.max(1,innerWidth)/2)*2,
+    y:Math.floor(margin*height/Math.max(1,innerHeight)/2)*2};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,tuning:{...tuning},isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
@@ -272,6 +314,10 @@ async function compute(){
     const result=await engine.render(request());
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;stats=result;if(result.computed)fields++;else recolours++;
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
+      if(dynamicEnabled&&result.computed&&result.computedSamples>0){
+        if(capRevision!==camera.revision){capRevision=camera.revision;capTarget=0;}
+        capTarget=baseIterations+tuning.dynamicCapGain*Math.max(0,result.limitHitRatio*100-.5);
+      }
       if(numericalWasPending)refinementTime.complete(performance.now());
     }
   }catch(e){if(g===generation&&!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
@@ -295,9 +341,13 @@ function tick(time:number){
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);refinementTime.heldCameraChange();changed();}
     if(engine){
+      maybeUpdateDynamicLimit(time);
       if(!stopped&&!refreshPending&&!error&&tuning.blaRebuildPercent<100&&!moving()&&engine.consumeSettledBlaRetry())refresh();
       if(refreshPending&&!busy)void refreshCalculation();
       engine.reproject(request(),stopped||refreshHolding);
+      if(!busy&&!dirty&&!stopped&&!refreshPending&&completedQuality===1&&!engine.isComplete(request())){
+        completedQuality=0;dirty=true;
+      }
       // Give the latest preview one turn between main jobs, without awaiting it.
       // Both renderers keep at most one bounded numerical region in the queue.
       const referenceWorkerWaiting=busy&&engine.debugProgress().referenceWorkerActive;
@@ -366,16 +416,28 @@ rotationSlider.onchange=()=>{if(!rotationSliderHeld)finishSliderRotation();};
 rotationSlider.onpointerup=finishSliderRotation;rotationSlider.onpointercancel=finishSliderRotation;rotationSlider.onkeyup=finishSliderRotation;rotationSlider.onblur=finishSliderRotation;
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
 el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
-el<HTMLInputElement>('iteration-slider').oninput=e=>{const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();syncTuningLabels(n);};
-el<HTMLInputElement>('iteration-slider').onchange=e=>load({...snapshot(),iterations:iterationFromSlider(Number((e.target as HTMLInputElement).value))});
-const tuningInputs:[keyof TuningSettings,string,(value:number)=>number][]=[
-  ['directExponent','direct',Number],['batchTargetMs','batch-target',Number],['batchMultiplier','batch-multiplier',Number],
-  ['hdrExponent','hdr',Number],['pointerWeight','pointer-weight',Number],['distributedWeight','distributed-weight',Number],
-  ['oldestWeight','oldest-weight',Number],['pointerRadius','pointer-radius',value=>Math.round(2**value)],
-  ['hardPixelBudget','hard-budget',value=>HARD_PIXEL_BUDGETS[value]??0],['blaRebuildPercent','bla-rebuild',Number],['blaChunkMs','bla-chunk',Number],
+el<HTMLInputElement>('iteration-slider').oninput=e=>{sliderEditing=true;const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();syncTuningLabels(n);};
+el<HTMLInputElement>('iteration-slider').onchange=e=>{sliderEditing=false;const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));setManualBase(n);};
+const baseInput=el<HTMLInputElement>('iteration-base');
+baseInput.oninput=()=>{
+  baseEditing=true;clearTimeout(baseEditTimer);
+  baseEditTimer=setTimeout(()=>{const raw=baseInput.value.trim();if(raw&&/^\d+$/.test(raw))setManualBase(Number(raw));else message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);},2000);
+};
+el<HTMLButtonElement>('iteration-dynamic').onclick=()=>{
+  dynamicEnabled=!dynamicEnabled;
+  try{localStorage.setItem(DYNAMIC_STORAGE_KEY,dynamicEnabled?'on':'off');}catch{message('This browser could not save the Dynamic setting locally.');}
+  resetDynamicAnchor();
+  if(!dynamicEnabled){changeEffectiveLimit(baseIterations);persist(false);}
+  syncIterationLabel();
+};
+const tuningInputs:[EditableTuningKey,string,(value:number)=>number][]=[
+  ['batchMultiplier','batch-multiplier',Number],
+  ['hardPixelBudget','hard-budget',value=>HARD_PIXEL_BUDGETS[value]??0],
+  ['overscanBase','overscan-base',Number],['overscanMax','overscan-max',Number],
+  ['dynamicDepthGain','depth-gain',Number],['dynamicCapGain','cap-gain',Number],
 ];
 for(const [key,id,parse] of tuningInputs){
-  const control=el<HTMLInputElement|HTMLSelectElement>(`tuning-${id}`);
+  const control=el<HTMLInputElement>(`tuning-${id}`);
   control.oninput=()=>changeTuning(key,parse(Number(control.value)));
 }
 el('tuning-reset').onclick=()=>{
@@ -473,12 +535,13 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
 syncAppearance=paletteController.sync;
 setupRangeControls();
 el('full-reset').onclick=()=>{
-  clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
+  clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(baseEditTimer);baseEditing=false;clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
-  speed=.8;el<HTMLInputElement>('speed').value='.8';el('speed-value').textContent='0.8×';
+  speed=.7;el<HTMLInputElement>('speed').value='.7';el('speed-value').textContent='0.7×';
   selectedLocation=null;locationEntry.value='';dismissReplacement();closeLocationOptions();el<HTMLSelectElement>('random-style').value='harmonious';
   profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
   tuning={...DEFAULT_TUNING};saveTuning(tuning);syncTuningLabels();
+  dynamicEnabled=true;try{localStorage.setItem(DYNAMIC_STORAGE_KEY,'on');}catch{}
   try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}
   history.replaceState(null,'',location.pathname+location.search);el('linked-location').hidden=true;
   panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message('Defaults restored. Saved locations were kept.',true);

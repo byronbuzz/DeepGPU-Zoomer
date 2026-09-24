@@ -14,9 +14,10 @@
       </div>
     </div>
     <div id="panel-main" class="tab-panel" role="tabpanel" aria-labelledby="tab-main">
-      <label>Zoom speed <output id="speed-value">0.8×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="0.8"></label>
-      <label>Iteration limit <output id="iteration-value">5,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
+      <label>Zoom speed <output id="speed-value">0.7×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="0.7"></label>
       <label title="Rotate the main view about its centre. Ctrl+drag or hold Ctrl+Left/Right arrows on the fractal.">Rotation <output id="rotation-value">0°</output><input id="rotation" type="range" min="-180" max="180" step="0.1" value="0"></label>
+      <label>Iteration limit <output id="iteration-value">5,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
+      <div class="iteration-row"><label for="iteration-base">Base iterations<input id="iteration-base" type="number" min="1" max="10000000" step="1" inputmode="numeric" value="5000"></label><button id="iteration-dynamic" type="button" aria-pressed="true">Dynamic</button></div>
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
       <div class="row main-action-row"><button id="refresh">Refresh</button><button id="stop-refinement">Stop</button></div>
       <div class="row main-action-row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
@@ -66,19 +67,14 @@
       <label class="profiling-switch"><input id="profiling" type="checkbox"> Measure GPU timings</label><p id="profiling-data">GPU timings are off.</p>
       <section id="tuning" aria-labelledby="tuning-title">
         <h2 id="tuning-title">Tuning</h2>
-        <p id="tuning-status" role="status">All settings match 5183</p>
-        <label class="tuning-control">Direct → Perturbation crossover <span id="tuning-direct-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-direct-value"></output><input id="tuning-direct" type="range" min="2" max="18" step="0.25" value="5"></label>
-        <label class="tuning-control">GPU batch target <span id="tuning-batch-target-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-target-value"></output><input id="tuning-batch-target" type="range" min="2" max="16" step="1" value="8"></label>
-        <label class="tuning-control">Starting batch size <span id="tuning-batch-multiplier-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-multiplier-value"></output><input id="tuning-batch-multiplier" type="range" min="0.25" max="4" step="0.25" value="1"></label>
-        <label class="tuning-control">Plain → Hdr crossover <span id="tuning-hdr-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-hdr-value"></output><input id="tuning-hdr" type="range" min="6" max="80" step="0.5" value="25"></label>
-        <label class="tuning-control">Pointer priority <span id="tuning-pointer-weight-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-pointer-weight-value"></output><input id="tuning-pointer-weight" type="range" min="0" max="16" step="1" value="8"></label>
-        <label class="tuning-control">Distributed coverage priority <span id="tuning-distributed-weight-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-distributed-weight-value"></output><input id="tuning-distributed-weight" type="range" min="0" max="16" step="1" value="4"></label>
-        <label class="tuning-control">Oldest-work priority <span id="tuning-oldest-weight-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-oldest-weight-value"></output><input id="tuning-oldest-weight" type="range" min="0" max="16" step="1" value="4"></label>
-        <label class="tuning-control">Pointer radius <span id="tuning-pointer-radius-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-pointer-radius-value"></output><input id="tuning-pointer-radius" type="range" min="4" max="9" step="0.25" value="6"></label>
-        <label class="tuning-control">Hard-pixel work budget <span id="tuning-hard-budget-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-hard-budget-value"></output><input id="tuning-hard-budget" type="range" min="0" max="7" step="1" value="0"></label>
-        <label class="tuning-control">BLA rebuild threshold <span id="tuning-bla-rebuild-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-bla-rebuild-value"></output><input id="tuning-bla-rebuild" type="range" min="10" max="100" step="5" value="100"></label>
-        <label class="tuning-control">BLA preparation chunk <span id="tuning-bla-chunk-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-bla-chunk-value"></output><select id="tuning-bla-chunk"><option value="0">Off</option><option value="1">1 ms</option><option value="2">2 ms</option><option value="3">3 ms</option><option value="4">4 ms</option><option value="5">5 ms</option><option value="6">6 ms</option><option value="7">7 ms</option><option value="8">8 ms</option></select></label>
-        <button id="tuning-reset" type="button">Reset to 5183 defaults</button>
+        <p id="tuning-status" role="status">Navigation defaults</p>
+        <label class="tuning-control">Batch size multiplier <span id="tuning-batch-multiplier-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-multiplier-value"></output><input id="tuning-batch-multiplier" type="range" min="1" max="16" step="1" value="4"></label>
+        <label class="tuning-control">Hard-pixel operations/slice <span id="tuning-hard-budget-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-hard-budget-value"></output><input id="tuning-hard-budget" type="range" min="0" max="11" step="1" value="5"></label>
+        <label class="tuning-control">Zoom-out overscan base <span id="tuning-overscan-base-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-base-value"></output><input id="tuning-overscan-base" type="range" min="0" max="128" step="1" value="64"></label>
+        <label class="tuning-control">Overscan max <span id="tuning-overscan-max-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-max-value"></output><input id="tuning-overscan-max" type="range" min="64" max="256" step="1" value="192"></label>
+        <label class="tuning-control">Dynamic depth gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="3000" step="50" value="2000"></label>
+        <label class="tuning-control">Dynamic cap gain <span id="tuning-cap-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-cap-gain-value"></output><input id="tuning-cap-gain" type="range" min="0" max="3000" step="50" value="1000"></label>
+        <button id="tuning-reset" type="button">Reset tuning</button>
       </section>
     </div>
     </div>

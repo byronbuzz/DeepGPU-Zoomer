@@ -4,7 +4,7 @@ import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS } from './tuning';
 
 /** Values in each range's own coordinate system, sourced from app defaults. */
 export const RANGE_DEFAULTS: Record<string, number> = {
-  speed: 0.8,
+  speed: 0.7,
   'iteration-slider': iterationToSlider(HOME.iterations),
   rotation: HOME.angle ?? 0,
   cycle: cycleToSlider(DEFAULT_COLORS.cycle),
@@ -16,16 +16,12 @@ export const RANGE_DEFAULTS: Record<string, number> = {
   'ambient-light': DEFAULT_COLORS.ambientLight,
   'specular-strength': DEFAULT_COLORS.specularStrength,
   'panel-opacity': 0.8,
-  'tuning-direct': DEFAULT_TUNING.directExponent,
-  'tuning-batch-target': DEFAULT_TUNING.batchTargetMs,
   'tuning-batch-multiplier': DEFAULT_TUNING.batchMultiplier,
-  'tuning-hdr': DEFAULT_TUNING.hdrExponent,
-  'tuning-pointer-weight': DEFAULT_TUNING.pointerWeight,
-  'tuning-distributed-weight': DEFAULT_TUNING.distributedWeight,
-  'tuning-oldest-weight': DEFAULT_TUNING.oldestWeight,
-  'tuning-pointer-radius': Math.log2(DEFAULT_TUNING.pointerRadius),
   'tuning-hard-budget': HARD_PIXEL_BUDGETS.indexOf(DEFAULT_TUNING.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number]),
-  'tuning-bla-rebuild': DEFAULT_TUNING.blaRebuildPercent,
+  'tuning-overscan-base': DEFAULT_TUNING.overscanBase,
+  'tuning-overscan-max': DEFAULT_TUNING.overscanMax,
+  'tuning-depth-gain': DEFAULT_TUNING.dynamicDepthGain,
+  'tuning-cap-gain': DEFAULT_TUNING.dynamicCapGain,
 };
 
 export function wheelRangeValue(value: number, min: number, max: number, step: string, deltaY: number) {

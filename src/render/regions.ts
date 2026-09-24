@@ -5,6 +5,8 @@ export interface Demand {
   /** Positive inward, negative outward; pan is represented by exposed bounds. */
   zoom: number;
   covered: { x: number; y: number; width: number; height: number; spacing?: number }[];
+  /** Visible area inside an overscanned work field; deficits here take priority. */
+  visible?: {x:number;y:number;width:number;height:number};
 }
 export interface RegionTuning {
   pointer: number;
@@ -103,11 +105,15 @@ export class PendingRegions {
     const dx = Math.max(r.x - d.x, 0, d.x - r.x - r.width + 1);
     const dy = Math.max(r.y - d.y, 0, d.y - r.y - r.height + 1);
     const deficit=this.deficit(r,d);
+    const v=d.visible;
+    const visibleArea=v?Math.max(0,Math.min(r.x+r.width,v.x+v.width)-Math.max(r.x,v.x))*
+      Math.max(0,Math.min(r.y+r.height,v.y+v.height)-Math.max(r.y,v.y)):0;
+    const visiblePriority=deficit>0?8*visibleArea/(r.width*r.height):0;
     // Sparse samples cover stride squared pixels per calculation, but only
     // improve linear resolution by stride. Use that conservative cost benefit.
-    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + .5 / (1 + Math.hypot(dx,dy) / pointerRadius);
+    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + visiblePriority + .5 / (1 + Math.hypot(dx,dy) / pointerRadius);
     const focusWeight=this.distributed&&this.turns%2===1?4:1;
-    return deficit * 4 + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
+    return deficit * 4 + visiblePriority + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
   }
   take(budget: number, demand: Demand, rows?: number, tuning?: RegionTuning): Region | undefined {
     this.deficits.clear();

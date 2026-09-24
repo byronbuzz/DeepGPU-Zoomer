@@ -90,6 +90,12 @@ export interface RenderRequest {
   publishPartial?: boolean;
   focus?: { x: number; y: number };
   zoom?: number;
+  /** Requested symmetric numerical padding in backing pixels; presentation stays visible-sized. */
+  overscanPixels?: {x:number;y:number};
+  /** Reserve a geometric reference tier while Dynamic can raise the pixel limit. */
+  dynamicIterations?: boolean;
+  /** Internal numerical view, already expanded from the visible camera. */
+  workView?: boolean;
 }
 
 export interface RenderStats {
@@ -127,6 +133,8 @@ export interface RenderStats {
    * so it is only meaningful compared against the same view and policy.
    */
   cappedRatio: number;
+  /** Newly computed samples that exhausted the limit without escaping. */
+  limitHitRatio: number;
 }
 
 /** Which per-pixel iteration the shader should run. Must match perturbation.wgsl. */
@@ -391,12 +399,12 @@ export class WebGpuRenderer {
   setProfiling(enabled: boolean) { this.timing.setEnabled(enabled); }
   performance() { return this.timing.snapshot(); }
   debugProgress() {
-    const progressCurrent=!!(this.currentView&&this.fieldView&&this.sameView(this.fieldView,this.currentView));
+    const progressCurrent=!!(this.currentView&&this.fieldView&&this.sameView(this.fieldView,this.workRequest(this.currentView)));
     const complete=!this.referencePreparing&&!!this.currentView&&this.isComplete(this.currentView)&&this.pending.size===0&&!this.incomingFrame&&!this.finalizing;
     const percentage=this.referencePreparing||!progressCurrent?null:complete&&this.exactTotalSamples?100:this.exactTotalSamples?Math.min(99,Math.floor(this.exactCompletedSamples/this.exactTotalSamples*100)):null;
     let fieldHash=2166136261;for(let i=0;i<this.fieldKey.length;i++){fieldHash^=this.fieldKey.charCodeAt(i);fieldHash=Math.imul(fieldHash,16777619);}
     const displayed=this.incomingFrame??this.lastFrame;
-    const appearancePending=!!(this.currentView&&displayed&&this.sameView(displayed,this.currentView)&&!this.samePresentation(displayed,this.currentView));
+    const appearancePending=!!(this.currentView&&displayed&&this.sameView(displayed,this.workRequest(this.currentView))&&!this.samePresentation(displayed,this.currentView));
     return { epoch: this.publicationEpoch, serial: this.partialSerial, fieldIdentity:(fieldHash>>>0).toString(16).padStart(8,'0'),
       regions: this.partialRegions, firstPublicationAt: this.firstPartialAt, lastPublicationAt: this.lastPartialAt,
       active: !!this.incomingFrame, complete, percentage, exactCompletedSamples:this.exactCompletedSamples, exactTotalSamples:this.exactTotalSamples,
@@ -489,7 +497,7 @@ export class WebGpuRenderer {
     this.stopsBuffer = storageBuffer(ctx.device, MAX_STOPS * 4, "palette-stops");
     this.statsBuffer = storageBuffer(
       ctx.device,
-      12,
+      14,
       "render-stats",
       GPUBufferUsage.COPY_SRC
     );
@@ -551,7 +559,7 @@ export class WebGpuRenderer {
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 /** uv' = uv * xform.xy + xform.zw. Identity is (1, 1, 0, 0). */
-struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32>, units: vec4<f32>, cross: vec4<f32>, freshCross: vec4<f32> };
+struct Presentation { front: vec4<f32>, back: vec4<f32>, options: vec4<f32>, fresh: vec4<f32>, freshOptions: vec4<f32>, units: vec4<f32>, cross: vec4<f32>, freshCross: vec4<f32>, fallbackCounts: vec4<f32>, frontRects: array<vec4<f32>,5>, backRects: array<vec4<f32>,5>, freshRects: array<vec4<f32>,5> };
 @group(0) @binding(2) var<uniform> display: Presentation;
 @group(0) @binding(3) var coverage: texture_2d<f32>;
 @group(0) @binding(4) var incoming: texture_2d<f32>;
@@ -580,8 +588,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // not let a smaller new field erase already calculated coverage.
     let front = textureSample(src, smp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
     let back = textureSample(coverage, smp, clamp(oldUV, vec2<f32>(0.0), vec2<f32>(1.0)));
-    frontValid = frontValid && front.a > 0.0;
-    backValid = backValid && back.a > 0.0;
+    // Alpha 1/255 marks a held presentation colour, never a calculated sample.
+    frontValid = frontValid && front.a > 1.5 / 255.0;
+    backValid = backValid && back.a > 1.5 / 255.0;
     let frontSpacing=display.units.x / max(front.a, 0.00001);
     let backSpacing=display.units.y / max(back.a, 0.00001);
     let useBack = backValid && (!frontValid || display.options.y > 0.0 ||
@@ -590,20 +599,69 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var result = select(front, back, useBack);
     let freshUV = in.uv * display.fresh.xy + in.uv.yx * display.freshCross.xy + display.fresh.zw;
     let fresh = textureSample(incoming, smp, clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0)));
-    let valid = display.freshOptions.x > 0.0 && fresh.a > 0.0 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
+    let valid = display.freshOptions.x > 0.0 && fresh.a > 1.5 / 255.0 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
     let freshSpacing=display.units.z / max(fresh.a,0.00001);
     let prefer = (fresh.a > 0.99 && select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0) || freshSpacing < spacing;
     if (valid && (prefer || (!frontValid && !backValid))) { result = fresh; spacing=freshSpacing; }
     if (!frontValid && !backValid && !valid) {
-        // The canvas is opaque: even alpha-zero RGB would be visible there.
-        // Extend only an actual defined edge sample, never transparent proxy
-        // payload or an unavailable mapping. Keep the fallback's alpha zero.
-        result = vec4<f32>(0.0);
-        if (display.options.z > 0.0 && front.a > 0.0) { result = front; }
-        else if (display.options.x > 0.0 && back.a > 0.0) { result = back; }
-        else if (display.freshOptions.x > 0.0 && fresh.a > 0.0) { result = fresh; }
+        // Clamp to known covered rectangles, not merely a proxy texture edge:
+        // its border may be transparent. Keep one low-alpha provenance marker
+        // so a later retained snapshot can hold this colour without making it
+        // numerically valid. Black is accepted by alpha like every other RGB.
+        var held = vec4<f32>(0.0);
+        var best = 1e30;
+        var haveNumeric = false;
+        let frontEdge = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+        let backEdge = clamp(oldUV, vec2<f32>(0.0), vec2<f32>(1.0));
+        let freshEdge = clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0));
+        if (display.options.z > 0.0 && front.a > 0.0) { held = front; best = dot(uv-frontEdge,uv-frontEdge); haveNumeric = front.a > 1.5 / 255.0; }
+        let backDistance = dot(oldUV-backEdge,oldUV-backEdge);
+        let backNumeric = back.a > 1.5 / 255.0;
+        if (display.options.x > 0.0 && back.a > 0.0 &&
+            (backNumeric && !haveNumeric || backNumeric == haveNumeric && backDistance < best)) {
+            held = back; best = backDistance; haveNumeric = backNumeric;
+        }
+        let freshDistance = dot(freshUV-freshEdge,freshUV-freshEdge);
+        let freshNumeric = fresh.a > 1.5 / 255.0;
+        if (display.freshOptions.x > 0.0 && fresh.a > 0.0 &&
+            (freshNumeric && !haveNumeric || freshNumeric == haveNumeric && freshDistance < best)) {
+            held = fresh; best = freshDistance; haveNumeric = freshNumeric;
+        }
+        for (var i = 0u; i < 5u; i = i + 1u) {
+            if (i < u32(display.fallbackCounts.x)) {
+                let p = clamp(uv, display.frontRects[i].xy, display.frontRects[i].zw);
+                let dims = vec2<i32>(textureDimensions(src));
+                let c = textureLoad(src, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
+                let d = dot(uv-p, uv-p);
+                let numeric = c.a > 1.5 / 255.0;
+                if (c.a > 0.0 && (numeric && !haveNumeric || numeric == haveNumeric && d < best)) {
+                    held = c; best = d; haveNumeric = numeric;
+                }
+            }
+            if (i < u32(display.fallbackCounts.y)) {
+                let p = clamp(oldUV, display.backRects[i].xy, display.backRects[i].zw);
+                let dims = vec2<i32>(textureDimensions(coverage));
+                let c = textureLoad(coverage, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
+                let d = dot(oldUV-p, oldUV-p);
+                let numeric = c.a > 1.5 / 255.0;
+                if (c.a > 0.0 && (numeric && !haveNumeric || numeric == haveNumeric && d < best)) {
+                    held = c; best = d; haveNumeric = numeric;
+                }
+            }
+            if (i < u32(display.fallbackCounts.z)) {
+                let p = clamp(freshUV, display.freshRects[i].xy, display.freshRects[i].zw);
+                let dims = vec2<i32>(textureDimensions(incoming));
+                let c = textureLoad(incoming, clamp(vec2<i32>(floor(p * vec2<f32>(dims))), vec2<i32>(0), dims - vec2<i32>(1)), 0);
+                let d = dot(freshUV-p, freshUV-p);
+                let numeric = c.a > 1.5 / 255.0;
+                if (c.a > 0.0 && (numeric && !haveNumeric || numeric == haveNumeric && d < best)) {
+                    held = c; best = d; haveNumeric = numeric;
+                }
+            }
+        }
+        return vec4<f32>(held.rgb, select(0.0, 1.0 / 255.0, held.a > 0.0));
     }
-    return vec4<f32>(result.rgb, select(0.0, min(1.0, 1.0 / max(spacing,0.00001)), frontValid || backValid || valid));
+    return vec4<f32>(result.rgb, min(1.0, 1.0 / max(spacing,0.00001)));
 }
 `,
       "blit"
@@ -674,6 +732,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return this[field]!;
   }
 
+  private referenceBudget(maxIterations:number,dynamic=false):number {
+    const limit=Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize);
+    // Decoded samples need 96 bytes each; the worker's separate cap is 1m.
+    const ceiling=Math.max(1,Math.min(1_000_000,Math.floor(limit/96)-1));
+    // A live Dynamic limit changes in small steps. Preparing the next power
+    // of two avoids rebuilding the CPU orbit and BLA table at every step.
+    const desired=dynamic?2**Math.ceil(Math.log2(Math.max(1,maxIterations))):maxIterations;
+    return Math.max(1,Math.min(desired,ceiling));
+  }
+
   private referenceDemand(request: RenderRequest, limbs: number): ReferenceDemand {
     const family = request.family ?? "mandelbrot";
     return {
@@ -684,7 +752,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         family,
         centerX: coordinateToFixed(request.centerX, 'Center X'), centerY: coordinateToFixed(request.centerY, 'Center Y'),
         juliaX: request.juliaX ? coordinateToFixed(request.juliaX, 'Julia X') : "0", juliaY: request.juliaY ? coordinateToFixed(request.juliaY, 'Julia Y') : "0",
-        limbs, maxIterations: request.maxIterations,
+        limbs, maxIterations: this.referenceBudget(request.maxIterations,request.dynamicIterations),
       },
     };
   }
@@ -693,7 +761,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
     if (method === Method.Direct) return false;
     const family = request.family ?? "mandelbrot";
-    if (family !== demand.input.family || request.maxIterations > demand.input.maxIterations) return false;
+    if (family !== demand.input.family || this.referenceBudget(request.maxIterations,request.dynamicIterations) > demand.input.maxIterations) return false;
     if (family === "julia" &&
         (!request.juliaX?.eq(demand.input.juliaX) || !request.juliaY?.eq(demand.input.juliaY))) return false;
     let limbs: number;
@@ -718,8 +786,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   ): Promise<{ length: number; escaped: boolean; ms: number; samples: Float32Array }> {
     const started = performance.now(), demand = this.referenceDemand(request, limbs);
     const limit=Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize);
-    const rawBytes=(request.maxIterations+1)*20*Float32Array.BYTES_PER_ELEMENT;
-    const decodedBytes=(request.maxIterations+1)*24*Float32Array.BYTES_PER_ELEMENT;
+    const rawBytes=(demand.input.maxIterations+1)*20*Float32Array.BYTES_PER_ELEMENT;
+    const decodedBytes=(demand.input.maxIterations+1)*24*Float32Array.BYTES_PER_ELEMENT;
     if(rawBytes>limit||decodedBytes>limit) {
       throw new Error("The reference orbit exceeds this GPU's buffer capacity.");
     }
@@ -926,7 +994,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     const live=this.currentView,incoming=this.incomingFrame;
     this.currentView={...frame,...retained};this.incomingFrame=frame;
-    try{this.encodeBlit(encoder,this.target!,reprojectionFor(frame,retained,true)!,candidate);}
+    try{this.encodeBlit(encoder,this.target!,reprojectionFor(frame,retained,true)!,candidate,false,true);}
     finally{this.currentView=live;this.incomingFrame=incoming;}
   }
 
@@ -1011,12 +1079,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     xform: Reprojection,
     destination?: GPUTexture,
     allowAppearanceFallback=false,
+    completedSnapshot=false,
   ) {
     const { device } = this.ctx;
     if (!this.xformBuffer) {
       this.xformBuffer = device.createBuffer({
         label: "blit-xform",
-        size: 128,
+        size: 384,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
     }
@@ -1024,39 +1093,70 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       !!(allowAppearanceFallback&&frame===this.lastFrame)||
       !!(allowAppearanceFallback&&this.appearanceHoldFrame&&this.appearanceHoldActive(this.currentView)&&
         this.samePresentation(frame,this.appearanceHoldFrame));
-    const coverage = source === this.history && this.coverageFrame && matchesView(this.coverageFrame) && this.currentView
-      ? reprojectionFor(this.coverageFrame, this.currentView, true) : null;
-    const transforms = new Float32Array(32);
+    const secondaryFrame=completedSnapshot?null:source===this.history?this.coverageFrame:this.historyValid?this.lastFrame:null;
+    const secondaryTexture=completedSnapshot?null:source===this.history?this.coverageHistory:this.history;
+    const coverage = secondaryTexture && secondaryFrame && matchesView(secondaryFrame) && this.currentView
+      ? reprojectionFor(secondaryFrame, this.currentView, true, true) : null;
+    const frontFrame=source===this.history?this.lastFrame:source===this.antialiasTexture?this.antialiasFrame:
+      source===this.target?this.incomingFrame??this.completedFrame:null;
+    const transforms = new Float32Array(96);
     transforms.set([xform.scaleX,xform.scaleY,xform.offsetX,xform.offsetY]);
     transforms.set([xform.crossX??0,xform.crossY??0],24);
     transforms[10] = source !== this.history || this.historyValid && matchesView(this.lastFrame) ? 1 : 0;
     if (xform.scaleX*xform.scaleY-(xform.crossX??0)*(xform.crossY??0) === 0) transforms[10] = 0;
     if (source === this.target && !this.currentImageValid) transforms[10] = 0;
-    if (coverage && this.coverageHistory) {
+    if (coverage && secondaryTexture) {
       transforms.set([coverage.scaleX, coverage.scaleY, coverage.offsetX, coverage.offsetY], 4);
       transforms.set([coverage.crossX??0,coverage.crossY??0],26);
       transforms[8] = 1;
-      const front = this.lastFrame!, view = this.currentView!;
-      const exactStationary = !front.proxy && this.sameView(front,view);
-      transforms[9] = !front.proxy && !exactStationary && this.coverageFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
+      const front = frontFrame!, view = this.currentView!;
+      const exactStationary = !front.proxy && this.sameView(front,this.workRequest(view));
+      transforms[9] = !front.proxy && !exactStationary && secondaryFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
     }
     const fresh = this.incomingFrame, view = this.currentView;
     if (fresh && view && this.target && this.samePresentation(fresh,view)) {
-      const m = reprojectionFor(fresh, view);
+      const m = reprojectionFor(fresh, view)??reprojectionFor(fresh,view,true,true);
       if (m) {
         transforms.set([m.scaleX, m.scaleY, m.offsetX, m.offsetY], 12);
         transforms.set([m.crossX??0,m.crossY??0],28);
         transforms[16] = 1;
-        const exact = this.sameView(fresh,view);
+        const exact = this.sameView(fresh,this.workRequest(view));
         transforms[17] = exact ? 1 : 0;
         transforms[18] = exact ? 1 : 0;
       }
     }
     const pixelUnit=this.currentView?.unitsPerPixel;
-    transforms[20]=pixelUnit ? (source===this.history ? this.lastFrame?.unitsPerPixel : (this.incomingFrame??this.completedFrame)?.unitsPerPixel)?.div(pixelUnit).toNumber()??1 : 1;
-    transforms[21]=pixelUnit ? this.coverageFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
+    transforms[20]=pixelUnit ? frontFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
+    transforms[21]=pixelUnit ? secondaryFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
     transforms[22]=pixelUnit ? this.incomingFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
-    if(this.lastFrame?.proxy) transforms[9]=-1;
+    if(frontFrame?.proxy) transforms[9]=-1;
+    const knownRects=(frame:WebGpuRenderer['lastFrame'],partial=false)=>{
+      if(!frame)return [] as {x:number;y:number;width:number;height:number}[];
+      const regions=partial?this.determined.rectangles:frame.proxy?
+        frame.coveredRegions??(frame.covered?[frame.covered]:[]):
+        [{x:0,y:0,width:frame.width,height:frame.height}];
+      const candidates=regions.filter(r=>r.width>=1&&r.height>=1);
+      if(!candidates.length)return [];
+      const largest=[...candidates].sort((a,b)=>b.width*b.height-a.width*a.height)[0];
+      const selected=[largest,
+        [...candidates].sort((a,b)=>a.x-b.x)[0],
+        [...candidates].sort((a,b)=>(b.x+b.width)-(a.x+a.width))[0],
+        [...candidates].sort((a,b)=>a.y-b.y)[0],
+        [...candidates].sort((a,b)=>(b.y+b.height)-(a.y+a.height))[0]];
+      return [...new Set(selected)].map(r=>({
+        x:(Math.max(0,Math.ceil(r.x))+.5)/frame.width,
+        y:(Math.max(0,Math.ceil(r.y))+.5)/frame.height,
+        width:(Math.min(frame.width,Math.floor(r.x+r.width))-.5)/frame.width,
+        height:(Math.min(frame.height,Math.floor(r.y+r.height))-.5)/frame.height,
+      })).filter(r=>r.width>=r.x&&r.height>=r.y);
+    };
+    const bounds=[transforms[10]>0?knownRects(frontFrame,source===this.target&&!this.currentImageValid):[],
+      transforms[8]>0?knownRects(secondaryFrame):[],
+      transforms[16]>0?knownRects(this.incomingFrame,true):[]];
+    for(let slot=0;slot<3;slot++){
+      transforms[32+slot]=bounds[slot].length;
+      bounds[slot].forEach((r,i)=>transforms.set([r.x,r.y,r.width,r.height],36+slot*20+i*4));
+    }
     device.queue.writeBuffer(this.xformBuffer, 0, transforms);
 
     const pipeline=destination ? destination.format === "rgba16float" ? this.retainFloatPipeline! : this.retainPipeline! : this.blitPipeline!;
@@ -1066,7 +1166,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         { binding: 0, resource: source.createView() },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: { buffer: this.xformBuffer } },
-        { binding: 3, resource: (this.coverageHistory ?? source).createView() },
+        { binding: 3, resource: (secondaryTexture ?? source).createView() },
         { binding: 4, resource: (this.target ?? source).createView() },
       ],
     });
@@ -1140,10 +1240,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     const heldAa=!!(heldAppearance&&this.antialiasFrame&&this.antialiasTexture&&this.appearanceHoldFrame&&
       this.samePresentation(this.antialiasFrame,this.appearanceHoldFrame));
-    const aa=heldAa||!!(this.historyValid&&request.colors.postAntialias&&this.antialiasFrame&&this.antialiasTexture&&this.sameView(this.antialiasFrame,request)&&JSON.stringify(this.antialiasFrame.colors)===JSON.stringify(request.colors));
-    const exact=this.currentImageValid&&this.completedFrame&&this.sameView(this.completedFrame,request)&&this.samePresentation(this.completedFrame,request);
-    const last = aa ? this.antialiasFrame : exact ? this.completedFrame : this.historyValid ? this.lastFrame : this.incomingFrame;
-    const source = aa ? this.antialiasTexture : exact ? this.target : this.historyValid ? this.history : this.target;
+    const aa=heldAa||!!(request.colors.postAntialias&&this.antialiasFrame&&this.antialiasTexture&&
+      this.samePresentation(this.antialiasFrame,request)&&this.sameView(this.antialiasFrame,this.workRequest(request)));
+    const current=this.currentImageValid&&this.completedFrame&&this.samePresentation(this.completedFrame,request);
+    const last = aa ? this.antialiasFrame : current ? this.completedFrame : this.historyValid ? this.lastFrame : this.incomingFrame;
+    const source = aa ? this.antialiasTexture : current ? this.target : this.historyValid ? this.history : this.target;
     if (!last || !source || !this.blitPipeline) {
       return false;
     }
@@ -1155,10 +1256,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     let mapping = compatible(last)||heldCompatible(last)||stale ? reprojectionFor(last, request) : null;
     if (!mapping) {
-      if (!incomingAvailable && (!compatible(this.coverageFrame) || !reprojectionFor(this.coverageFrame!, request, true))) return false;
-      // The narrow front may be outside its useful range while the retained
-      // broader source still covers the view. Mark the front as unavailable.
-      mapping = { scaleX: 0, scaleY: 0, offsetX: -1, offsetY: -1 };
+      const heldMap=compatible(last)||heldCompatible(last)||stale?
+        reprojectionFor(last,request,true,true):null;
+      if (!incomingAvailable && !heldMap &&
+          (!compatible(this.coverageFrame)||!reprojectionFor(this.coverageFrame!,request,true,true)))return false;
+      // Relaxed geometry is presentation-only; the numerical remap and
+      // determined-sample coverage continue using their strict contracts.
+      mapping=heldMap??{scaleX:0,scaleY:0,offsetX:-1,offsetY:-1};
     }
 
     const encoder = this.ctx.device.createCommandEncoder({ label: "reproject" });
@@ -1225,6 +1329,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private appearanceHoldActive(request:RenderRequest){
     const frame=this.appearanceHoldFrame;
     const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
+    request=this.workRequest(request);
     const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     return this.historyValid&&frame===this.completedFrame&&appearanceUpgradeCompatible(frame,request,method,grid)&&
       !this.samePresentation(frame,request);
@@ -1232,6 +1337,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   isComplete(request: RenderRequest) {
     if(this.deviceLost||this.finalizing||this.referencePreparing)return false;
+    request=this.workRequest(request);
     const frame=this.completedFrame;
     return this.fieldComplete && this.currentImageValid && !this.finalizing && !!frame && !frame.proxy &&
       this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
@@ -1371,7 +1477,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         device.queue.submit([encoder.finish()]);timingSamples.forEach(sample=>this.timing.collect(sample));
       });
       this.appearanceSubmissions++;
-      const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.currentView)&&this.samePresentation(frame,this.currentView));
+      const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.workRequest(this.currentView))&&this.samePresentation(frame,this.currentView));
       if(!current||this.deviceLost){return {...this.fieldStats!,completed:false,computed:false,computedSamples:0,reusedSamples:0,renderMs:performance.now()-started};}
       this.commitHistory(retained,candidate!);candidate=undefined;this.lastFrame=retained;this.completedFrame=frame;this.currentImageValid=true;this.historyValid=true;this.incomingFrame=null;this.appearanceHoldFrame=null;
       if(candidateAa){this.spareAntialias?.destroy();this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
@@ -1385,6 +1491,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   /** Recolours only channels already present after an explicit Stop. Never starts orbit or region work. */
   async recolorRetained(request:RenderRequest):Promise<boolean>{
     if(this.deviceLost)return false;
+    const visible=request;
+    const retained=this.incomingFrame??this.fieldView;
+    if(retained&&retained.width>=request.width&&retained.height>=request.height&&
+      retained.centerX.eq(request.centerX)&&retained.centerY.eq(request.centerY)&&
+      retained.unitsPerPixel.eq(request.unitsPerPixel)&&(retained.angle??0)===(request.angle??0)){
+      request={...request,width:retained.width,height:retained.height,workView:true};
+    }
     const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
     const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     if(!this.fieldSupportsAppearance(request,method,grid))await this.convertDistanceToIteration(request,method,grid);
@@ -1413,7 +1526,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if(epoch!==this.publicationEpoch||request.isCurrent&&!request.isCurrent())return false;
     this.partialAppearanceUniforms=uniforms;this.incomingFrame={...frame,colors};
     this.lastPartialAt=performance.now();this.appearancePublications++;
-    this.reproject(request,true);
+    this.reproject(visible,true);
     return true;
   }
 
@@ -1423,12 +1536,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const texture=request.colors.postAntialias?this.antialiasTexture:this.target;
     if(!texture)throw new Error('The completed image is unavailable.');
     const {device}=this.ctx,{width,height}=request;
+    const work=this.workRequest(request);
+    const origin={x:(work.width-width)/2,y:(work.height-height)/2};
     const bytesPerRow=Math.ceil(width*4/256)*256;
     const staging=device.createBuffer({size:bytesPerRow*height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
     let mapped=false;
     try{
       const encoder=device.createCommandEncoder({label:'png-readback'});
-      encoder.copyTextureToBuffer({texture},{buffer:staging,bytesPerRow,rowsPerImage:height},{width,height});
+      encoder.copyTextureToBuffer({texture,origin},{buffer:staging,bytesPerRow,rowsPerImage:height},{width,height});
       device.queue.submit([encoder.finish()]);
       await staging.mapAsync(GPUMapMode.READ);mapped=true;
       const packed=new Uint8Array(staging.getMappedRange());
@@ -1522,6 +1637,30 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private isInteracting(request: RenderRequest): boolean {
     return !!(request.followView ? this.currentView ?? request : request).interacting;
   }
+  /** Expand only the numerical field; the visible camera and output stay fixed. */
+  private workRequest(visible:RenderRequest):RenderRequest {
+    if(visible.workView)return visible;
+    const requested=visible.followView&&visible.zoom!==undefined&&visible.zoom<0 ? visible.overscanPixels : undefined;
+    if(!requested?.x&&!requested?.y)return {...visible,workView:true};
+    const limits=this.ctx.device.limits;
+    const grid=Math.max(1,Math.min(3,visible.colors.supersample));
+    const bytes=(needsEndpoints(visible.colors)||visible.colors.mode===1?16:8)*grid*grid;
+    const area=Math.floor(Math.min(limits.maxStorageBufferBindingSize,limits.maxBufferSize)/bytes);
+    const maxX=Math.max(0,Math.floor((limits.maxTextureDimension2D-visible.width)/4)*2);
+    const maxY=Math.max(0,Math.floor((limits.maxTextureDimension2D-visible.height)/4)*2);
+    const desiredX=Math.min(maxX,Math.max(0,Math.floor(requested.x/2)*2));
+    const desiredY=Math.min(maxY,Math.max(0,Math.floor(requested.y/2)*2));
+    if((visible.width+2*desiredX)*(visible.height+2*desiredY)<=area)
+      return {...visible,width:visible.width+2*desiredX,height:visible.height+2*desiredY,workView:true};
+    let low=0,high=1;
+    for(let n=0;n<20;n++){
+      const mid=(low+high)/2;
+      const x=Math.floor(desiredX*mid/2)*2,y=Math.floor(desiredY*mid/2)*2;
+      if((visible.width+2*x)*(visible.height+2*y)<=area)low=mid;else high=mid;
+    }
+    const x=Math.floor(desiredX*low/2)*2,y=Math.floor(desiredY*low/2)*2;
+    return {...visible,width:visible.width+2*x,height:visible.height+2*y,workView:true};
+  }
 
   private regionDemand(request: RenderRequest): Demand {
     const live = request.followView ? this.currentView ?? request : request;
@@ -1534,10 +1673,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     covered.push(...this.determined.rectangles.map(r=>({...r,spacing:r.spacing??1})));
     const hints=new CoverageRegions();for(const c of covered)hints.add(c);
     const mapped=m?mapUv(m,focus.x,focus.y):focus;
-    return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles};
+    const corners=m&&request.workView&&(request.width>live.width||request.height>live.height)
+      ? [[0,0],[1,0],[0,1],[1,1]].map(([x,y])=>mapUv(m,x,y)) : [];
+    const xs=corners.map(p=>p.x*request.width),ys=corners.map(p=>p.y*request.height);
+    const visible=corners.length?{x:Math.min(...xs),y:Math.min(...ys),
+      width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)}:undefined;
+    return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles,visible};
   }
 
   async render(request: RenderRequest): Promise<RenderStats> {
+    request=this.workRequest(request);
     let result: RenderStats;
     this.endpointDemand=needsEndpoints(request.colors)||request.colors.mode===1;
     try{do {
@@ -1554,7 +1699,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if (!this.retarget || this.abortRequested || request.isCurrent && !request.isCurrent()) return result;
       this.retainPartial();
       await this.pendingRetain;
-      request={...this.currentView!,followView:true,isCurrent:request.isCurrent};
+      request=this.workRequest({...this.currentView!,followView:true,isCurrent:request.isCurrent});
     } while (true);}finally{this.endpointDemand=false;}
   }
 
@@ -1569,7 +1714,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.referencePreparing=false;this.finalizing=false;
     const epoch = this.publicationEpoch;
     this.abortRequested=false;
-    if(!Number.isInteger(request.maxIterations)||request.maxIterations<1||request.maxIterations>1_000_000)throw Error('Unsupported iteration limit (maximum 1000000).');
+    if(!Number.isInteger(request.maxIterations)||request.maxIterations<1||request.maxIterations>10_000_000)throw Error('Unsupported iteration limit (maximum 10000000).');
     const presentationCurrent=request.isCurrent;
     const originalCurrent = request.isCalculationCurrent ?? presentationCurrent;
     request = { ...request, colors: this.copyColors(request.colors),
@@ -1620,7 +1765,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       family !== this.refFamily || constant !== this.refConstant ||
       !this.refValid ||
       limbs !== this.refLimbs ||
-      request.maxIterations > this.refIterations ||
+      this.referenceBudget(request.maxIterations,request.dynamicIterations) > this.refIterations ||
       drift.greaterThan(halfSpan.times(0.5));
 
     // Geometric drift, precision, family and iteration requirements apply
@@ -1637,7 +1782,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // accepted and queued for upload. No stale centre can describe old data.
         this.refFamily=family; this.refConstant=constant;
         this.refX = request.centerX; this.refY = request.centerY;
-        this.refLimbs = limbs; this.refIterations = request.maxIterations;
+        this.refLimbs = limbs; this.refIterations = this.referenceBudget(request.maxIterations,request.dynamicIterations);
         this.refLength = orbit.length; this.refEscaped = orbit.escaped;
         this.refSamples = orbit.samples; this.refValid = true;
         drift = new Decimal(0); orbitMs = orbit.ms;
@@ -1760,7 +1905,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.partialAppearanceUniforms=uniforms.slice(0);
     device.queue.writeBuffer(this.stopsBuffer,0,stopData);
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-    device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(12));
+    device.queue.writeBuffer(this.statsBuffer, 0, new Uint32Array(14));
 
     // What the field holds is a function of the geometry and the iteration,
     // not of the palette. Rebuilding it is the whole cost of a frame, so it is
@@ -1827,8 +1972,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if(!latest||frame.family===latest.family&&frame.maxIterations===latest.maxIterations&&
         (latest.family!=="julia"||!!frame.juliaX?.eq(latest.juliaX!)&&!!frame.juliaY?.eq(latest.juliaY!))&&
         JSON.stringify(frame.colors)===JSON.stringify(latest.colors))return true;
-      if(!this.sameView(request,latest))return true;
-      if(!this.appearanceCompatible(request,latest,method,grid,this.retainEndpoints))return false;
+      if(!this.sameView(request,this.workRequest(latest)))return true;
+      if(!this.appearanceCompatible(request,this.workRequest(latest),method,grid,this.retainEndpoints))return false;
       colors=this.copyColors(latest.colors);request={...request,colors};requestKey=keyFor(request);frame.colors=colors;
       const latestStops=this.fillAppearance(uniforms,colors,this.retainEndpoints);
       this.partialAppearanceUniforms=uniforms.slice(0);
@@ -1900,7 +2045,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           if(!resume)submittedVisits+=visits;
           collectTimings();
           // Mapping the counter copy fences this slice and identifies survivors.
-          const counters=new Uint32Array(await readBuffer(device,this.statsBuffer,48));
+          const counters=new Uint32Array(await readBuffer(device,this.statsBuffer,56));
           unfinished=counters[7];
           if(epoch!==this.publicationEpoch||continuationOrbit!==this.orbitBuffer||
               !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
@@ -1927,7 +2072,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
               !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
           if(!serviceAppearance()){this.retarget=true;completed=false;break;}
           const live=this.currentView;
-          if(request.followView&&live&&!this.sameView(request,live)&&performance.now()-targetStarted>=64){
+          if(request.followView&&live&&!this.sameView(request,this.workRequest(live))&&performance.now()-targetStarted>=64){
             this.retarget=true;completed=false;break;
           }
           resume=true;
@@ -1984,7 +2129,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       // target useful bounded work, then follow the live camera. Releasing a
       // button changes neither this condition nor the outstanding queue.
       const live=this.currentView;
-      if (request.followView && live && !this.sameView(request,live) &&
+      if (request.followView && live && !this.sameView(request,this.workRequest(live)) &&
           (performance.now()-targetStarted >= 64 || !this.pending.size)) {
         this.retarget=true; completed=false; break;
       }
@@ -1999,7 +2144,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     try{
       if(completed&&colors.postAntialias)await this.ensureRenderPipeline('antialias');
       if(this.abortRequested||!request.isCurrent!()||this.deviceLost)completed=false;
-      counters=!completed&&(this.abortRequested||!request.isCurrent!()||this.deviceLost)?new Uint32Array(12):new Uint32Array(await checkedGpu(device,()=>{
+      counters=!completed&&(this.abortRequested||!request.isCurrent!()||this.deviceLost)?new Uint32Array(14):new Uint32Array(await checkedGpu(device,()=>{
         if(completed){
           candidate=this.candidateTexture(retained.width,retained.height);
           if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);
@@ -2012,7 +2157,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           device.queue.submit([encoder.finish()]);collectTimings();
         }
         // Existing map fences the final copy. Scopes are popped before it yields.
-        return readBuffer(device,this.statsBuffer,48);
+        return readBuffer(device,this.statsBuffer,56);
       }));
       if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
       if(request.isCurrent!()&&!this.abortRequested&&completed){
@@ -2062,6 +2207,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       plainIterations,
       skipRatio: total > 0 ? skippedIterations / total : 0,
       cappedRatio: counters[5] > 0 ? counters[4] / counters[5] : 0,
+      limitHitRatio: counters[5] > 0 ? counters[12] / counters[5] : 0,
     };
     if(completed&&this.fieldComplete){
       this.fieldDescriptor={family,constant,maxIterations:request.maxIterations,mode:colors.mode,grid,method,useApprox:request.useApprox===true,retainEndpoints:this.retainEndpoints};

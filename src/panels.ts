@@ -27,7 +27,7 @@ export function setupPanels():PanelController{
   const controls=document.getElementById('controls')!;
   const limit=(value:number,minimum:number,maximum:number)=>Math.max(minimum,Math.min(maximum,value));
   const resizeControls=(edge:string,r:DOMRect,delta:number)=>{
-    const minWidth=Math.min(286,Math.max(1,innerWidth-16));
+    const minWidth=Math.min(320,Math.max(1,innerWidth-16));
     const minHeight=Math.min(280,Math.max(1,innerHeight-76));
     let x=r.x,width=r.width,height=r.height;
     if(edge==='left'){
