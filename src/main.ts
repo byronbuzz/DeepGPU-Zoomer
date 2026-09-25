@@ -6,6 +6,7 @@ import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './
 import { Camera, HOME, MAX_ITERATIONS, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
 import { setupPanels } from './panels';
+import { setupPngExportPanel } from './export/panel';
 import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
@@ -160,7 +161,13 @@ function updateDynamicForZoom(time:number,zoomDirection:number){
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
-function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();heldKeyActions.clear();rotationKeys.clear();releasePointer();}
+function syncZoomCursor(time=performance.now()){
+  const zoom=direction||keys.has('+')||keys.has('=')||keys.has('-')||
+    wheelDirection!==0&&time-lastInteraction<180;
+  canvas.classList.toggle('zooming',!!zoom&&!dragging&&!rotating&&!selecting&&
+    !rotationSliderHeld&&!(controlDown&&rotationKeys.size));
+}
+function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();heldKeyActions.clear();rotationKeys.clear();releasePointer();syncZoomCursor();}
 function cancelPreviewWork(){previewLifetime++;previewEpoch++;previewPending=false;previewEngine?.abort();el('julia-preview').setAttribute('aria-busy','false');}
 function captureStoppedPartial(){
   if(!stopSnapshotPending||!engine||!retainedRequest)return;
@@ -365,11 +372,9 @@ function tick(time:number){
       if(dirty&&!busy&&!stopped&&!refreshPending)void compute();
     }
     if(time-statusTime>50){statusTime=time;
-      const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
-      const fresh=!busy && !dirty && !moving() && !numericalPending;
       preparing(time);
       setText(depth,`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`);
-      el<HTMLButtonElement>('screenshot').disabled=!fresh||!engine?.isComplete(request());
+      el<HTMLButtonElement>('screenshot').disabled=!engine;
       if(profilingEnabled&&engine){
         const profile=engine.performance();
         const phases=Object.entries(profile.phases).filter(([,p])=>p.count).map(([name,p])=>`${name==='calculate'?'Calculation':name==='antialias'?'Antialias pass':'Shading'}: ${p.meanMs.toFixed(2)} ms mean, ${p.p95Ms.toFixed(2)} ms p95 (${p.count} samples)`);
@@ -377,6 +382,7 @@ function tick(time:number){
       }
     }
   }
+  syncZoomCursor(time);
   requestAnimationFrame(tick);
 }
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
@@ -384,7 +390,7 @@ canvas.addEventListener('pointerdown',e=>{if(e.button>2)return;canvas.focus();st
   if(e.ctrlKey&&e.button===0){e.preventDefault();rotating=true;controlDown=true;rotationPointerAngle=Math.hypot(e.clientX-innerWidth/2,e.clientY-innerHeight/2)>8?Math.atan2(e.clientY-innerHeight/2,e.clientX-innerWidth/2):null;return;}
   if(e.shiftKey||e.button===1){dragging=true;changed();return;}
   if(previewEnabled && view.family==='mandelbrot' && e.button===0){e.preventDefault();selecting=true;selectJuliaAtPointer();return;}
-  wheelDirection=0;direction=e.button===2?-1:1;changed();});
+  wheelDirection=0;direction=e.button===2?-1:1;changed();syncZoomCursor();});
 canvas.addEventListener('pointermove',e=>{if(rotating){if(!e.ctrlKey){finishRotation();return;}const dx=e.clientX-innerWidth/2,dy=e.clientY-innerHeight/2;
     if(Math.hypot(dx,dy)>8){const angle=Math.atan2(dy,dx);if(rotationPointerAngle!==null){const delta=angle-rotationPointerAngle;setRotation(camera.angle+Math.atan2(Math.sin(delta),Math.cos(delta))*180/Math.PI);}rotationPointerAngle=angle;}else rotationPointerAngle=null;
     pointer={x:e.clientX,y:e.clientY};return;}
@@ -392,12 +398,12 @@ canvas.addEventListener('pointermove',e=>{if(rotating){if(!e.ctrlKey){finishRota
 function endPointer(){if(selecting){stop();return;}stop();persist();}
 canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();persist();});
 canvas.addEventListener('lostpointercapture',()=>{if(activePointer!==null){activePointer=null;stop();persist();}});
-canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){const now=performance.now();refinementTime.wheelCameraChange(now);changed('wheel');updateDynamicForZoom(now,wheelDirection);}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
+canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){const now=performance.now();refinementTime.wheelCameraChange(now);changed('wheel');updateDynamicForZoom(now,wheelDirection);syncZoomCursor(now);}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
 canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();persist();return;}
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key)))return;
   if(e.ctrlKey||e.metaKey||e.altKey)return;
-  if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;const identity=keyIdentity(e);if(!heldKeyActions.has(identity)){heldKeyActions.set(identity,e.key);keys.add(e.key);}changed();}});
-document.addEventListener('keyup',e=>{const identity=keyIdentity(e),action=heldKeyActions.get(identity);if(action===undefined)return;heldKeyActions.delete(identity);if(![...heldKeyActions.values()].includes(action))keys.delete(action);if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();});
+  if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;const identity=keyIdentity(e);if(!heldKeyActions.has(identity)){heldKeyActions.set(identity,e.key);keys.add(e.key);}changed();syncZoomCursor();}});
+document.addEventListener('keyup',e=>{const identity=keyIdentity(e),action=heldKeyActions.get(identity);if(action===undefined)return;heldKeyActions.delete(identity);if(![...heldKeyActions.values()].includes(action))keys.delete(action);syncZoomCursor();if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();});
 canvas.addEventListener('blur',()=>{stop();persist();});
 document.addEventListener('keyup',e=>{if(e.key==='Control'&&(rotating||controlDown)){finishRotation();}
   if(rotationKeys.delete(e.key)){if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();}});
@@ -435,9 +441,9 @@ baseInput.oninput=()=>{
 el<HTMLButtonElement>('iteration-dynamic').onclick=()=>{
   dynamicEnabled=!dynamicEnabled;
   try{localStorage.setItem(DYNAMIC_STORAGE_KEY,dynamicEnabled?'on':'off');}catch{message('This browser could not save the Dynamic setting locally.');}
-  resetDynamicAnchor();
-  if(!dynamicEnabled){changeEffectiveLimit(baseIterations);persist(false);}
-  syncIterationLabel();
+  clearTimeout(baseEditTimer);baseEditTimer=undefined;baseEditing=false;sliderEditing=false;
+  baseIterations=view.iterations;resetDynamicAnchor();
+  persist(false);syncIterationLabel();
 };
 const tuningInputs:[EditableTuningKey,string,(value:number)=>number][]=[
   ['batchTargetMs','batch-target',Number],
@@ -554,22 +560,9 @@ el('full-reset').onclick=()=>{
   dynamicEnabled=true;try{localStorage.setItem(DYNAMIC_STORAGE_KEY,'on');}catch{}
   try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}
   history.replaceState(null,'',location.pathname+location.search);el('linked-location').hidden=true;
-  panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message('Defaults restored. Saved locations were kept.',true);
+  pngExportPanel.reset();panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message('Defaults restored. Saved locations were kept.',true);
 };
-el('screenshot').onclick=async()=>{
-  const button=el<HTMLButtonElement>('screenshot');button.disabled=true;
-  try{
-    const frame=await engine.capturePixels(request());
-    const output=document.createElement('canvas');output.width=frame.width;output.height=frame.height;
-    const context=output.getContext('2d');if(!context)throw new Error('PNG encoding is unavailable in this browser.');
-    const imageBytes=new Uint8ClampedArray(frame.pixels.length);imageBytes.set(frame.pixels);
-    context.putImageData(new ImageData(imageBytes,frame.width,frame.height),0,0);
-    const blob=await new Promise<Blob>((resolve,reject)=>output.toBlob(value=>value?resolve(value):reject(new Error('PNG encoding failed.')),'image/png'));
-    const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`webgpu-zoomer-${frame.width}x${frame.height}.png`;link.click();setTimeout(()=>URL.revokeObjectURL(url),0);
-    message(`Saved ${frame.width}×${frame.height} PNG.`,true);
-  }catch(reason){message(String(reason));}
-  finally{button.disabled=!engine?.isComplete(request());}
-};
+const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,viewport:()=>({width:canvas.width,height:canvas.height})});
 export const ready=(async()=>{
   try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}
   let rememberedAppearance=DEFAULT_COLORS;try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}

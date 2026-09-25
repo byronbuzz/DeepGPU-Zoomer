@@ -19,9 +19,9 @@ export interface TuningSettings {
 }
 
 export const DEFAULT_TUNING: Readonly<TuningSettings> = Object.freeze({
-  batchMultiplier: 4, hardPixelBudget: 0,
+  batchMultiplier: 16, hardPixelBudget: 0,
   overscanBase: 64, overscanMax: 128,
-  dynamicDepthGain: 1000, dynamicCapGain: 0,
+  dynamicDepthGain: 1000, dynamicCapGain: 1500,
   directExponent: 14.75, hdrExponent: 25, batchTargetMs: 8,
   pointerWeight: 8, distributedWeight: 4, oldestWeight: 4,
   pointerRadius: 32, blaRebuildPercent: 100, blaChunkMs: 0,
@@ -50,12 +50,12 @@ export function normalizeTuning(value: unknown, changed?: EditableTuningKey): Tu
   const next: TuningSettings = {
     ...DEFAULT_TUNING,
     batchTargetMs: stepped(input.batchTargetMs, 8, 2, 16, 1),
-    batchMultiplier: stepped(input.batchMultiplier, 4, 1, 16, 1),
+    batchMultiplier: stepped(input.batchMultiplier, DEFAULT_TUNING.batchMultiplier, 1, 64, 1),
     hardPixelBudget: hardBudget(input.hardPixelBudget),
     overscanBase: stepped(input.overscanBase, DEFAULT_TUNING.overscanBase, 0, 128, 1),
     overscanMax: stepped(input.overscanMax, DEFAULT_TUNING.overscanMax, 0, 256, 1),
-    dynamicDepthGain: stepped(input.dynamicDepthGain, 1000, 0, 3000, 50),
-    dynamicCapGain: stepped(input.dynamicCapGain, 0, 0, 3000, 50),
+    dynamicDepthGain: stepped(input.dynamicDepthGain, DEFAULT_TUNING.dynamicDepthGain, 0, 5000, 50),
+    dynamicCapGain: stepped(input.dynamicCapGain, DEFAULT_TUNING.dynamicCapGain, 0, 10000, 50),
   };
   if (next.overscanBase > next.overscanMax) {
     if (changed === 'overscanBase') next.overscanMax = next.overscanBase;

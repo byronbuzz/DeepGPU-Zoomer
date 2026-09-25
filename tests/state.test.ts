@@ -8,13 +8,13 @@ import {paletteStops,withStops} from '../src/palette-editor';
 
 describe('exact view state',()=>{
   it('uses the released Home iteration default',()=>{
-    expect(HOME.iterations).toBe(5000);
+    expect(HOME.iterations).toBe(1000);
   });
-  it('moves Home coordinates without changing a customised family or controls',()=>{
+  it('restores Home geometry and 1000 iterations while preserving family and appearance',()=>{
     const appearance=validateColors({...DEFAULT_COLORS,cycle:317,effect:8,postAntialias:true});
     for(const family of ['mandelbrot','julia'] as const){
       const current={...HOME,family,x:'1.25',y:'-.75',span:'0.001',jx:'-.2',jy:'.3',iterations:7321,appearance};
-      expect(homePosition(current)).toEqual({...current,x:family==='julia'?'0':'-0.6',y:'0',span:'2.8'});
+      expect(homePosition(current)).toEqual({...current,x:family==='julia'?'0':'-0.6',y:'0',span:'2.8',iterations:1000});
       expect(depthLabel(new Decimal(homePosition(current).span))).toBe('10^0.00×');
     }
   });
@@ -22,7 +22,7 @@ describe('exact view state',()=>{
     expect(depthLabel(new Decimal('2.8'))).toBe('10^0.00×');
     expect(depthLabel(new Decimal('2.8e-2000'))).toBe('10^2000.00×');
     for(const n of [1,32,1000,100000,1000000]){expect(iterationFromSlider(iterationToSlider(n))).toBe(n);expect(validateView({...HOME,iterations:n}).iterations).toBe(n);}
-    expect(()=>validateView({...HOME,iterations:1000001})).toThrow();
+    expect(()=>validateView({...HOME,iterations:10000001})).toThrow();
   });
   it('roundtrips appearance and accepts old links without appearance',()=>{
     const appearance=validateColors({...DEFAULT_COLORS,stops:['#123456','#abcdef'],positions:[.123,.789],locks:[true,false],effect:8,formula:4,capped:2,repeating:false});

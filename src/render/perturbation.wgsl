@@ -73,6 +73,9 @@ struct Uniforms {
     hueRotation: f32,
     rotationCos: vec4<f32>,
     rotationSin: vec4<f32>,
+    // Output-wide coordinates are separate from local tile storage dimensions.
+    domainResolution: vec2<f32>,
+    domainOrigin: vec2<f32>,
 };
 
 // Raw worker output is consumed only by the one-time reference decode pass.
@@ -432,7 +435,7 @@ fn iterateDirect(c0: Hdr, wantDerivative: bool, detectCycle: bool) -> Sample {
 fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     if (JULIA) { return iterateWide(pixel, wantDerivative); }
     if (DIRECT) {
-        var offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
+        var offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.domainResolution,0));
         if (u.rotationCos.x != 1.0 || u.rotationSin.x != 0.0) {
             offset = hdrMul(offset, Hdr(vec2<f32>(u.rotationCos.x,u.rotationSin.x),vec2<f32>(u.rotationCos.y,u.rotationSin.y),0));
         }
@@ -643,7 +646,9 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var sy: u32 = 0u; sy < grid; sy = sy + 1u) {
         for (var sx: u32 = 0u; sx < grid; sx = sx + 1u) {
             let jitter = vec2<f32>((f32(sx) + 0.5) * step, (f32(sy) + 0.5) * step);
-            let pixel = vec2<f32>(f32(col), u.resolution.y - 1.0 - f32(row)) + jitter;
+            let globalCol = f32(col) + u.domainOrigin.x;
+            let globalRow = f32(row) + u.domainOrigin.y;
+            let pixel = vec2<f32>(globalCol, u.domainResolution.y - 1.0 - globalRow) + jitter;
 
             let s = iterateAny(pixel, distanceMode);
             skipped = skipped + s.skipped;

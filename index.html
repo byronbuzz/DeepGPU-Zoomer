@@ -16,8 +16,8 @@
     <div id="panel-main" class="tab-panel" role="tabpanel" aria-labelledby="tab-main">
       <label>Zoom speed <output id="speed-value">0.7×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="0.7"></label>
       <label title="Rotate the main view about its centre. Ctrl+drag or hold Ctrl+Left/Right arrows on the fractal.">Rotation <output id="rotation-value">0°</output><input id="rotation" type="range" min="-180" max="180" step="0.1" value="0"></label>
-      <label>Iteration limit <output id="iteration-value">5,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
-      <div class="iteration-row"><label for="iteration-base">Base iterations<input id="iteration-base" type="number" min="1" max="10000000" step="1" inputmode="numeric" value="5000"></label><button id="iteration-dynamic" type="button" aria-pressed="true">Dynamic</button></div>
+      <label>Iteration limit <output id="iteration-value">1,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
+      <div class="iteration-row"><label for="iteration-base">Base iterations<input id="iteration-base" type="number" min="1" max="10000000" step="1" inputmode="numeric" value="1000"></label><button id="iteration-dynamic" type="button" aria-pressed="true">Dynamic</button></div>
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
       <div class="row main-action-row"><button id="refresh">Refresh</button><button id="stop-refinement">Stop</button></div>
       <div class="row main-action-row"><button id="reset">Home</button><button id="full-reset">Full reset</button></div>
@@ -26,7 +26,7 @@
       <div class="row"><button id="save">Save location</button><button id="share">Copy exact link</button></div>
       <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
       <div id="replace-location" class="linked-location" role="group" aria-labelledby="replace-location-text" hidden><p id="replace-location-text"></p><div class="row"><button id="replace-cancel" type="button">Cancel</button><button id="replace-confirm" type="button">Replace location</button></div></div>
-      <button id="screenshot" disabled>Save PNG</button>
+      <button id="screenshot" type="button" aria-haspopup="dialog" aria-controls="png-export" aria-expanded="false" disabled>Save PNG</button>
       <p class="help">Controls:<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag</p>
     </div>
     <div id="panel-colouring" class="tab-panel" role="tabpanel" aria-labelledby="tab-colouring" hidden>
@@ -69,12 +69,12 @@
         <h2 id="tuning-title">Tuning</h2>
         <p id="tuning-status" role="status">Navigation defaults</p>
         <label class="tuning-control">GPU batch target <span id="tuning-batch-target-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-target-value"></output><input id="tuning-batch-target" type="range" min="2" max="16" step="1" value="8"></label>
-        <label class="tuning-control">Batch size multiplier <span id="tuning-batch-multiplier-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-multiplier-value"></output><input id="tuning-batch-multiplier" type="range" min="1" max="16" step="1" value="4"></label>
+        <label class="tuning-control">Batch size multiplier <span id="tuning-batch-multiplier-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-multiplier-value"></output><input id="tuning-batch-multiplier" type="range" min="1" max="64" step="1" value="16"></label>
         <label class="tuning-control">Hard-pixel operations/slice <span id="tuning-hard-budget-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-hard-budget-value"></output><input id="tuning-hard-budget" type="range" min="0" max="8" step="1" value="0"></label>
         <label class="tuning-control">Zoom-out overscan base <span id="tuning-overscan-base-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-base-value"></output><input id="tuning-overscan-base" type="range" min="0" max="128" step="1" value="64"></label>
         <label class="tuning-control">Overscan max <span id="tuning-overscan-max-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-max-value"></output><input id="tuning-overscan-max" type="range" min="0" max="256" step="1" value="128"></label>
-        <label class="tuning-control">Dynamic depth gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="3000" step="50" value="1000"></label>
-        <label class="tuning-control">Dynamic cap gain <span id="tuning-cap-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-cap-gain-value"></output><input id="tuning-cap-gain" type="range" min="0" max="3000" step="50" value="0"></label>
+        <label class="tuning-control">Dynamic depth gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="5000" step="50" value="1000"></label>
+        <label class="tuning-control">Dynamic cap gain <span id="tuning-cap-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-cap-gain-value"></output><input id="tuning-cap-gain" type="range" min="0" max="10000" step="50" value="1500"></label>
         <button id="tuning-reset" type="button">Reset tuning</button>
       </section>
     </div>
@@ -83,6 +83,20 @@
     <button class="resize-edge resize-right" data-resize="right" aria-label="Resize controls from right edge" title="Drag or use arrow keys to resize"></button>
     <button class="resize-edge resize-bottom" data-resize="bottom" aria-label="Resize controls from bottom edge" title="Drag or use arrow keys to resize"></button>
   </aside>
+  <section id="png-export" class="popup" data-panel role="dialog" aria-modal="false" aria-label="PNG export" aria-labelledby="png-export-title" hidden>
+    <div class="export-panel-content">
+      <div class="preview-heading" data-handle><strong id="png-export-title">Save PNG</strong><button id="png-export-close" type="button" aria-label="Close PNG export">×</button></div>
+      <label for="png-resolution">Resolution<output id="png-resolution-label" for="png-resolution"></output></label>
+      <input id="png-resolution" type="range" min="0" max="4" step="1" value="0" aria-describedby="png-dimensions">
+      <p id="png-dimensions" class="help compact" aria-live="polite"></p>
+      <fieldset class="export-custom"><legend>Custom:</legend><div class="export-dimensions">
+        <label for="png-width">Width<input id="png-width" type="number" min="1" max="32768" step="1" inputmode="numeric"></label>
+        <label for="png-height">Height<input id="png-height" type="number" min="1" max="32768" step="1" inputmode="numeric"></label>
+      </div></fieldset>
+      <button id="png-save" type="button">Save PNG</button>
+      <p id="png-status" class="help compact" role="status" aria-live="polite"></p>
+    </div>
+  </section>
   <section id="julia-preview" data-panel hidden aria-label="Julia preview" aria-busy="false">
     <div class="preview-heading" data-handle><strong>Julia preview</strong><button id="julia-preview-close" aria-label="Close Julia preview">×</button></div>
     <div id="julia-preview-viewport"><canvas id="julia-preview-canvas" width="240" height="160" aria-label="Julia set for the selected Mandelbrot point"></canvas></div>

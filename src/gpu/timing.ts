@@ -7,16 +7,18 @@ export class GpuTiming {
   private values = new Map<string, number[]>();
   private invalid = 0;
   private missed = 0;
+  private disposed = false;
   enabled = false;
   readonly supported: boolean;
   constructor(private device: GPUDevice) {
     this.supported = device.features.has("timestamp-query");
   }
   setEnabled(enabled: boolean) {
-    this.enabled = enabled && this.supported; this.generation++;
+    this.enabled = enabled && this.supported && !this.disposed; this.generation++;
     this.values.clear(); this.invalid = 0; this.missed = 0;
   }
   begin(phase: string): TimingSample | undefined {
+    if(this.disposed)return;
     // Calculation timings also drive the batch controller when the optional
     // profiling display is off.
     if (!this.supported || (!this.enabled && phase !== 'calculate')) return;
@@ -63,6 +65,12 @@ export class GpuTiming {
       if (this.enabled && sample.generation === this.generation) this.invalid++;
       onUnavailable?.();
     }).finally(() => { slot.busy = false; });
+  }
+  dispose() {
+    if(this.disposed)return;
+    this.disposed=true;this.setEnabled(false);
+    for(const slot of this.slots){slot.query.destroy();slot.resolve.destroy();slot.read.destroy();}
+    this.slots=[];
   }
   snapshot() {
     return { enabled: this.enabled, supported: this.supported, invalid: this.invalid, missed: this.missed,

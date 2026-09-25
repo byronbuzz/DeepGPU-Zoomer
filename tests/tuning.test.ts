@@ -42,6 +42,16 @@ describe('navigation tuning contracts', () => {
       .toMatchObject({hardPixelBudget:0,overscanBase:64,overscanMax:128});
   });
 
+  it('uses the expanded defaults and bounds while retaining explicit older preferences',()=>{
+    expect(loadTuning({getItem:()=>null})).toMatchObject({batchMultiplier:16,dynamicDepthGain:1000,dynamicCapGain:1500});
+    expect(normalizeTuning({batchMultiplier:100,dynamicDepthGain:9000,dynamicCapGain:20000}))
+      .toMatchObject({batchMultiplier:64,dynamicDepthGain:5000,dynamicCapGain:10000});
+    expect(normalizeTuning({batchMultiplier:4,dynamicDepthGain:1000,dynamicCapGain:0}))
+      .toMatchObject({batchMultiplier:4,dynamicDepthGain:1000,dynamicCapGain:0});
+    expect(startingBatchVisits(1000,16)).toBe(262144);
+    expect(startingBatchVisits(1000,64)).toBe(1048576);
+  });
+
   it('keeps fixed policy fixed and the overscan endpoints ordered', () => {
     const changed=normalizeTuning({...DEFAULT_TUNING,directExponent:5,pointerRadius:64,overscanBase:128,overscanMax:64},'overscanBase');
     expect(changed.directExponent).toBe(14.75);

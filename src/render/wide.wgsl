@@ -148,7 +148,7 @@ fn wideFromHdr(a: Hdr) -> Wide {
 }
 
 fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
-    let fromCentre = pixel - 0.5 * u.resolution;
+    let fromCentre = pixel - 0.5 * u.domainResolution;
     var pixelDelta = wideMul(Wide(u.wideScale, vec4<f32>(0.0), u.scaleExponent),
         Wide(vec4<f32>(fromCentre.x, 0.0, 0.0, 0.0), vec4<f32>(fromCentre.y, 0.0, 0.0, 0.0), 0));
     if (u.rotationCos.x != 1.0 || u.rotationSin.x != 0.0) {

@@ -58,6 +58,37 @@ const LIMB_PROFILES = [8, 16, 32, 64, 128, 256] as const;
 const MIN_BATCH_SAMPLES = 16_384;
 class LiveMethodChanged extends Error {}
 
+/** A local export tile (including its clipped halo) within the full image. */
+export interface ExportDomain { width: number; height: number; x: number; y: number }
+type DomainView = FrameView & { exportDomain?: ExportDomain };
+
+export function renderDomain(view: Pick<RenderRequest, "width" | "height" | "exportDomain">): ExportDomain {
+  return view.exportDomain ?? { width: view.width, height: view.height, x: 0, y: 0 };
+}
+
+function exportIdentity(view: { exportDomain?: ExportDomain }): string {
+  const d = view.exportDomain;
+  return d ? `export:${d.width},${d.height},${d.x},${d.y}` : "";
+}
+
+export function validateExportDomain(request: Pick<RenderRequest, "width" | "height" | "exportDomain" | "followView">): void {
+  const d = request.exportDomain;
+  if (!d) return;
+  // Half-pixel centres must remain representable in the f32 coordinate path.
+  if (![d.width,d.height,d.x,d.y,request.width,request.height].every(Number.isSafeInteger) ||
+      d.width < 1 || d.height < 1 || d.width >= 2 ** 23 || d.height >= 2 ** 23 ||
+      d.x < 0 || d.y < 0 || request.width < 1 || request.height < 1 ||
+      d.x + request.width > d.width || d.y + request.height > d.height || request.followView) {
+    throw new Error('Invalid export tile or full-image dimensions.');
+  }
+}
+
+// The pending device-loss promise retains only this detachable slot. In
+// particular its callback must not close over a disposed renderer instance.
+function observeDeviceLoss(lost: GpuContext["lost"], hook: { notify: (() => void) | null }) {
+  void lost.then(() => hook.notify?.());
+}
+
 export interface RenderRequest {
   centerX: Decimal;
   centerY: Decimal;
@@ -73,6 +104,8 @@ export interface RenderRequest {
   unitsPerPixel: Decimal;
   width: number;
   height: number;
+  /** Full-output geometry; width/height above remain local storage dimensions. */
+  exportDomain?: ExportDomain;
   maxIterations: number;
   colors: ColorSettings;
   /** Enables standard linear BLA wherever the selected method supports it. */
@@ -203,23 +236,24 @@ export function binaryExponent(value: Decimal): number {
 
 /** Exact far-corner distance from the retained reference to this viewport. */
 export function referenceViewportRadius(
-  request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle">,
+  request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle" | "exportDomain">,
   refX: Decimal,
   refY: Decimal,
 ): Decimal {
+  const domain = renderDomain(request);
   if(request.angle){
-    const {c,s}=rotationBasis(request.angle),halfX=request.unitsPerPixel.times(request.width/2),halfY=request.unitsPerPixel.times(request.height/2);
+    const {c,s}=rotationBasis(request.angle),halfX=request.unitsPerPixel.times(domain.width/2),halfY=request.unitsPerPixel.times(domain.height/2);
     const dx=request.centerX.minus(refX),dy=request.centerY.minus(refY);
     return Decimal.max(...[-1,1].flatMap(x=>[-1,1].map(y=>Decimal.hypot(
       dx.plus(halfX.times(x*c)).minus(halfY.times(y*s)),
       dy.plus(halfX.times(x*s)).plus(halfY.times(y*c))))));
   }
-  const x = request.unitsPerPixel.times(request.width / 2).plus(request.centerX.minus(refX).abs());
-  const y = request.unitsPerPixel.times(request.height / 2).plus(request.centerY.minus(refY).abs());
+  const x = request.unitsPerPixel.times(domain.width / 2).plus(request.centerX.minus(refX).abs());
+  const y = request.unitsPerPixel.times(domain.height / 2).plus(request.centerY.minus(refY).abs());
   return Decimal.hypot(x, y);
 }
 
-export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle">, refX: Decimal, refY: Decimal): Decimal {
+export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle" | "exportDomain">, refX: Decimal, refY: Decimal): Decimal {
   return family === "julia" ? new Decimal(0) : referenceViewportRadius(request, refX, refY);
 }
 export function approximationEligible(family: "mandelbrot" | "julia", mode: number): boolean {
@@ -268,7 +302,7 @@ interface FieldDescriptor {
   interiorEndpoints: boolean;
 }
 
-export interface AppearanceFrameIdentity extends FrameView {
+export interface AppearanceFrameIdentity extends DomainView {
   proxy?: boolean;
   family?: "mandelbrot" | "julia";
   juliaX?: Decimal;
@@ -289,6 +323,7 @@ export function appearanceUpgradeCompatible(
 ): frame is AppearanceFrameIdentity {
   const family=request.family??"mandelbrot",frameFamily=frame?.family??"mandelbrot";
   return !!frame&&!frame.proxy&&frame.width===request.width&&frame.height===request.height&&
+    exportIdentity(frame)===exportIdentity(request)&&
     frame.centerX.eq(request.centerX)&&frame.centerY.eq(request.centerY)&&frame.unitsPerPixel.eq(request.unitsPerPixel)&&(frame.angle??0)===(request.angle??0)&&
     frameFamily===family&&frame.maxIterations===request.maxIterations&&frame.useApprox===(request.useApprox===true)&&
     frame.method===method&&frame.grid===grid&&
@@ -348,6 +383,10 @@ export class WebGpuRenderer {
   private spareHistory: GPUTexture | null = null;
   private spareAntialias: GPUTexture | null = null;
   private deviceLost=false;
+  private disposed=false;
+  private disposePromise: Promise<void> | null = null;
+  private activeOperations = new Set<Promise<unknown>>();
+  private lossHook: { notify: (() => void) | null } = { notify: null };
   private antialiasSize = {width:0,height:0};
   private antialiasFrame: WebGpuRenderer["lastFrame"] = null;
 
@@ -447,7 +486,7 @@ export class WebGpuRenderer {
   endpointChannelsRequired(){return this.retainEndpoints||this.endpointDemand;}
   private spareField: GPUBuffer | null = null;
   private spareCapacity = 0;
-  private fieldView: FrameView | null = null;
+  private fieldView: DomainView | null = null;
   private sampleKey = "";
   private admittedSamples: AdmittedSamples | null = null;
   private reusePipeline: GPUComputePipeline | null = null;
@@ -494,7 +533,6 @@ export class WebGpuRenderer {
 
   constructor(ctx: GpuContext, canvas: HTMLCanvasElement) {
     this.ctx = ctx;
-    void ctx.lost.then(()=>{this.deviceLost=true;this.screenHold?.destroy();this.screenHold=null;this.screenHoldValid=false;this.abort();});
     this.timing = new GpuTiming(ctx.device);
     this.canvas = canvas;
 
@@ -515,7 +553,7 @@ export class WebGpuRenderer {
     });
     this.antialiasSampler=ctx.device.createSampler({magFilter:'linear',minFilter:'linear'});
     this.uniformBuffer = ctx.device.createBuffer({
-      size: 400,
+      size: 416,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.stopsBuffer = storageBuffer(ctx.device, MAX_STOPS * 4, "palette-stops");
@@ -533,9 +571,16 @@ export class WebGpuRenderer {
       debugReadField:async()=>this.fieldBuffer?new Float32Array(await readBuffer(this.ctx.device,this.fieldBuffer,this.targetSize.width*this.targetSize.height*8)):new Float32Array(),
       debugReadEndpoints:async()=>this.endpointBuffer?new Float32Array(await readBuffer(this.ctx.device,this.endpointBuffer,this.targetSize.width*this.targetSize.height*16)):new Float32Array(),
     });
+    this.lossHook.notify = () => { this.deviceLost=true;this.screenHold?.destroy();this.screenHold=null;this.screenHoldValid=false;this.abort(); };
+    observeDeviceLoss(ctx.lost, this.lossHook);
   }
 
-  async init() {
+  init(): Promise<void> {
+    return this.trackOperation(() => this.initialize());
+  }
+
+  private async initialize() {
+    if(this.disposed)throw new Error('Renderer has been disposed.');
     const { device } = this.ctx;
     this.reuseModule = await compileShader(device, reuseSource, "sample-reuse");
     await this.ensureComputePipeline("reuse");
@@ -647,6 +692,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private async oncePipeline(key:string,ready:()=>boolean,build:()=>Promise<void>) {
+    if(this.disposed)throw new Error('Renderer has been disposed.');
     if(ready())return;
     let pending=this.pendingPipelines.get(key);
     if(!pending){
@@ -654,6 +700,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       void pending.finally(()=>{if(this.pendingPipelines.get(key)===pending)this.pendingPipelines.delete(key);}).catch(()=>{});
     }
     await pending;
+    if(this.disposed)throw new Error('Renderer has been disposed.');
     if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
   }
 
@@ -668,6 +715,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const constants:Record<string,number>|undefined=kind==='direct'?{DIRECT:1}:kind==='approx'?{APPROX:1}:kind==='julia'?{JULIA:1}:kind==='juliaApprox'?{JULIA:1,APPROX:1}:undefined;
       const pipeline=await this.ctx.device.createComputePipelineAsync({label:names[kind],layout:kind==='reuse'||kind==='decode'||kind==='verify'?'auto':this.pipelineLayout!,compute:{module,entryPoint,...(constants?{constants}:{})}});
       if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+      if(this.disposed)throw new Error('Renderer has been disposed.');
       (this[field] as GPUComputePipeline|null)=pipeline;
     });
     return this[field]!;
@@ -701,6 +749,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const format:GPUTextureFormat=kind==='blit'?this.format:kind==='retain'?'rgba8unorm':kind==='retainFloat'?'rgba16float':'rgba8unorm-srgb';
       const descriptor:GPURenderPipelineDescriptor={label:kind,layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'fs',targets:[{format}]},primitive:{topology:'triangle-strip'}};
       const pipeline=await device.createRenderPipelineAsync(descriptor);
+      if(this.disposed)throw new Error('Renderer has been disposed.');
       if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
       (this[field] as GPURenderPipeline|null)=pipeline;
     });
@@ -743,7 +792,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     try { limbs = limbsForScale(request.unitsPerPixel, 96); }
     catch { return false; }
     if (limbs !== demand.input.limbs) return false;
-    const halfSpan = request.unitsPerPixel.times(Math.min(request.width, request.height) / 2);
+    const domain = renderDomain(request);
+    const halfSpan = request.unitsPerPixel.times(Math.min(domain.width, domain.height) / 2);
     const drift = request.centerX.minus(demand.centerX).abs().plus(request.centerY.minus(demand.centerY).abs());
     return drift.lessThanOrEqualTo(halfSpan.times(0.5));
   }
@@ -1001,7 +1051,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private moveField(request: RenderRequest, samples: number, key: string, reuse: boolean, grid = 1, capMapping: SampleGridRemap | null = null): boolean {
     const previous = this.fieldBuffer, previousCapacity = this.fieldCapacity;
-    const mapping = capMapping ?? (reuse && previous && this.fieldView && this.sampleKey === key
+    const mapping = capMapping ?? (reuse && !request.exportDomain && !this.fieldView?.exportDomain && previous && this.fieldView && this.sampleKey === key
       ? sampleGridRemap(this.fieldView, request) : null);
     this.reuseMapping = mapping; this.reusableView = this.fieldView; this.reusableComplete = this.fieldComplete;
     this.fieldComplete = false;
@@ -1031,7 +1081,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       device.queue.submit([encoder.finish()]);
     }
     this.fieldView = { centerX: request.centerX, centerY: request.centerY, angle:request.angle??0,
-      unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height };
+      unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height, exportDomain: request.exportDomain };
     this.sampleKey = key;
     return !!mapping;
   }
@@ -1188,6 +1238,54 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return pending;
   }
 
+  private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
+    if(this.disposed)return Promise.reject(new Error('Renderer has been disposed.'));
+    const pending = operation();
+    this.activeOperations.add(pending);
+    void pending.finally(() => this.activeOperations.delete(pending)).catch(() => {});
+    return pending;
+  }
+
+  /** Releases this renderer only; the caller's shared GPU device stays usable. */
+  dispose(): Promise<void> {
+    if(this.disposePromise)return this.disposePromise;
+    this.disposed=true;
+    this.lossHook.notify=null;
+    this.publicationEpoch++;
+    this.abort();
+    this.referenceWorker.cancel('Renderer disposed');
+    this.disposePromise=(async()=>{
+      await Promise.allSettled([...this.activeOperations,...this.pendingPipelines.values(),...(this.pendingRetain?[this.pendingRetain]:[])]);
+      // Disposal must still release allocations after device loss or a failed fence.
+      try { await this.ctx.device.queue.onSubmittedWorkDone(); } catch { /* lost device */ }
+      this.timing.dispose();
+      const resources=new Set<GPUBuffer|GPUTexture>([
+        this.uniformBuffer,this.stopsBuffer,this.statsBuffer,
+        this.fieldBuffer,this.spareField,this.endpointBuffer,this.orbitBuffer,
+        this.laBuffer,this.laIndexBuffer,this.reuseUniform,this.xformBuffer,
+        this.target,this.history,this.coverageHistory,this.spareHistory,
+        this.antialiasTexture,this.spareAntialias,this.screenHold,
+        this.lastPresentedSource,
+      ].filter((value):value is GPUBuffer|GPUTexture=>!!value));
+      for(const resource of resources)resource.destroy();
+      this.context.unconfigure();
+      this.fieldBuffer=null;this.spareField=null;this.endpointBuffer=null;this.orbitBuffer=null;
+      this.laBuffer=null;this.laIndexBuffer=null;this.reuseUniform=null;this.xformBuffer=null;
+      this.target=null;this.history=null;this.coverageHistory=null;this.spareHistory=null;this.screenHold=null;this.admittedSamples=null;
+      this.antialiasTexture=null;this.spareAntialias=null;
+      this.refSamples=null;this.refValid=false;
+      this.pendingReferenceDemand=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
+      this.currentView=null;this.fieldView=null;this.completedFrame=null;this.lastFrame=null;
+      this.coverageFrame=null;this.antialiasFrame=null;this.incomingFrame=null;this.appearanceHoldFrame=null;
+      this.lastPresentedSource=null;this.lastPresentedFrame=null;this.lastPresentedCoverage=null;this.cachedStats=null;this.fieldStats=null;this.fieldDescriptor=null;
+      this.retainedAnchor=null;this.reuseMapping=null;this.reusableView=null;
+      this.pending.reset(0,0);this.determined=new CoverageRegions();
+      this.activeOperations.clear();this.pendingPipelines.clear();this.pendingRetain=null;
+      this.fieldComplete=false;this.currentImageValid=false;this.historyValid=false;
+    })();
+    return this.disposePromise;
+  }
+
   /** Starts a fresh calculation without discarding the displayed history. */
   restartCalculation() {
     this.abort();
@@ -1203,6 +1301,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   reproject(request: RenderRequest, allowStaleAppearance=false): boolean {
+    if(this.disposed||request.exportDomain)return false;
     if(this.deviceLost)return false;
     this.validateCoordinates(request);
     this.currentView = request;
@@ -1277,9 +1376,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
     this.abort();
   }
-  private sameView(a: FrameView, b: FrameView) {
+  private sameView(a: DomainView, b: DomainView) {
     return a.width === b.width && a.height === b.height && a.centerX.eq(b.centerX) &&
-      a.centerY.eq(b.centerY) && a.unitsPerPixel.eq(b.unitsPerPixel) && (a.angle??0)===(b.angle??0);
+      a.centerY.eq(b.centerY) && a.unitsPerPixel.eq(b.unitsPerPixel) && (a.angle??0)===(b.angle??0)&&exportIdentity(a)===exportIdentity(b);
   }
 
   private validateCoordinates(request:RenderRequest){
@@ -1291,12 +1390,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private fieldIdentity(request:RenderRequest,family:"mandelbrot"|"julia",constant:string,method:Method,grid:number,retainEndpoints:boolean,approximationLevels:number){
     return [family,constant,request.centerX.toString(),request.centerY.toString(),request.unitsPerPixel.toString(),request.angle??0,
       request.width,request.height,request.maxIterations,request.colors.mode,retainEndpoints,grid,method,
-      this.refLength,approximationLevels].join("|");
+      this.refLength,approximationLevels,exportIdentity(request)].join("|");
   }
 
   private sampleIdentity(request:RenderRequest,family:"mandelbrot"|"julia",constant:string,method:Method,grid:number,limbs:number,approximationLevels:number){
     return [family,constant,request.maxIterations,request.colors.mode,grid,method,limbs,this.refLimbs,
-      !!approximationLevels,request.useApprox===true].join("|");
+      !!approximationLevels,request.useApprox===true,exportIdentity(request)].join("|");
   }
 
   private beginAppearanceHold(request:RenderRequest,method:Method,grid:number){
@@ -1324,6 +1423,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   isComplete(request: RenderRequest) {
+    if(this.disposed)return false;
     if(this.deviceLost||this.finalizing||this.referencePreparing)return false;
     request=this.workRequest(request);
     const frame=this.completedFrame;
@@ -1335,7 +1435,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       JSON.stringify(frame.colors)===JSON.stringify(request.colors) && (!request.colors.postAntialias||!!this.antialiasFrame);
   }
   private samePresentation(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>): frame is NonNullable<WebGpuRenderer["lastFrame"]> {
-    return !!frame && frame.family === request.family && frame.maxIterations === request.maxIterations &&
+    return !!frame && exportIdentity(frame)===exportIdentity(request) && frame.family === request.family && frame.maxIterations === request.maxIterations &&
       frame.useApprox === (request.useApprox === true) &&
       (request.family !== "julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors) === JSON.stringify(request.colors);
@@ -1372,7 +1472,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.samePresentation(frame,request);
   }
   private stalePresentationCompatible(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>){
-    return !!frame&&frame.family===request.family&&frame.maxIterations===request.maxIterations&&
+    return !!frame&&exportIdentity(frame)===exportIdentity(request)&&frame.family===request.family&&frame.maxIterations===request.maxIterations&&
       frame.useApprox===(request.useApprox===true)&&
       (request.family!=='julia'||!!frame.juliaX?.eq(request.juliaX!)&&!!frame.juliaY?.eq(request.juliaY!));
   }
@@ -1511,7 +1611,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   /** Recolours only channels already present after an explicit Stop. Never starts orbit or region work. */
-  async recolorRetained(request:RenderRequest):Promise<boolean>{
+  recolorRetained(request:RenderRequest):Promise<boolean>{
+    return this.trackOperation(() => this.recolorRetainedRequest(request));
+  }
+  private async recolorRetainedRequest(request:RenderRequest):Promise<boolean>{
     if(this.deviceLost)return false;
     const visible=request;
     const retained=this.incomingFrame??this.fieldView;
@@ -1554,7 +1657,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   /** Captures only the completed, current 8-bit presentation image. */
-  async capturePixels(request:RenderRequest):Promise<{width:number;height:number;pixels:Uint8ClampedArray}> {
+  capturePixels(request:RenderRequest):Promise<{width:number;height:number;pixels:Uint8ClampedArray}> {
+    return this.trackOperation(() => this.readCompletedPixels(request));
+  }
+
+  private async readCompletedPixels(request:RenderRequest):Promise<{width:number;height:number;pixels:Uint8ClampedArray}> {
     if(!this.isComplete(request))throw new Error('The current image is not ready to save yet.');
     const texture=request.colors.postAntialias?this.antialiasTexture:this.target;
     if(!texture)throw new Error('The completed image is unavailable.');
@@ -1600,12 +1707,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   async retainDisplayedPartial(request:RenderRequest,keepIncoming=false):Promise<boolean>{
+    if(this.disposed)return false;
     const live=this.currentView;
     this.currentView=request;
     try{const scheduled=this.retainPartial(true,keepIncoming);return this.pendingRetain??scheduled;}finally{this.currentView=live;}
   }
 
   private retainPartial(allowStaleAppearance=false,keepIncoming=false) {
+    if(this.disposed)return false;
     const frame = this.incomingFrame;
     if (!frame || !this.target || !this.partialRegions) return false;
     // Coalesce while device validation is pending; never build a snapshot queue.
@@ -1723,7 +1832,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles,visible};
   }
 
-  async render(request: RenderRequest): Promise<RenderStats> {
+  render(request: RenderRequest): Promise<RenderStats> {
+    return this.trackOperation(() => this.renderRequest(request.exportDomain ? {...request, exportDomain:{...request.exportDomain}, publishPartial:false} : request));
+  }
+  private async renderRequest(request: RenderRequest): Promise<RenderStats> {
     request=this.workRequest(request);
     let result: RenderStats;
     this.endpointDemand=needsEndpoints(request.colors)||request.colors.mode===1;
@@ -1758,7 +1870,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const { device } = this.ctx;
     const tuning=request.tuning??DEFAULT_TUNING;
     this.validateCoordinates(request);
+    validateExportDomain(request);
     await this.pendingRetain;
+    if(this.disposed)throw new Error("Renderer has been disposed.");
     validateRenderSize(device.limits,request.width,request.height,needsEndpoints(request.colors)||request.colors.mode===1?16:8);
     if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
     this.referencePreparing=false;this.finalizing=false;
@@ -1773,7 +1887,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const keyFor=(value:RenderRequest)=>[value.centerX,value.centerY,value.unitsPerPixel,value.width,value.height,value.angle??0,
       value.family,value.juliaX,value.juliaY,value.maxIterations,
       value.forceMethod??methodForScale(value.unitsPerPixel,value.tuning),value.useApprox===true,
-      JSON.stringify(value.colors)].join("|");
+      JSON.stringify(value.colors),exportIdentity(value)].join("|");
     let requestKey=keyFor(request);
     if (requestKey === this.cachedRequest && this.cachedStats && this.isComplete(request) && request.isCurrent!()) {
       this.referencePreparing=false;this.exactTotalSamples=request.width*request.height;this.exactCompletedSamples=this.exactTotalSamples;
@@ -1788,6 +1902,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
     this.requireLiveMethod(request);
     const initialGrid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
+    if(request.exportDomain&&initialGrid!==Math.max(1,Math.min(3,request.colors.supersample)))throw new Error("Export tile cannot fit the requested sample grid.");
     let recoloured=await this.recolorCompleted(request,requestKey,method,initialGrid);
     if(recoloured)return recoloured;
     const holdCompletedAppearance=this.beginAppearanceHold(request,method,initialGrid);
@@ -1803,8 +1918,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Reuse the reference orbit while the view stays near the point it was
     // built at. Regenerating costs tens of milliseconds, so doing it every
     // frame would make panning unusable at depth.
+    const domain = renderDomain(request);
     const halfSpan = request.unitsPerPixel.times(
-      Math.min(request.width, request.height) / 2
+      Math.min(domain.width, domain.height) / 2
     );
     let drift = request.centerX
       .minus(this.refX)
@@ -1904,12 +2020,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     // Layout must match the Uniforms struct in perturbation.wgsl. vec3 members
     // align to 16 bytes, which is what the gaps below are for.
-    const uniforms = new ArrayBuffer(400);
+    const uniforms = new ArrayBuffer(416);
     const f32 = new Float32Array(uniforms);
     const i32 = new Int32Array(uniforms);
     const u32 = new Uint32Array(uniforms);
     f32[0] = request.width;
     f32[1] = request.height;
+    f32[100] = domain.width; f32[101] = domain.height;
+    f32[102] = domain.x; f32[103] = domain.y;
     f32[2] = scale.mantissa;
     i32[3] = scale.exponent;
     f32[4] = offset.x;
@@ -2014,6 +2132,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       family: request.family, juliaX: request.juliaX, juliaY: request.juliaY,
       centerX: request.centerX, centerY: request.centerY, angle:request.angle??0,
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
+      exportDomain: request.exportDomain,
       colors, maxIterations: request.maxIterations,
       useApprox: request.useApprox===true,
       method, grid,
