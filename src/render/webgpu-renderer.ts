@@ -394,6 +394,7 @@ export class WebGpuRenderer {
   private reusableComplete = false;
   private readonly batchFeedback = new BatchFeedback();
   private batchCostKey = "";
+  private batchFeedbackCap = 0;
   private retainedAnchor: SampleGridAnchor | null = null;
   private pending = new PendingRegions();
   private retarget = false;
@@ -2035,11 +2036,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
     const freshWork=!this.reuseMapping&&!capUpgrade;
-    const feedbackPolicy=[family,method,pipelineKind,limbs,colors.mode,grid,request.maxIterations,
+    const feedbackPolicy=[family,method,pipelineKind,limbs,colors.mode,grid,
       this.retainEndpoints,request.useApprox===true,freshWork].join("|");
     const syncFeedbackPolicy=(hardBudget:number)=>{
       const key=feedbackPolicy+"|"+hardBudget;
-      if(this.batchCostKey!==key){this.batchCostKey=key;this.batchFeedback.enterTarget(true);}
+      const explicitCapChange=this.batchFeedbackCap!==request.maxIterations&&
+        !(request.dynamicIterations&&request.followView&&request.provisionalNavigationCap);
+      if(this.batchCostKey!==key||explicitCapChange){this.batchCostKey=key;this.batchFeedback.enterTarget(true);}
+      this.batchFeedbackCap=request.maxIterations;
     };
     syncFeedbackPolicy(tuning.hardPixelBudget);
     if (!fieldStale) this.pending.reset(0,0);
