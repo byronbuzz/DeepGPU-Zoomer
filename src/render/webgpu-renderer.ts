@@ -2003,19 +2003,21 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       return true;
     };
     let scratch:GPUBuffer|undefined,scratchBind:GPUBindGroup|undefined,scratchCapacity=0;
+    let continuationReadback:GPUBuffer|undefined;
     const continuationOrbit=this.orbitBuffer;
     const learnCost=(key:string,cost:number)=>{
-      if(this.batchCostKey!==key||!Number.isFinite(cost)||cost<0)return;
-      const bounded=Math.max(0.000001,cost);
-      this.batchMsPerSample=this.batchMsPerSample ? .75*this.batchMsPerSample+.25*bounded : bounded;
+      // A quantized zero is no evidence for a view-wide batch. Keep the
+      // existing starting allowance until a positive duration is observed.
+      if(this.batchCostKey!==key||!Number.isFinite(cost)||cost<=0)return;
+      this.batchMsPerSample=this.batchMsPerSample ? .75*this.batchMsPerSample+.25*cost : cost;
     };
     try { while (this.pending.size) {
       const batchTuning=this.currentView?.tuning??tuning;
       const minimum=startingBatchVisits(request.maxIterations,batchTuning.batchMultiplier);
-      const costly=continuationSupported && batchTuning.hardPixelBudget>0 && (this.batchMsPerSample>0 ?
-        this.batchMsPerSample*minimum>batchTuning.batchTargetMs : request.maxIterations>batchTuning.hardPixelBudget*4);
+      const costly=continuationSupported && batchTuning.hardPixelBudget>0 && this.batchMsPerSample>0 &&
+        this.batchMsPerSample*minimum>batchTuning.batchTargetMs;
       const budget = this.batchMsPerSample > 0 ?
-        Math.max(64,Math.min(65_536,batchTuning.batchTargetMs/this.batchMsPerSample)) : minimum;
+        Math.min(request.width*request.height,Math.max(64,batchTuning.batchTargetMs/this.batchMsPerSample)) : minimum;
       // Bound the selected area before take(); its queue splits larger regions.
       const spatialBudget=costly?Math.min(budget,CONTINUATION_MAX_LANES):budget;
       const region = this.pending.take(spatialBudget,this.regionDemand(request),request.tileRows,{
@@ -2048,6 +2050,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         scratch?.destroy();scratch=storageBuffer(device,shape.bytes/4,'wide-continuation');scratchCapacity=shape.bytes;
         scratchBind=device.createBindGroup({layout:this.continuationLayout!,entries:[{binding:0,resource:{buffer:scratch}}]});
       }
+      if(shape&&!continuationReadback){
+        continuationReadback=device.createBuffer({label:'continuation-counter-readback',size:56,
+          usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      }
       let batchStarted=0,timingUnavailable=false,timingInvalid=false,fallbackApplied=false,baselineWallMs=0;
       if(shape){
         const measuredKey=this.batchCostKey,regionStarted=performance.now();
@@ -2075,7 +2081,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           pass.setPipeline(regionPipeline);pass.setBindGroup(0,bind);pass.setBindGroup(1,scratchBind!);
           pass.dispatchWorkgroups(Math.ceil(width/region.stride/8),Math.ceil(rows/region.stride/4));pass.end();
           this.timing.resolve(encoder,sample);
-          if(progressive)shade(encoder,width,rows);
+          // Read the existing survivor/completion counters in this submission.
+          encoder.copyBufferToBuffer(this.statsBuffer,0,continuationReadback!,0,56);
           device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
           if(!resume)submittedVisits+=visits;
           if(sample){
@@ -2084,13 +2091,23 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
               ()=>{sliceReported++;sliceUnavailable=true;learnRegion();});
           }else sliceUnavailable=true;
           collectTimings();
-          // Mapping the counter copy fences this slice and identifies survivors.
-          const counters=new Uint32Array(await readBuffer(device,this.statsBuffer,56));
-          unfinished=counters[7];
+          // Mapping the reusable copy fences this slice. Unmap before reuse.
+          await continuationReadback!.mapAsync(GPUMapMode.READ);
+          let completedSamples:number;
+          try {
+            const counters=new Uint32Array(continuationReadback!.getMappedRange());
+            completedSamples=counters[5]+counters[6];
+            unfinished=counters[7];
+          } finally { continuationReadback!.unmap(); }
           if(epoch!==this.publicationEpoch||continuationOrbit!==this.orbitBuffer||
               !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
-          const completedSamples=counters[5]+counters[6];
           if(progressive&&completedSamples>publishedCompleted){
+            // Another async service may have changed these shared uniforms
+            // while the counter copy was mapped.
+            device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+            const shadeEncoder=device.createCommandEncoder({label:'shade-completed-continuation'});
+            shade(shadeEncoder,width,rows);
+            device.queue.submit([shadeEncoder.finish()]);collectTimings();
             publishedCompleted=completedSamples;
             this.incomingFrame=frame;this.partialSerial++;this.partialRegions++;
             if(!unfinished){
@@ -2187,7 +2204,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           (performance.now()-targetStarted >= 64 || !this.pending.size)) {
         this.retarget=true; completed=false; break;
       }
-    }}finally{scratch?.destroy();}
+    }}finally{scratch?.destroy();continuationReadback?.destroy();}
     if (!request.isCurrent!()||this.abortRequested) completed = false;
     if(completed&&!serviceAppearance()){this.retarget=true;completed=false;}
     if(completed&&(this.pending.size!==0||exactCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
