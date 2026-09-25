@@ -3,7 +3,7 @@
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>DeepGPU Zoomer</title></head>
 <body>
   <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Ctrl drag or Ctrl left and right arrows rotate. Keyboard plus and minus zoom; arrows pan. J toggles Julia preview; while preview is open, left click or drag selects its constant. M opens the selected Julia or returns to Mandelbrot."></canvas>
-  <header><div id="title-badge" class="brand" data-panel><strong>DeepGPU Zoomer</strong></div><button id="toggle" aria-label="Hide controls" title="Hide controls" aria-expanded="true" aria-controls="controls">☰</button></header>
+  <header><div id="title-badge" class="brand" data-panel><strong><span class="brand-deep">Deep</span>GPU Zoomer</strong></div><button id="toggle" aria-label="Hide controls" title="Hide controls" aria-expanded="true" aria-controls="controls">☰</button></header>
   <aside id="controls" data-panel aria-label="Explorer controls">
     <div class="controls-scroll">
     <div class="tabs-shell" data-handle>
@@ -26,7 +26,7 @@
       <div class="row"><button id="save">Save location</button><button id="share">Copy exact link</button></div>
       <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
       <div id="replace-location" class="linked-location" role="group" aria-labelledby="replace-location-text" hidden><p id="replace-location-text"></p><div class="row"><button id="replace-cancel" type="button">Cancel</button><button id="replace-confirm" type="button">Replace location</button></div></div>
-      <button id="screenshot" type="button" aria-haspopup="dialog" aria-controls="png-export" aria-expanded="false" disabled>Save PNG</button>
+      <div class="row save-action-row"><button id="save-defaults" type="button">Save defaults</button><button id="screenshot" type="button" aria-haspopup="dialog" aria-controls="png-export" aria-expanded="false" disabled>Save PNG</button></div>
       <p class="help">Controls:<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag</p>
     </div>
     <div id="panel-colouring" class="tab-panel" role="tabpanel" aria-labelledby="tab-colouring" hidden>
@@ -61,18 +61,15 @@
     </div>
     <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
       <label>Panel opacity<input id="panel-opacity" type="range" min="0.15" max="1" step="0.01" value="0.8"></label>
-      <label class="panel-accent-label" for="panel-accent">Panel Accent Colour<input id="panel-accent" type="color" value="#9cdcd6"></label>
-      <label class="check"><input id="post-antialias" type="checkbox"> Completed-image antialiasing</label>
-      <p class="help compact">A low-cost final image filter. It does not rerun or recover missing fractal samples.</p>
+      <label class="panel-accent-label" for="panel-accent">Panel Accent Colour<input id="panel-accent" type="color" value="#eba046"></label>
+      <label class="check"><input id="oversampling" type="checkbox"> 2x oversampling</label>
+      <p class="help compact">higher quality final image. no effect while zooming.</p>
       <label class="profiling-switch"><input id="profiling" type="checkbox"> Measure GPU timings</label><p id="profiling-data">GPU timings are off.</p>
       <section id="tuning" aria-labelledby="tuning-title">
         <h2 id="tuning-title">Tuning</h2>
         <p id="tuning-status" role="status">Navigation defaults</p>
         <label class="tuning-control">GPU batch target <span id="tuning-batch-target-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-target-value"></output><input id="tuning-batch-target" type="range" min="2" max="16" step="1" value="8"></label>
         <label class="tuning-control">Batch size multiplier <span id="tuning-batch-multiplier-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-multiplier-value"></output><input id="tuning-batch-multiplier" type="range" min="1" max="64" step="1" value="16"></label>
-        <label class="tuning-control">Hard-pixel operations/slice <span id="tuning-hard-budget-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-hard-budget-value"></output><input id="tuning-hard-budget" type="range" min="0" max="8" step="1" value="0"></label>
-        <label class="tuning-control">Zoom-out overscan base <span id="tuning-overscan-base-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-base-value"></output><input id="tuning-overscan-base" type="range" min="0" max="128" step="1" value="64"></label>
-        <label class="tuning-control">Overscan max <span id="tuning-overscan-max-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-overscan-max-value"></output><input id="tuning-overscan-max" type="range" min="0" max="256" step="1" value="128"></label>
         <label class="tuning-control">Dynamic depth gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="5000" step="50" value="1000"></label>
         <label class="tuning-control">Dynamic cap gain <span id="tuning-cap-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-cap-gain-value"></output><input id="tuning-cap-gain" type="range" min="0" max="10000" step="50" value="1500"></label>
         <button id="tuning-reset" type="button">Reset tuning</button>

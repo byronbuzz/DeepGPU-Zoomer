@@ -68,7 +68,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     el<HTMLInputElement>('cycle').value=String(cycleToSlider(c.cycle));el('cycle-value').textContent=c.cycle<100?c.cycle.toFixed(1):Math.round(c.cycle).toString();
     el<HTMLInputElement>('hue-rotation').value=String(c.hueRotation);el('hue-value').textContent=`${c.hueRotation}°`;
     for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).value=String(c[key]);
-    el<HTMLInputElement>('post-antialias').checked=c.postAntialias===true;
+    el<HTMLInputElement>('oversampling').checked=c.oversampling===true;
   }
   function syncFields(){const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));const s=stops[selected];el<HTMLInputElement>('stop-color').value=s.color;el<HTMLInputElement>('stop-color-swatch').value=s.color;el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
   el('palette-strip').onpointerdown=e=>{if(e.target!==el('palette-strip')||get().stops.length>=8)return;const r=el('palette-strip').getBoundingClientRect();const position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));update(s=>[...s,{position,color:s[selected].color,locked:false}],get().stops.length);};
@@ -87,7 +87,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   el('palette-redo').onclick=()=>{const c=redo.pop();if(c){undo.push(validateColors(get()));commit(c,false);}};
   for(const [id,key] of [['color-formula','formula'],['color-effect','effect'],['capped-mode','capped']] as const)el<HTMLSelectElement>(id).onchange=e=>commit({...get(),[key]:Number((e.target as HTMLSelectElement).value)});
   el<HTMLInputElement>('distance-mode').onchange=e=>commit({...get(),mode:(e.target as HTMLInputElement).checked?1:0});
-  el<HTMLInputElement>('post-antialias').onchange=e=>commit({...get(),postAntialias:(e.target as HTMLInputElement).checked});
+  el<HTMLInputElement>('oversampling').onchange=e=>commit({...get(),oversampling:(e.target as HTMLInputElement).checked});
   el<HTMLInputElement>('cycle').oninput=e=>{const value=e instanceof CustomEvent&&e.detail?.factoryReset?DEFAULT_COLORS.cycle:cycleFromSlider(Number((e.target as HTMLInputElement).value));change({...get(),cycle:value});el('cycle-value').textContent=value<100?value.toFixed(1):Math.round(value).toString();};
   el<HTMLInputElement>('hue-rotation').oninput=e=>{const hueRotation=Number((e.target as HTMLInputElement).value);change({...get(),hueRotation});el('hue-value').textContent=`${hueRotation}°`;};
   for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).oninput=e=>{change({...get(),[key]:Number((e.target as HTMLInputElement).value)});};

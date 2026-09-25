@@ -37,6 +37,8 @@ export interface ColorSettings {
   capped?: number;
   /** Completed-image presentation filter. Never changes the numerical field. */
   postAntialias?: boolean;
+  /** Four spatial samples per displayed pixel, only while stationary. */
+  oversampling?: boolean;
 
   // --- distance-estimation colouring ---
   /** Palette cycles per octave of the distance field. */
@@ -91,6 +93,7 @@ export const DEFAULT_COLORS: ColorSettings = {
   gamma: 2.2,
   hueRotation: 0,
   postAntialias: false,
+  oversampling: false,
 };
 
 /** IDs 0–4 are the released mappings and must remain stable in saved views. */
@@ -110,8 +113,19 @@ export const FORMULAS=[
   'Escape parity',
   'Triangular escape wave',
   'Golden phase bands',
+  'Log ribbons',
+  'Root bands',
+  'Cubic pulse bands',
+  'Cosine ribbons',
+  'Soft terraces',
+  'Harmonic flow',
+  'Interference bands',
+  'Chirped bands',
+  'Escape phase',
+  'Dual-scale bands',
 ] as const;
-export const EFFECTS=['None','Contour Ink','Terraces','Fluted Ridges','Interference','Phase Weave','Neon Filaments','Pearl Relief','Brushed Relief','Engraved Relief','Depth Mist'];
+export const EFFECTS=['None','Contour Ink','Terraces','Fluted Ridges','Interference','Phase Weave','Neon Filaments','Pearl Relief','Brushed Relief','Engraved Relief','Depth Mist',
+  'Duotone','Tritone','Split tone','Cross process','Soft solarise','Posterise','Channel prism','Contour glow','Iridescent bands','Metallic bands'];
 /** IDs 0–2 are released and remain stable in saved links. */
 export const CAPPED=[
   'Solid black','Final endpoint angle','Final endpoint magnitude',
@@ -141,8 +155,10 @@ export function validateColors(value:unknown):ColorSettings {
   const positions=v.positions??stopPositions({...c,positions:undefined,repeating:v.repeating});
   if(positions.length!==c.stops.length||positions.some((p,i)=>!Number.isFinite(p)||p<0||p>1||i>0&&p<positions[i-1]))throw Error('Invalid palette positions');
   c.positions=[...positions];c.locks=c.stops.map((_,i)=>v.locks?.[i]===true);c.repeating=v.repeating!==false;
-  for(const [key,max] of [['formula',FORMULAS.length-1],['effect',10],['capped',CAPPED.length-1]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
+  for(const [key,max] of [['formula',FORMULAS.length-1],['effect',EFFECTS.length-1],['capped',CAPPED.length-1]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
   if(![0,1,2].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.slopeDepth<0||c.slopeDepth>80||c.gamma<1||c.gamma>4||c.hueRotation<0||c.hueRotation>360||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
+  // Legacy cheap-AA choices never opt into the new numerical quality target.
+  c.postAntialias=false;
   return c;
 }
 
@@ -225,8 +241,9 @@ export function encodeColors(settings: ColorSettings): string {
     settings.formula??0,
     settings.effect??0,
     settings.capped??0,
-    settings.postAntialias?1:0,
+    0, // Reserved legacy postprocess AA slot.
     Math.round(settings.hueRotation),
+    settings.oversampling?1:0,
   ];
   return fields.join(".");
 }
@@ -281,7 +298,8 @@ export function decodeColors(code: string): ColorSettings | null {
     formula:clamp(number(parts[23],d.formula??0),0,FORMULAS.length-1),
     effect:clamp(number(parts[24],d.effect??0),0,EFFECTS.length-1),
     capped:clamp(number(parts[25],d.capped??0),0,CAPPED.length-1),
-    postAntialias:parts[26]===undefined?false:parts[26]==='1',
+    postAntialias:false,
     hueRotation:clamp(number(parts[27],d.hueRotation),0,360),
+    oversampling:parts[28]==='1',
   });
 }

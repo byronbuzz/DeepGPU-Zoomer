@@ -10,30 +10,30 @@ describe('navigation tuning contracts', () => {
     expect(modifiedTuningCount({...DEFAULT_TUNING})).toBe(0);
   });
 
-  it('stores only seven controls under the new version', () => {
+  it('stores only the four adjustable tuning controls', () => {
     const entries = new Map<string,string>();
     const storage = { getItem: (key:string) => entries.get(key) ?? null, setItem: (key:string,value:string) => { entries.set(key,value); } };
     const changed=normalizeTuning({...DEFAULT_TUNING,batchMultiplier:8,hardPixelBudget:1024});
     expect(saveTuning(changed,storage)).toBe(true);
-    expect(Object.keys(JSON.parse(entries.get(TUNING_STORAGE_KEY)!).settings)).toHaveLength(7);
+    expect(Object.keys(JSON.parse(entries.get(TUNING_STORAGE_KEY)!).settings)).toHaveLength(4);
     expect(loadTuning(storage)).toEqual(changed);
-    expect(modifiedTuningCount(changed)).toBe(2);
+    expect(modifiedTuningCount(changed)).toBe(1);
     entries.set(TUNING_STORAGE_KEY,JSON.stringify({version:1,settings:changed}));
     expect(loadTuning(storage)).toEqual(DEFAULT_TUNING);
   });
 
-  it('preserves supported saved choices without guessing whether factory values were explicit', () => {
+  it('preserves remaining saved choices but permanently retires slicing and overscan overrides', () => {
     const entries = new Map<string,string>();
     const storage = { getItem: (key:string) => entries.get(key) ?? null };
     entries.set('gpu-zoomer-navigation-tuning-v2',JSON.stringify({version:2,settings:{
       batchMultiplier:8,hardPixelBudget:32,overscanBase:64,overscanMax:192,
       dynamicDepthGain:2000,dynamicCapGain:1000,
     }}));
-    expect(loadTuning(storage)).toEqual({...DEFAULT_TUNING,batchMultiplier:8,hardPixelBudget:128,
-      overscanBase:64,overscanMax:192,dynamicDepthGain:2000,dynamicCapGain:1000});
-    expect(normalizeTuning({...DEFAULT_TUNING,hardPixelBudget:16}).hardPixelBudget).toBe(128);
+    expect(loadTuning(storage)).toEqual({...DEFAULT_TUNING,batchMultiplier:8,hardPixelBudget:0,
+      overscanBase:64,overscanMax:128,dynamicDepthGain:2000,dynamicCapGain:1000});
+    expect(normalizeTuning({...DEFAULT_TUNING,hardPixelBudget:16}).hardPixelBudget).toBe(0);
     entries.set(TUNING_STORAGE_KEY,JSON.stringify({version:3,settings:{hardPixelBudget:256,overscanBase:0,overscanMax:0}}));
-    expect(loadTuning(storage)).toMatchObject({hardPixelBudget:256,overscanBase:0,overscanMax:0});
+    expect(loadTuning(storage)).toMatchObject({hardPixelBudget:0,overscanBase:64,overscanMax:128});
   });
 
   it('uses Off and 64/128 for missing or invalid settings', () => {
@@ -53,7 +53,7 @@ describe('navigation tuning contracts', () => {
   });
 
   it('keeps fixed policy fixed and the overscan endpoints ordered', () => {
-    const changed=normalizeTuning({...DEFAULT_TUNING,directExponent:5,pointerRadius:64,overscanBase:128,overscanMax:64},'overscanBase');
+    const changed=normalizeTuning({...DEFAULT_TUNING,directExponent:5,pointerRadius:64,overscanBase:128,overscanMax:64});
     expect(changed.directExponent).toBe(14.75);
     expect(changed.hdrExponent).toBe(25);
     expect(changed.pointerRadius).toBe(32);

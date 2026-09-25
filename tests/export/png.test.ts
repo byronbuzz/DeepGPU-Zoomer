@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { inflateSync } from 'node:zlib';
 import { createStreamingPng } from '../../src/export/png';
+import { canReuseExportPixels, encodeCapturedExport } from '../../src/export/render';
 import { checkedExportDimensions } from '../../src/export/layout';
 
 // Independent bit-at-a-time CRC implementation, deliberately no writer helpers.
@@ -41,6 +42,13 @@ async function decode(blob: Blob) {
 }
 
 describe('streaming PNG writer', () => {
+  it('keeps captured output dimensions and bytes without hidden supersampling',async()=>{
+    const pixels=new Uint8ClampedArray(3*65*4).fill(127);
+    const decoded=await decode(await encodeCapturedExport({width:3,height:65,pixels}));
+    expect([decoded.width,decoded.height]).toEqual([3,65]);expect([...decoded.pixels]).toEqual([...pixels]);
+    expect(canReuseExportPixels({width:7680,height:4320})).toBe(false);
+    await expect(encodeCapturedExport({width:3,height:65,pixels:new Uint8Array(4)})).rejects.toThrow();
+  });
   it('encodes multiple irregular strips into one independent-decodable zlib stream with checked CRCs', async () => {
     const width = 257, height = 129, pixels = new Uint8Array(width * height * 4);
     let seed = 0x6d2b79f5;

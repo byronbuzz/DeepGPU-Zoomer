@@ -3,22 +3,40 @@ import { DEFAULT_TUNING } from '../tuning';
 import type { GpuContext } from '../gpu/device';
 import { WebGpuRenderer, type RenderRequest } from '../render/webgpu-renderer';
 import { needsEndpoints } from '../logic/colorSettings';
-import { frameForExport, planExport } from './layout';
+import { checkedExportDimensions, EXPORT_MEMORY_LIMIT, frameForExport, planExport } from './layout';
 import { createStreamingPng } from './png';
 export interface ExportChoice { width:number; height:number }
+export interface CapturedExport { width:number; height:number; pixels:Uint8Array|Uint8ClampedArray }
+/** A full readback is optional: tiled export remains the bounded fallback. */
+export function canReuseExportPixels(choice:ExportChoice){
+  const checked=checkedExportDimensions(choice.width,choice.height);
+  // Includes a possible 4x-area source snapshot for a viewport-sized resolve,
+  // output texture, padded readback and detached CPU pixels.
+  return checked.pixels*32+checked.maxEncodedBytes*2+16*1024*1024<=EXPORT_MEMORY_LIMIT;
+}
+export async function encodeCapturedExport(frame:CapturedExport):Promise<Blob>{
+  const choice=checkedExportDimensions(frame.width,frame.height);
+  if(frame.pixels.length!==choice.pixels*4||!canReuseExportPixels(choice))throw Error('The captured image exceeds the export memory limit.');
+  const writer=createStreamingPng(frame.width,frame.height,{maxEncodedBytes:choice.maxEncodedBytes});
+  const bytes=new Uint8Array(frame.pixels.buffer,frame.pixels.byteOffset,frame.pixels.byteLength);
+  try{
+    for(let y=0;y<frame.height;y+=64)await writer.appendRows(bytes.subarray(y*frame.width*4,Math.min(frame.height,y+64)*frame.width*4));
+    return await writer.finish();
+  }finally{await writer.cancel();}
+}
 
 /** Freeze view and appearance before any permission, GPU or encoding await. */
 export function snapshotExportRequest(request:RenderRequest):RenderRequest {
   const clone=(value:Decimal|undefined)=>value===undefined?undefined:new Decimal(value);
   return {...request,centerX:new Decimal(request.centerX),centerY:new Decimal(request.centerY),
     unitsPerPixel:new Decimal(request.unitsPerPixel),juliaX:clone(request.juliaX),juliaY:clone(request.juliaY),
-    colors:{...request.colors,stops:[...request.colors.stops],positions:request.colors.positions?.slice(),locks:request.colors.locks?.slice()},
+    colors:{...request.colors,postAntialias:false,supersample:request.colors.oversampling?1:request.colors.supersample,stops:[...request.colors.stops],positions:request.colors.positions?.slice(),locks:request.colors.locks?.slice()},
     // Tiled export uses the ordinary complete-sample path. Continuation's local
     // coordinate scratch protocol is deliberately outside this export port.
     tuning:{...(request.tuning??DEFAULT_TUNING),hardPixelBudget:0},
     followView:false,publishPartial:false,dynamicIterations:false,provisionalNavigationCap:false,
     betweenBatches:undefined,isCurrent:undefined,isCalculationCurrent:undefined,focus:undefined,zoom:0,
-    interacting:false,overscanPixels:undefined,workView:undefined,exportDomain:undefined,tileRows:undefined};
+    interacting:false,stationaryOversampling:false,overscanPixels:undefined,workView:undefined,exportDomain:undefined,tileRows:undefined};
 }
 
 /** One private renderer, one full-output reference domain, sequential bounded strips. */

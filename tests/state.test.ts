@@ -38,7 +38,7 @@ describe('exact view state',()=>{
   });
   it('keeps released formula IDs and roundtrips all appended appearance fields',()=>{
     expect(FORMULAS.slice(0,5)).toEqual(['Smooth escape','Classic iteration bands','Binary decomposition','Colour decomposition','Biomorphs']);
-    expect(FORMULAS).toHaveLength(15);
+    expect(FORMULAS).toHaveLength(25);
     const c=validateColors({...DEFAULT_COLORS,cycle:4096,formula:14,effect:10,capped:12,postAntialias:true,repeating:false,
       positions:[0,.16,.42,.6425,.8575,1],locks:[true,false,true,false,false,true]});
     expect(decodeColors(encodeColors(c))).toEqual(c);
@@ -50,7 +50,7 @@ describe('exact view state',()=>{
   });
   it('defaults old colour records to zero hue and roundtrips a full-turn hue setting',()=>{
     expect(DEFAULT_COLORS.hueRotation).toBe(0);
-    const legacy=encodeColors(DEFAULT_COLORS).split('.').slice(0,-1).join('.');
+    const legacy=encodeColors(DEFAULT_COLORS).split('.').slice(0,27).join('.');
     expect(decodeColors(legacy)?.hueRotation).toBe(0);
     for(const hueRotation of [0,120,360]){
       const colors=validateColors({...DEFAULT_COLORS,hueRotation});

@@ -31,7 +31,7 @@ export const TUNING_STORAGE_KEY = 'gpu-zoomer-navigation-tuning-v3';
 const PREVIOUS_TUNING_STORAGE_KEY = 'gpu-zoomer-navigation-tuning-v2';
 export const HARD_PIXEL_BUDGETS = [0, 128, 256, 512, 1024, 2048, 4096, 8192, 16384] as const;
 export const EDITABLE_TUNING_KEYS = [
-  'batchTargetMs', 'batchMultiplier', 'hardPixelBudget', 'overscanBase', 'overscanMax',
+  'batchTargetMs', 'batchMultiplier',
   'dynamicDepthGain', 'dynamicCapGain',
 ] as const;
 export type EditableTuningKey = typeof EDITABLE_TUNING_KEYS[number];
@@ -39,28 +39,20 @@ export type EditableTuningKey = typeof EDITABLE_TUNING_KEYS[number];
 const finite = (value: unknown, fallback: number) => typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 const stepped = (value: unknown, fallback: number, min: number, max: number, step: number) =>
   Math.min(max, Math.max(min, Math.round((finite(value, fallback) - min) / step) * step + min));
-const hardBudget = (value: unknown) => {
-  if (HARD_PIXEL_BUDGETS.includes(value as typeof HARD_PIXEL_BUDGETS[number])) return value as number;
-  // Removed 16/32/64 choices migrate to the smallest supported nonzero slice.
-  return typeof value === 'number' && value > 0 && value < 128 ? 128 : DEFAULT_TUNING.hardPixelBudget;
-};
 
-export function normalizeTuning(value: unknown, changed?: EditableTuningKey): TuningSettings {
+export function normalizeTuning(value: unknown): TuningSettings {
   const input = value && typeof value === 'object' ? value as Partial<TuningSettings> : {};
   const next: TuningSettings = {
     ...DEFAULT_TUNING,
     batchTargetMs: stepped(input.batchTargetMs, 8, 2, 16, 1),
     batchMultiplier: stepped(input.batchMultiplier, DEFAULT_TUNING.batchMultiplier, 1, 64, 1),
-    hardPixelBudget: hardBudget(input.hardPixelBudget),
-    overscanBase: stepped(input.overscanBase, DEFAULT_TUNING.overscanBase, 0, 128, 1),
-    overscanMax: stepped(input.overscanMax, DEFAULT_TUNING.overscanMax, 0, 256, 1),
+    // These are fixed policy, including when reading obsolete stored controls.
+    hardPixelBudget: 0,
+    overscanBase: 64,
+    overscanMax: 128,
     dynamicDepthGain: stepped(input.dynamicDepthGain, DEFAULT_TUNING.dynamicDepthGain, 0, 5000, 50),
     dynamicCapGain: stepped(input.dynamicCapGain, DEFAULT_TUNING.dynamicCapGain, 0, 10000, 50),
   };
-  if (next.overscanBase > next.overscanMax) {
-    if (changed === 'overscanBase') next.overscanMax = next.overscanBase;
-    else next.overscanBase = next.overscanMax;
-  }
   return next;
 }
 

@@ -495,6 +495,20 @@ fn formulaCoordinate(n:f32,z2:f32,z:vec2<f32>)->f32 {
     if(u.formula==12u){return f32(u32(n)%2u)*0.5+u.colorOffset;}
     if(u.formula==13u){return abs(fract(smoothValue-u.colorOffset)*2.0-1.0)+u.colorOffset;}
     if(u.formula==14u){return n*0.61803398875*16.0/spacing+u.colorOffset;}
+    // Additional scalar mappings: stored escape count/magnitude only. These
+    // never depend on the iteration ceiling or require endpoint channels.
+    let q=max(smoothValue-u.colorOffset,0.0);
+    let phase=TAU*q;
+    if(u.formula==15u){return 2.0*log2(1.0+q)+.12*sin(phase)+u.colorOffset;}
+    if(u.formula==16u){return sqrt(q)*(1.0+.12*sin(phase))+u.colorOffset;}
+    if(u.formula==17u){let pulse=1.0-abs(2.0*fract(q)-1.0);return pulse*pulse*pulse+u.colorOffset;}
+    if(u.formula==18u){return .5-.5*cos(phase)+u.colorOffset;}
+    if(u.formula==19u){return (floor(q*4.0)+smoothstep(.2,.8,fract(q*4.0)))*.25+u.colorOffset;}
+    if(u.formula==20u){return q+.12*sin(phase)+.06*sin(phase*2.0)+u.colorOffset;}
+    if(u.formula==21u){return .5+.25*sin(phase)+.25*sin(phase*1.41421356)+u.colorOffset;}
+    if(u.formula==22u){return q+.15*sin(phase*sqrt(1.0+q))+u.colorOffset;}
+    if(u.formula==23u){let escapePhase=log2(max(.5*log(max(z2,1.000001))/log(ESCAPE_R),1e-20));return q+.35*sin(TAU*escapePhase)+u.colorOffset;}
+    if(u.formula==24u){return q+.25*sin(phase*.125)+u.colorOffset;}
     return smoothValue;
 }
 fn effectColour(p:f32,angle:f32,gradient:vec2<f32>)->vec3<f32>{
@@ -517,6 +531,28 @@ fn effectColour(p:f32,angle:f32,gradient:vec2<f32>)->vec3<f32>{
         col=col*(u.ambientLight+u.diffuseStrength*diffuse)+vec3<f32>(spec*u.specularStrength);
     }
     if(u.effect==10u){col=mix(col,vec3<f32>(.64,.73,.82),1.0-exp(-abs(p)*.08));}
+    // Palette/RGB-only effects. No neighbouring field, derivative, endpoint or
+    // orbit data is consumed; the normal palette/hue controls remain active.
+    if(u.effect>=11u){
+        let rgb=clamp(col,vec3<f32>(0.0),vec3<f32>(1.0));
+        let intensity=dot(rgb,vec3<f32>(.2126,.7152,.0722));
+        if(u.effect==11u){col=mix(palette(wrapCoordinate(u.colorOffset+.08)),palette(wrapCoordinate(u.colorOffset+.68)),intensity);}
+        if(u.effect==12u){
+            let low=palette(wrapCoordinate(u.colorOffset+.05));
+            let mid=palette(wrapCoordinate(u.colorOffset+.4));
+            let high=palette(wrapCoordinate(u.colorOffset+.75));
+            col=mix(mix(low,mid,min(intensity*2.0,1.0)),high,max(intensity*2.0-1.0,0.0));
+        }
+        if(u.effect==13u){let tint=mix(palette(wrapCoordinate(u.colorOffset+.15)),palette(wrapCoordinate(u.colorOffset+.65)),smoothstep(.2,.8,intensity));col=mix(rgb,rgb*.55+tint*.45,.7);}
+        if(u.effect==14u){col=vec3<f32>(smoothstep(0.0,1.0,rgb.r),sqrt(rgb.g),rgb.b*rgb.b);}
+        if(u.effect==15u){col=vec3<f32>(.5)-.5*cos(TAU*rgb);}
+        if(u.effect==16u){col=floor(rgb*5.0+vec3<f32>(.5))/5.0;}
+        if(u.effect==17u){col=mix(rgb,rgb.gbr,.5+.5*sin(phase*.5));}
+        if(u.effect==18u){let glow=pow(.5+.5*cos(phase*2.0),6.0);col=mix(rgb,vec3<f32>(1.0),.45*glow)+palette(wrapCoordinate(p+.25))*.15*glow;}
+        if(u.effect==19u){let shift=.18*sin(phase*.5);col=vec3<f32>(palette(wrapCoordinate(p+shift)).r,rgb.g,palette(wrapCoordinate(p-shift)).b);}
+        if(u.effect==20u){let sheen=pow(.5+.5*sin(phase),12.0);col=rgb*(.35+.65*(.5+.5*cos(phase)))+vec3<f32>(.65*sheen);}
+        col=clamp(col,vec3<f32>(0.0),vec3<f32>(1.0));
+    }
     return col;
 }
 fn cappedColour(z2:f32,z:vec2<f32>)->vec3<f32>{

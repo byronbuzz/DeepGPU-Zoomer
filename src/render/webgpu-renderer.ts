@@ -18,6 +18,8 @@ import wideSource from "./wide.wgsl?raw";
 import continuationSource from "./continuation.wgsl?raw";
 import { continuationEntry, continuationRegion, CONTINUATION_MAX_LANES, CONTINUATION_HEADER_BYTES, CONTINUATION_STATE_BYTES } from "./continuation";
 import reuseSource from "./reuse.wgsl?raw";
+import qualityResolveSource from "./quality-resolve.wgsl?raw";
+import { oversampledView } from "./quality";
 import antialiasSource from "./antialias.wgsl?raw";
 export const ANTIALIAS_SHADER=antialiasSource;
 import { boundedRetainedView, createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
@@ -60,7 +62,7 @@ class LiveMethodChanged extends Error {}
 
 /** A local export tile (including its clipped halo) within the full image. */
 export interface ExportDomain { width: number; height: number; x: number; y: number }
-type DomainView = FrameView & { exportDomain?: ExportDomain };
+type DomainView = FrameView & { exportDomain?: ExportDomain; stationaryOversampling?: boolean };
 
 export function renderDomain(view: Pick<RenderRequest, "width" | "height" | "exportDomain">): ExportDomain {
   return view.exportDomain ?? { width: view.width, height: view.height, x: 0, y: 0 };
@@ -106,6 +108,8 @@ export interface RenderRequest {
   height: number;
   /** Full-output geometry; width/height above remain local storage dimensions. */
   exportDomain?: ExportDomain;
+  /** Live quality target, enabled by the caller only while stationary. */
+  stationaryOversampling?: boolean;
   maxIterations: number;
   colors: ColorSettings;
   /** Enables standard linear BLA wherever the selected method supports it. */
@@ -648,6 +652,7 @@ fn vs(@builtin(vertex_index) i: u32) -> VsOut {
     return out;
 }
 
+${qualityResolveSource}
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let uv = in.uv * display.front.xy + in.uv.yx * display.cross.xy + display.front.zw;
@@ -656,8 +661,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var backValid = display.options.x > 0.0 && all(oldUV >= vec2<f32>(0.0)) && all(oldUV <= vec2<f32>(1.0));
     // Select an actual determined sample. Never blend the two images, and do
     // not let a smaller new field erase already calculated coverage.
-    let front = textureSample(src, smp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
-    let back = textureSample(coverage, smp, clamp(oldUV, vec2<f32>(0.0), vec2<f32>(1.0)));
+    var front = textureSample(src, smp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
+    if(display.fallbackCounts.x>0.0){front=qualityResolve(src,uv,display.fallbackCounts.x);}
+    var back = textureSample(coverage, smp, clamp(oldUV, vec2<f32>(0.0), vec2<f32>(1.0)));
+    if(display.fallbackCounts.y>0.0){back=qualityResolve(coverage,oldUV,display.fallbackCounts.y);}
     // Alpha 1/255 marks a held presentation colour, never a calculated sample.
     frontValid = frontValid && front.a > 1.5 / 255.0;
     backValid = backValid && back.a > 1.5 / 255.0;
@@ -668,7 +675,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var spacing=select(frontSpacing,backSpacing,useBack);
     var result = select(front, back, useBack);
     let freshUV = in.uv * display.fresh.xy + in.uv.yx * display.freshCross.xy + display.fresh.zw;
-    let fresh = textureSample(incoming, smp, clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0)));
+    var fresh = textureSample(incoming, smp, clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0)));
+    if(display.fallbackCounts.z>0.0){fresh=qualityResolve(incoming,freshUV,display.fallbackCounts.z);}
     let valid = display.freshOptions.x > 0.0 && fresh.a > 1.5 / 255.0 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
     let freshSpacing=display.units.z / max(fresh.a,0.00001);
     let prefer = (fresh.a > 0.99 && select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0) || freshSpacing < spacing;
@@ -782,6 +790,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private referenceDemandCompatible(demand: ReferenceDemand, request: RenderRequest): boolean {
+    if(request.stationaryOversampling)request=this.workRequest(request);
     const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
     if (method === Method.Direct) return false;
     const family = request.family ?? "mandelbrot";
@@ -1014,7 +1023,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private snapshotFrame(frame: NonNullable<WebGpuRenderer["lastFrame"]>) {
     const retained=boundedRetainedView(frame,this.ctx.device.limits.maxTextureDimension2D);
-    return {...frame,...retained,proxy:true,snapshotComplete:true,
+    return {...frame,...retained,stationaryOversampling:frame.stationaryOversampling&&this.sameView(frame,retained),proxy:true,snapshotComplete:true,
       coveredRegions:[{x:0,y:0,width:retained.width,height:retained.height,spacing:retained.unitsPerPixel}]};
   }
 
@@ -1138,6 +1147,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const frontFrame=source===this.history?this.lastFrame:source===this.antialiasTexture?this.antialiasFrame:
       source===this.target?this.incomingFrame??this.completedFrame:null;
     const transforms = new Float32Array(36);
+    transforms[32]=frontFrame?.stationaryOversampling?frontFrame.colors.gamma:0;
+    transforms[33]=secondaryFrame?.stationaryOversampling?secondaryFrame.colors.gamma:0;
+    transforms[34]=this.incomingFrame?.stationaryOversampling?this.incomingFrame.colors.gamma:0;
     transforms[35]=!destination&&this.screenHoldValid?1:0;
     transforms.set([xform.scaleX,xform.scaleY,xform.offsetX,xform.offsetY]);
     transforms.set([xform.crossX??0,xform.crossY??0],24);
@@ -1415,8 +1427,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private appearanceHoldActive(request:RenderRequest){
     const frame=this.appearanceHoldFrame;
-    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
     request=this.workRequest(request);
+    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
     const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     return this.historyValid&&frame===this.completedFrame&&appearanceUpgradeCompatible(frame,request,method,grid)&&
       !this.samePresentation(frame,request);
@@ -1617,6 +1629,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private async recolorRetainedRequest(request:RenderRequest):Promise<boolean>{
     if(this.deviceLost)return false;
     const visible=request;
+    if(request.stationaryOversampling)request=this.workRequest(request);
     const retained=this.incomingFrame??this.fieldView;
     if(retained&&retained.width>=request.width&&retained.height>=request.height&&
       retained.centerX.eq(request.centerX)&&retained.centerY.eq(request.centerY)&&
@@ -1654,6 +1667,55 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.lastPartialAt=performance.now();this.appearancePublications++;
     this.reproject(visible,true);
     return true;
+  }
+
+  /** Match and copy synchronously: subsequent navigation cannot alter an export snapshot. */
+  captureMatchingQuality(request:RenderRequest,width:number,height:number):Promise<{width:number;height:number;pixels:Uint8ClampedArray}>|null {
+    if(!request.colors.oversampling||request.exportDomain||this.disposed)return null;
+    const quality={...request,stationaryOversampling:true,workView:false};
+    if(!this.isComplete(quality)||!this.completedFrame?.stationaryOversampling||!this.target)return null;
+    const fullWidth=request.width*2,fullHeight=request.height*2;
+    const reduce=width===request.width&&height===request.height;
+    if(!reduce&&(width!==fullWidth||height!==fullHeight))return null;
+    const {device}=this.ctx;
+    const snapshot=device.createTexture({label:'quality-export-snapshot',size:{width:fullWidth,height:fullHeight},format:'rgba8unorm',
+      usage:GPUTextureUsage.COPY_DST|GPUTextureUsage.COPY_SRC|GPUTextureUsage.TEXTURE_BINDING});
+    const copy=device.createCommandEncoder({label:'snapshot-complete-quality'});
+    copy.copyTextureToTexture({texture:this.target},{texture:snapshot},{width:fullWidth,height:fullHeight});
+    device.queue.submit([copy.finish()]);
+    return this.trackOperation(async()=>{
+      let resolved:GPUTexture|undefined,staging:GPUBuffer|undefined,mapped=false;
+      try{
+        let source=snapshot;
+        if(reduce){
+          const module=await compileShader(device,qualityResolveSource+`
+struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32> };
+@vertex fn vertexMain(@builtin(vertex_index) i:u32)->Output {
+  let points=array<vec2<f32>,4>(vec2<f32>(-1,-1),vec2<f32>(1,-1),vec2<f32>(-1,1),vec2<f32>(1,1));
+  var o:Output;o.position=vec4<f32>(points[i],0,1);o.uv=vec2<f32>((points[i].x+1)*0.5,(1-points[i].y)*0.5);return o;
+}
+@group(0) @binding(0) var source:texture_2d<f32>;
+@fragment fn fragmentMain(i:Output)->@location(0) vec4<f32>{return qualityResolve(source,i.uv,${request.colors.gamma.toFixed(8)});}
+`,'quality-export-resolve');
+          const pipeline=await device.createRenderPipelineAsync({label:'quality-export-resolve',layout:'auto',
+            vertex:{module,entryPoint:'vertexMain'},fragment:{module,entryPoint:'fragmentMain',targets:[{format:'rgba8unorm'}]},primitive:{topology:'triangle-strip'}});
+          resolved=device.createTexture({label:'quality-export-output',size:{width,height},format:'rgba8unorm',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
+          const encoder=device.createCommandEncoder({label:'resolve-quality-export'});
+          const pass=encoder.beginRenderPass({colorAttachments:[{view:resolved.createView(),loadOp:'clear',storeOp:'store'}]});
+          pass.setPipeline(pipeline);pass.setBindGroup(0,device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:snapshot.createView()}]}));pass.draw(4);pass.end();
+          device.queue.submit([encoder.finish()]);source=resolved;
+        }
+        const bytesPerRow=Math.ceil(width*4/256)*256;
+        staging=device.createBuffer({size:bytesPerRow*height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+        const encoder=device.createCommandEncoder({label:'quality-export-readback'});
+        encoder.copyTextureToBuffer({texture:source},{buffer:staging,bytesPerRow,rowsPerImage:height},{width,height});device.queue.submit([encoder.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);mapped=true;
+        const raw=new Uint8Array(staging.getMappedRange()),pixels=new Uint8ClampedArray(width*height*4);
+        for(let y=0;y<height;y++)pixels.set(raw.subarray(y*bytesPerRow,y*bytesPerRow+width*4),y*width*4);
+        for(let i=3;i<pixels.length;i+=4)pixels[i]=255;
+        return {width,height,pixels};
+      }finally{if(mapped)staging!.unmap();staging?.destroy();resolved?.destroy();snapshot.destroy();}
+    });
   }
 
   /** Captures only the completed, current 8-bit presentation image. */
@@ -1762,7 +1824,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.coverageHistory?.destroy();this.coverageHistory=this.history;this.coverageFrame=this.lastFrame;
       }else this.history?.destroy();
       this.history=snapshot!;snapshot=undefined;this.historySize={width:retained.width,height:retained.height};
-      this.lastFrame={...retained,proxy:true,covered,coveredSpacing:covered?.spacing,
+      // encodeBlit already resolved any quality source in this composite.
+      this.lastFrame={...retained,stationaryOversampling:false,proxy:true,covered,coveredSpacing:covered?.spacing,
         coveredRegions:retainedCoverage.rectangles.map(r=>({...r,spacing:retained.unitsPerPixel.times(r.spacing??1)}))};this.historyValid=true;
       if(!keepIncoming)this.incomingFrame=null;
       return true;
@@ -1777,12 +1840,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   /** Camera drift may preserve useful preparation; a different numerical
    * method must not admit another old-mode region after an async boundary. */
   private requireLiveMethod(request:RenderRequest){
-    const live=request.followView?this.currentView:null;
+    const live=request.followView&&this.currentView?this.workRequest(this.currentView):null;
     if(!live)return;
     const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
     const next=live.forceMethod??methodForScale(live.unitsPerPixel,live.tuning);
     const wide=request.family==='julia'||method!==Method.Direct;
-    if(method!==next||request.family!==live.family||request.useApprox!==live.useApprox||
+    if(!!request.stationaryOversampling!==!!live.stationaryOversampling||method!==next||request.family!==live.family||request.useApprox!==live.useApprox||
       (request.family==='julia'&&(!request.juliaX?.eq(live.juliaX!)||!request.juliaY?.eq(live.juliaY!)))||
       limbsForScale(request.unitsPerPixel,wide?96:48)!==limbsForScale(live.unitsPerPixel,wide?96:48))
       throw new LiveMethodChanged();
@@ -1790,6 +1853,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   /** Expand only the numerical field; the visible camera and output stay fixed. */
   private workRequest(visible:RenderRequest):RenderRequest {
     if(visible.workView)return visible;
+    if(visible.stationaryOversampling&&!visible.exportDomain)return {...oversampledView(visible),colors:{...visible.colors,supersample:1,postAntialias:false},overscanPixels:undefined,workView:true};
     const requested=visible.followView&&visible.zoom!==undefined&&visible.zoom<0 ? visible.overscanPixels : undefined;
     if(!requested?.x&&!requested?.y)return {...visible,workView:true};
     const limits=this.ctx.device.limits;
@@ -1873,7 +1937,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     validateExportDomain(request);
     await this.pendingRetain;
     if(this.disposed)throw new Error("Renderer has been disposed.");
-    validateRenderSize(device.limits,request.width,request.height,needsEndpoints(request.colors)||request.colors.mode===1?16:8);
+    try{validateRenderSize(device.limits,request.width,request.height,needsEndpoints(request.colors)||request.colors.mode===1?16:8);}
+    catch(error){if(request.stationaryOversampling)throw new Error(`2x oversampling is unsupported at this viewport size: ${error instanceof Error?error.message:String(error)}`);throw error;}
     if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
     this.referencePreparing=false;this.finalizing=false;
     const epoch = this.publicationEpoch;
@@ -2132,7 +2197,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       family: request.family, juliaX: request.juliaX, juliaY: request.juliaY,
       centerX: request.centerX, centerY: request.centerY, angle:request.angle??0,
       unitsPerPixel: request.unitsPerPixel, width: request.width, height: request.height,
-      exportDomain: request.exportDomain,
+      exportDomain: request.exportDomain, stationaryOversampling:request.stationaryOversampling,
       colors, maxIterations: request.maxIterations,
       useApprox: request.useApprox===true,
       method, grid,

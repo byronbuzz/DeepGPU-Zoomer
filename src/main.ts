@@ -5,28 +5,33 @@ import { WebGpuRenderer, type RenderRequest, type RenderStats } from './render/w
 import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './logic/colorSettings';
 import { Camera, HOME, MAX_ITERATIONS, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
-import { setupPanels } from './panels';
+import { setupPanels, normalizePanelSettings } from './panels';
+import { DEFAULTS_STORAGE_KEY, readDefaults, saveDefaults, type SavedDefaults } from './defaults';
 import { setupPngExportPanel } from './export/panel';
 import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
 import { dynamicLimitForZoom } from './dynamic';
 import { setupRangeControls } from './range-controls';
-import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, HARD_PIXEL_BUDGETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
+import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
 const canvas=el<HTMLCanvasElement>('fractal');
 const camera=new Camera();
+const defaultsRead=readDefaults();
+let savedDefaults:SavedDefaults|null=defaultsRead.value;
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
-let tuning:TuningSettings=loadTuning();
+let tuning:TuningSettings=savedDefaults?.tuning??(defaultsRead.error?{...DEFAULT_TUNING}:loadTuning());
 const DYNAMIC_STORAGE_KEY='gpu-zoomer-dynamic-v1';
 let dynamicEnabled=true;
-try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
+if(savedDefaults)dynamicEnabled=savedDefaults.dynamicEnabled;
+else if(!defaultsRead.error)try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
 let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0;
 let provisionalNavigationCap=false;
 let capTarget=0,sliderEditing=false;
 let baseEditTimer:ReturnType<typeof setTimeout>|undefined,baseEditing=false;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
+let qualitySizeError=false;
 let stopped=false, refreshPending=false, refreshHolding=false, stoppedAppearancePending=false;
 let retainedRequest:RenderRequest|null=null;
 let stopSnapshotPending=false,retainedPartialCaptured=false;
@@ -93,24 +98,20 @@ function syncTuningLabels(){
   const count=modifiedTuningCount(tuning);
   setText(el('tuning-status'),count?`${count} tuning settings modified`:'Navigation defaults');
   const fields:[EditableTuningKey,string][]=[
-    ['batchTargetMs','batch-target'],['batchMultiplier','batch-multiplier'],['hardPixelBudget','hard-budget'],
-    ['overscanBase','overscan-base'],['overscanMax','overscan-max'],
+    ['batchTargetMs','batch-target'],['batchMultiplier','batch-multiplier'],
     ['dynamicDepthGain','depth-gain'],['dynamicCapGain','cap-gain'],
   ];
   for(const [key,id] of fields){
-    el<HTMLInputElement>(`tuning-${id}`).value=key==='hardPixelBudget'?String(HARD_PIXEL_BUDGETS.indexOf(tuning.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number])):String(tuning[key]);
+    el<HTMLInputElement>(`tuning-${id}`).value=String(tuning[key]);
     el(`tuning-${id}-modified`).hidden=tuning[key]===DEFAULT_TUNING[key];
   }
   setText(el('tuning-batch-target-value'),`${tuning.batchTargetMs} ms`);
   setText(el('tuning-batch-multiplier-value'),`${tuning.batchMultiplier}×`);
-  setText(el('tuning-hard-budget-value'),tuning.hardPixelBudget?`${tuning.hardPixelBudget.toLocaleString()} operations per slice`:'Off');
-  setText(el('tuning-overscan-base-value'),`${tuning.overscanBase} CSS px`);
-  setText(el('tuning-overscan-max-value'),`${tuning.overscanMax} CSS px`);
   setText(el('tuning-depth-gain-value'),`${tuning.dynamicDepthGain.toLocaleString()} iterations/decade`);
   setText(el('tuning-cap-gain-value'),`${tuning.dynamicCapGain.toLocaleString()} iterations/percentage point`);
 }
 function changeTuning(key:EditableTuningKey,value:number){
-  const next=normalizeTuning({...tuning,[key]:value},key);
+  const next=normalizeTuning({...tuning,[key]:value});
   if(EDITABLE_TUNING_KEYS.every(field=>next[field]===tuning[field]))return;
   tuning=next;
   if(key==='dynamicCapGain')capTarget=0;
@@ -161,13 +162,7 @@ function updateDynamicForZoom(time:number,zoomDirection:number){
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
-function syncZoomCursor(time=performance.now()){
-  const zoom=direction||keys.has('+')||keys.has('=')||keys.has('-')||
-    wheelDirection!==0&&time-lastInteraction<180;
-  canvas.classList.toggle('zooming',!!zoom&&!dragging&&!rotating&&!selecting&&
-    !rotationSliderHeld&&!(controlDown&&rotationKeys.size));
-}
-function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();heldKeyActions.clear();rotationKeys.clear();releasePointer();syncZoomCursor();}
+function stop(){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);direction=0;wheelDirection=0;dragging=false;rotating=false;rotationSliderHeld=false;controlDown=false;rotationPointerAngle=null;selecting=false;keys.clear();heldKeyActions.clear();rotationKeys.clear();releasePointer();}
 function cancelPreviewWork(){previewLifetime++;previewEpoch++;previewPending=false;previewEngine?.abort();el('julia-preview').setAttribute('aria-busy','false');}
 function captureStoppedPartial(){
   if(!stopSnapshotPending||!engine||!retainedRequest)return;
@@ -214,7 +209,7 @@ function syncControls(){
 function load(next:SavedView,record=true){
   dismissReplacement();
   clearTimeout(baseEditTimer);baseEditing=false;
-  const valid=validateView(next);stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;baseIterations=valid.iterations;colors=validateColors(valid.appearance??DEFAULT_COLORS);camera.load(valid);resetDynamicAnchor();generation++;
+  const valid=validateView(next);stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;baseIterations=valid.iterations;colors=validateColors(valid.appearance??savedDefaults?.appearance??DEFAULT_COLORS);camera.load(valid);resetDynamicAnchor();generation++;
   if(view.family==='julia')setPreview(false);
   resize();
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';refinementTime.demand(performance.now());preparing();message('');syncControls();
@@ -226,7 +221,7 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||rotating||rotationSliderHeld||controlDown&&rotationKeys.size>0||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;
+function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(qualitySizeError){error='';qualitySizeError=false;}if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;
   preparing(now);
 }
 function syncRotation(){el<HTMLInputElement>('rotation').value=String(camera.angle);el('rotation-value').textContent=`${Number(camera.angle.toFixed(1))}°`;}
@@ -323,7 +318,7 @@ function request():RenderRequest{
   const margin=zoom<0?overscanCssPx(speed,tuning.overscanBase,tuning.overscanMax):0;
   const overscanPixels={x:Math.floor(margin*width/Math.max(1,innerWidth)/2)*2,
     y:Math.floor(margin*height/Math.max(1,innerHeight)/2)*2};
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,tuning:{...tuning},isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:{...renderColors(colors),postAntialias:false,...(colors.oversampling&&!moving()?{supersample:1}:{})},stationaryOversampling:colors.oversampling===true&&!moving(),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,tuning:{...tuning},isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
@@ -337,7 +332,7 @@ async function compute(){
       }
       if(numericalWasPending)refinementTime.complete(performance.now());
     }
-  }catch(e){if(g===generation&&!(e instanceof DOMException && e.name==='AbortError')){error=String(e);message(error);}}
+  }catch(e){if(g===generation&&!(e instanceof DOMException && e.name==='AbortError')){error=String(e);qualitySizeError=error.includes('2x oversampling is unsupported');message(error);}}
   finally{busy=false;if(stopped){captureStoppedPartial();dirty=false;}else if(lastRevision!==camera.revision||g!==generation)dirty=true;}
 }
 async function recolorStopped(){
@@ -382,7 +377,6 @@ function tick(time:number){
       }
     }
   }
-  syncZoomCursor(time);
   requestAnimationFrame(tick);
 }
 canvas.addEventListener('contextmenu',e=>e.preventDefault());
@@ -390,7 +384,7 @@ canvas.addEventListener('pointerdown',e=>{if(e.button>2)return;canvas.focus();st
   if(e.ctrlKey&&e.button===0){e.preventDefault();rotating=true;controlDown=true;rotationPointerAngle=Math.hypot(e.clientX-innerWidth/2,e.clientY-innerHeight/2)>8?Math.atan2(e.clientY-innerHeight/2,e.clientX-innerWidth/2):null;return;}
   if(e.shiftKey||e.button===1){dragging=true;changed();return;}
   if(previewEnabled && view.family==='mandelbrot' && e.button===0){e.preventDefault();selecting=true;selectJuliaAtPointer();return;}
-  wheelDirection=0;direction=e.button===2?-1:1;changed();syncZoomCursor();});
+  wheelDirection=0;direction=e.button===2?-1:1;changed();});
 canvas.addEventListener('pointermove',e=>{if(rotating){if(!e.ctrlKey){finishRotation();return;}const dx=e.clientX-innerWidth/2,dy=e.clientY-innerHeight/2;
     if(Math.hypot(dx,dy)>8){const angle=Math.atan2(dy,dx);if(rotationPointerAngle!==null){const delta=angle-rotationPointerAngle;setRotation(camera.angle+Math.atan2(Math.sin(delta),Math.cos(delta))*180/Math.PI);}rotationPointerAngle=angle;}else rotationPointerAngle=null;
     pointer={x:e.clientX,y:e.clientY};return;}
@@ -398,12 +392,12 @@ canvas.addEventListener('pointermove',e=>{if(rotating){if(!e.ctrlKey){finishRota
 function endPointer(){if(selecting){stop();return;}stop();persist();}
 canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();persist();});
 canvas.addEventListener('lostpointercapture',()=>{if(activePointer!==null){activePointer=null;stop();persist();}});
-canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){const now=performance.now();refinementTime.wheelCameraChange(now);changed('wheel');updateDynamicForZoom(now,wheelDirection);syncZoomCursor(now);}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
+canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){const now=performance.now();refinementTime.wheelCameraChange(now);changed('wheel');updateDynamicForZoom(now,wheelDirection);}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
 canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();persist();return;}
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key)))return;
   if(e.ctrlKey||e.metaKey||e.altKey)return;
-  if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;const identity=keyIdentity(e);if(!heldKeyActions.has(identity)){heldKeyActions.set(identity,e.key);keys.add(e.key);}changed();syncZoomCursor();}});
-document.addEventListener('keyup',e=>{const identity=keyIdentity(e),action=heldKeyActions.get(identity);if(action===undefined)return;heldKeyActions.delete(identity);if(![...heldKeyActions.values()].includes(action))keys.delete(action);syncZoomCursor();if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();});
+  if(['+','=','-','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)){e.preventDefault();wheelDirection=0;const identity=keyIdentity(e);if(!heldKeyActions.has(identity)){heldKeyActions.set(identity,e.key);keys.add(e.key);}changed();}});
+document.addEventListener('keyup',e=>{const identity=keyIdentity(e),action=heldKeyActions.get(identity);if(action===undefined)return;heldKeyActions.delete(identity);if(![...heldKeyActions.values()].includes(action))keys.delete(action);if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();});
 canvas.addEventListener('blur',()=>{stop();persist();});
 document.addEventListener('keyup',e=>{if(e.key==='Control'&&(rotating||controlDown)){finishRotation();}
   if(rotationKeys.delete(e.key)){if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();}});
@@ -448,8 +442,6 @@ el<HTMLButtonElement>('iteration-dynamic').onclick=()=>{
 const tuningInputs:[EditableTuningKey,string,(value:number)=>number][]=[
   ['batchTargetMs','batch-target',Number],
   ['batchMultiplier','batch-multiplier',Number],
-  ['hardPixelBudget','hard-budget',value=>HARD_PIXEL_BUDGETS[value]??0],
-  ['overscanBase','overscan-base',Number],['overscanMax','overscan-max',Number],
   ['dynamicDepthGain','depth-gain',Number],['dynamicCapGain','cap-gain',Number],
 ];
 for(const [key,id,parse] of tuningInputs){
@@ -522,15 +514,16 @@ el('replace-cancel').onclick=()=>{dismissReplacement();el<HTMLButtonElement>('sa
 el('replace-confirm').onclick=()=>{if(!pendingReplacement)return;const {name,index,view:nextView}=pendingReplacement;storeLocation(name,index,nextView);el<HTMLButtonElement>('save').focus();};
 el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
 el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
-const panelController=setupPanels();
+const panelController=setupPanels(savedDefaults?.panels??(defaultsRead.error?normalizePanelSettings(null):undefined));
 const paletteController=setupPaletteEditor(()=>colors,c=>{
   const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));
   const completedBefore=currentFieldComplete()||preparingColourData;
   colors=c;
+  if(previous.oversampling!==c.oversampling&&qualitySizeError){error='';qualitySizeError=false;}
   if(changed){
     const missingData=previous.mode!==c.mode||needsEndpoints(c)&&!engine?.endpointChannelsRequired();
-    const numericalChange=missingData||previous.supersample!==c.supersample;
-    if(stopped&&previous.supersample===c.supersample){
+    const numericalChange=missingData||previous.supersample!==c.supersample||previous.oversampling!==c.oversampling;
+    if(stopped&&previous.supersample===c.supersample&&previous.oversampling===c.oversampling){
       generation++;engine?.abort();preparingColourData=false;dirty=false;
       stoppedAppearancePending=true;
     }else{
@@ -538,7 +531,7 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
       if(numericalChange){
         const wasPreparing=preparingColourData,previousTarget=colourDataTarget,currentTarget=engine?.debugProgress().targets??0;
         const resized=resize(false);
-        preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample;
+        preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample&&previous.oversampling===c.oversampling;
         if(preparingColourData)colourDataTarget=wasPreparing&&previous.mode===c.mode?previousTarget:currentTarget;
         if(!preparingColourData)completedQuality=0;
         generation++;engine?.abort();preparing();
@@ -550,6 +543,14 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
 });
 syncAppearance=paletteController.sync;
 setupRangeControls();
+el('save-defaults').onclick=()=>{
+  if(baseEditing){const raw=baseInput.value.trim();if(!/^\d+$/.test(raw)){message('Base iterations must be a positive whole number.');return;}if(!setManualBase(Number(raw)))return;}
+  const next:SavedDefaults={appearance:validateColors(colors),tuning:{...tuning},speed,baseIterations,dynamicEnabled,
+    profilingEnabled,randomStyle:el<HTMLSelectElement>('random-style').value==='unrestricted'?'unrestricted':'harmonious',panels:panelController.snapshot()};
+  const result=saveDefaults(next);
+  if(result.error){message(result.error);return;}
+  savedDefaults=next;message('Defaults saved. Camera position and saved locations were kept separate.',true);
+};
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(baseEditTimer);baseEditing=false;clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
@@ -558,17 +559,22 @@ el('full-reset').onclick=()=>{
   profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
   tuning={...DEFAULT_TUNING};saveTuning(tuning);syncTuningLabels();
   dynamicEnabled=true;try{localStorage.setItem(DYNAMIC_STORAGE_KEY,'on');}catch{}
-  try{localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{}
+  savedDefaults=null;
+  let resetStorageFailed=false;
+  try{localStorage.removeItem(DEFAULTS_STORAGE_KEY);localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{resetStorageFailed=true;}
   history.replaceState(null,'',location.pathname+location.search);el('linked-location').hidden=true;
-  pngExportPanel.reset();panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message('Defaults restored. Saved locations were kept.',true);
+  pngExportPanel.reset();panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message(resetStorageFailed?'Factory settings restored for this session, but stored defaults could not be cleared.':'Defaults restored. Saved locations were kept.',!resetStorageFailed);
 };
-const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,viewport:()=>({width:canvas.width,height:canvas.height})});
+const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,viewport:()=>({width:canvas.width,height:canvas.height}),captureQuality:(snapshot,width,height)=>engine?.captureMatchingQuality(snapshot,width,height)??null});
 export const ready=(async()=>{
   try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}
-  let rememberedAppearance=DEFAULT_COLORS;try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
+  let rememberedAppearance=savedDefaults?.appearance??DEFAULT_COLORS;
+  if(!savedDefaults&&!defaultsRead.error)try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
+  if(savedDefaults){speed=savedDefaults.speed;profilingEnabled=savedDefaults.profilingEnabled;el<HTMLSelectElement>('random-style').value=savedDefaults.randomStyle;}
+  el<HTMLInputElement>('speed').value=String(speed);el('speed-value').textContent=speed.toFixed(1)+'×';el<HTMLInputElement>('profiling').checked=profilingEnabled;
   let linkedError=false;if(location.hash){try{linkedView=decodeView(location.hash.slice(1));}catch{linkedError=true;}}
-  load({...HOME,appearance:validateColors(rememberedAppearance)},false);
-  el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');
+  load({...HOME,iterations:savedDefaults?.baseIterations??HOME.iterations,appearance:validateColors(rememberedAppearance)},false);
+  el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');else if(defaultsRead.error)message(defaultsRead.error);
   resize();requestAnimationFrame(tick);
   try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerEngine?:WebGpuRenderer}).__gpuZoomerEngine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
   catch(e){error=String(e);message(error);throw e;}
