@@ -2230,7 +2230,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
         batchStarted=performance.now();
         const encoder = device.createCommandEncoder({ label: "calculate-region" });
-        const sample = this.timing.begin("calculate");
+        // Ordinary admission uses the donor wall estimate; query only for opt-in profiling.
+        const sample = this.timing.enabled ? this.timing.begin("calculate") : undefined;
         const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
         pass.setPipeline(calculatePipeline);
         pass.setBindGroup(0, bind);
