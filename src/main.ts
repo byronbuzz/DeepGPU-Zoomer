@@ -21,6 +21,7 @@ const DYNAMIC_STORAGE_KEY='gpu-zoomer-dynamic-v1';
 let dynamicEnabled=true;
 try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
 let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0,lastDynamicDecisionRevision=-1;
+let provisionalNavigationCap=false;
 let capTarget=0,capRevision=-1,sliderEditing=false;
 let deferredDynamicDecrease:number|null=null;
 let baseEditTimer:ReturnType<typeof setTimeout>|undefined,baseEditing=false;
@@ -123,13 +124,13 @@ function currentDepth(){
 }
 function resetDynamicAnchor(){
   anchorDepth=currentDepth();capTarget=0;capRevision=camera.revision;lastDynamicUpdate=0;
-  lastDynamicDecisionRevision=camera.revision;deferredDynamicDecrease=null;
+  lastDynamicDecisionRevision=camera.revision;deferredDynamicDecrease=null;provisionalNavigationCap=false;
 }
 function changeEffectiveLimit(limit:number,atBatchBoundary=false){
   const next=Math.max(1,Math.min(MAX_ITERATIONS,Math.round(limit)));
   if(next===view.iterations)return;
   view={...view,iterations:next};
-  if(!atBatchBoundary){generation++;engine?.abort();}
+  if(!atBatchBoundary){provisionalNavigationCap=false;generation++;engine?.abort();}
   dirty=true;completedQuality=0;lastRevision=-1;stats=undefined;
   refinementTime.demand(performance.now());syncIterationLabel();syncTuningLabels();preparing();
 }
@@ -151,7 +152,8 @@ function maybeUpdateDynamicLimit(time:number){
   if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing||time-lastDynamicUpdate<500)return;
   // During navigation, a changed camera is already a new numerical target.
   // Otherwise wait for a settled exact field before upgrading in place.
-  if(camera.revision===lastDynamicDecisionRevision&&(busy||!currentFieldComplete()))return;
+  const navigationChange=camera.revision!==lastDynamicDecisionRevision;
+  if(!navigationChange&&(busy||!currentFieldComplete()))return;
   // A new reference demand is allowed to finish; the live view is then picked
   // up by the renderer's existing bounded retarget after a numerical batch.
   const progress=engine?.debugProgress();
@@ -164,6 +166,7 @@ function maybeUpdateDynamicLimit(time:number){
   if(difference<0){deferredDynamicDecrease=desired;lastDynamicUpdate=time;lastDynamicDecisionRevision=camera.revision;return;}
   deferredDynamicDecrease=null;
   const step=Math.max(128,Math.ceil(view.iterations*.15));
+  if(navigationChange&&(busy||!currentFieldComplete()))provisionalNavigationCap=true;
   lastDynamicUpdate=time;lastDynamicDecisionRevision=camera.revision;
   changeEffectiveLimit(Math.abs(difference)<=step?desired:view.iterations+Math.sign(difference)*step,true);
 }
@@ -331,7 +334,7 @@ function request():RenderRequest{
   const margin=zoom<0?overscanCssPx(speed,tuning.overscanBase,tuning.overscanMax):0;
   const overscanPixels={x:Math.floor(margin*width/Math.max(1,innerWidth)/2)*2,
     y:Math.floor(margin*height/Math.max(1,innerHeight)/2)*2};
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,tuning:{...tuning},isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,tuning:{...tuning},isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
@@ -339,6 +342,7 @@ async function compute(){
     const result=await engine.render(request());
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;stats=result;if(result.computed)fields++;else recolours++;
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
+      provisionalNavigationCap=false;
       if(dynamicEnabled&&result.computed&&(result.computedSamples>0||result.capUpgrade)){
         if(capRevision!==camera.revision){capRevision=camera.revision;capTarget=0;}
         capTarget=baseIterations+tuning.dynamicCapGain*Math.max(0,result.limitHitRatio*100-.5);

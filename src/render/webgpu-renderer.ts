@@ -94,6 +94,8 @@ export interface RenderRequest {
   overscanPixels?: {x:number;y:number};
   /** Reserve a geometric reference tier while Dynamic can raise the pixel limit. */
   dynamicIterations?: boolean;
+  /** Presentation only: keep prior-cap imagery during an automatic navigation upgrade. */
+  provisionalNavigationCap?: boolean;
   /** Internal numerical view, already expanded from the visible camera. */
   workView?: boolean;
 }
@@ -1086,7 +1088,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       transforms[9] = !front.proxy && !exactStationary && secondaryFrame!.unitsPerPixel.lt(front.unitsPerPixel) ? 1 : 0;
     }
     const fresh = this.incomingFrame, view = this.currentView;
-    if (fresh && view && this.target && this.samePresentation(fresh,view)) {
+    if (fresh && view && this.target && this.presentationCompatible(fresh,view)) {
       const m = reprojectionFor(fresh, view)??reprojectionFor(fresh,view,true,true);
       if (m) {
         transforms.set([m.scaleX, m.scaleY, m.offsetX, m.offsetY], 12);
@@ -1338,14 +1340,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       !this.samePresentation({...frame,maxIterations:request.maxIterations},work))return null;
     return frame;
   }
-  /** An old cap is display-compatible only while its exact field is upgrading. */
+  /** Prior-cap imagery remains display-only while an automatic cap catches up. */
   private presentationCompatible(frame:WebGpuRenderer["lastFrame"],request:RenderRequest):frame is NonNullable<WebGpuRenderer["lastFrame"]>{
     const held=this.completedFrame;
     const base=this.capUpgradeBase(request)??
       (request.dynamicIterations&&held&&this.capPresentationTarget===request.maxIterations&&
         request.maxIterations>held.maxIterations&&
         this.samePresentation({...held,maxIterations:request.maxIterations},request)?held:null);
-    return !!(base&&frame&&frame.maxIterations===base.maxIterations&&
+    return !!(request.dynamicIterations&&request.followView&&request.provisionalNavigationCap&&frame&&
+      frame.maxIterations<request.maxIterations&&
+      this.samePresentation({...frame,maxIterations:request.maxIterations},request)) ||
+      !!(base&&frame&&frame.maxIterations===base.maxIterations&&
       this.samePresentation({...frame,maxIterations:request.maxIterations},request)) ||
       this.samePresentation(frame,request);
   }
@@ -1588,7 +1593,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!frame || !this.target || !this.partialRegions) return false;
     // Coalesce while device validation is pending; never build a snapshot queue.
     if (this.pendingRetain) return false;
-    if (this.currentView && !this.samePresentation(frame,this.currentView)) {
+    if (this.currentView && !this.presentationCompatible(frame,this.currentView)) {
       this.incomingFrame=null;this.partialRegions=0;this.determined=new CoverageRegions();
       this.determinedRegion=null;this.determinedSpacing=undefined;
       return false;
@@ -1620,7 +1625,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       }finally{this.currentView=live;}
     }).then(()=>{
       if(this.deviceLost||epoch!==this.publicationEpoch||this.incomingFrame!==frame||this.history!==history)return false;
-      if(this.currentView&&!this.samePresentation(frame,this.currentView)&&
+      if(this.currentView&&!this.presentationCompatible(frame,this.currentView)&&
         !(allowStaleAppearance&&this.stalePresentationCompatible(frame,this.currentView)))return false;
       if(this.historyValid&&this.lastFrame?.snapshotComplete){
         this.coverageHistory?.destroy();this.coverageHistory=this.history;this.coverageFrame=this.lastFrame;
