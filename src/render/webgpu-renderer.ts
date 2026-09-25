@@ -392,6 +392,8 @@ export class WebGpuRenderer {
   private reuseMapping: SampleGridRemap | null = null;
   private reusableView: FrameView | null = null;
   private reusableComplete = false;
+  private batchMsPerSample = 0;
+  private ordinaryBatchCostKey = "";
   private readonly batchFeedback = new BatchFeedback();
   private batchCostKey = "";
   private batchFeedbackCap = 0;
@@ -1173,7 +1175,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    * advisory: a frame that has already finished simply ignores it.
    */
   abort() {
-    this.batchFeedback.enterTarget(true);this.batchCostKey="";
+    if(this.batchCostKey)this.batchFeedback.enterTarget(true);
+    this.batchCostKey="";
     this.abortRequested = true;
     this.cancelPendingReference("Reference generation aborted");
   }
@@ -1737,7 +1740,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         if(!(error instanceof DOMException&&error.name==='AbortError')){this.fieldKey='';this.fieldComplete=false;}
         if(!(error instanceof DOMException&&error.name==='AbortError')){this.incomingFrame=null;this.sampleKey='';this.admittedSamples=null;this.fieldView=null;this.aborted=true;this.exactCompletedSamples=0;}
         throw error;
-      }finally{this.batchFeedback.enterTarget();}
+      }finally{if(this.batchCostKey)this.batchFeedback.enterTarget();}
       // Counter readback also yields. Demand arriving during that last fence
       // must be serviced before reporting the stream complete.
       if (request.followView && result.completed && this.currentView && !this.isComplete(this.currentView)) this.retarget=true;
@@ -1749,7 +1752,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private async renderTarget(request: RenderRequest): Promise<RenderStats> {
-    this.batchFeedback.enterTarget();
+    if((request.tuning??DEFAULT_TUNING).hardPixelBudget>0)this.batchFeedback.enterTarget();
+    else if(this.batchCostKey){this.batchFeedback.enterTarget(true);this.batchCostKey="";}
 
     const { device } = this.ctx;
     const tuning=request.tuning??DEFAULT_TUNING;
@@ -2035,10 +2039,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       collectTimings();
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
+    const ordinaryCostKey=[family,method,request.maxIterations,limbs,colors.mode,grid].join("|");
+    if(this.ordinaryBatchCostKey!==ordinaryCostKey){
+      this.ordinaryBatchCostKey=ordinaryCostKey;this.batchMsPerSample=0;
+    }
     const freshWork=!this.reuseMapping&&!capUpgrade;
     const feedbackPolicy=[family,method,pipelineKind,limbs,colors.mode,grid,
       this.retainEndpoints,request.useApprox===true,freshWork].join("|");
     const syncFeedbackPolicy=(hardBudget:number)=>{
+      if(hardBudget<=0){
+        if(this.batchCostKey){this.batchFeedback.enterTarget(true);this.batchCostKey="";}
+        return;
+      }
       const key=feedbackPolicy+"|"+hardBudget;
       const explicitCapChange=this.batchFeedbackCap!==request.maxIterations&&
         !(request.dynamicIterations&&request.followView&&request.provisionalNavigationCap);
@@ -2075,18 +2087,20 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let scratch:GPUBuffer|undefined,scratchBind:GPUBindGroup|undefined,scratchCapacity=0;
     let continuationReadback:GPUBuffer|undefined;
     const continuationOrbit=this.orbitBuffer;
-    // Reused-anchor feedback has a separate policy and cannot train fresh work.
+    // The 5217 ordinary wall estimator is independent of continuation feedback.
     try { while (this.pending.size) {
       this.requireLiveMethod(request);
       const batchTuning=this.currentView?.tuning??tuning;
       syncFeedbackPolicy(batchTuning.hardPixelBudget);
       const minimum=startingBatchVisits(request.maxIterations,batchTuning.batchMultiplier);
-      const costly=continuationSupported && batchTuning.hardPixelBudget>0 && this.batchFeedback.msPerVisit>0 &&
-        this.batchFeedback.msPerVisit*minimum>batchTuning.batchTargetMs;
-      const total=request.width*request.height;
-      const budget=this.batchFeedback.budget(minimum,batchTuning.batchTargetMs,freshWork?total:Math.min(total,minimum));
-      // Bound the selected area before take(); its queue splits larger regions.
-      const spatialBudget=costly?Math.min(budget,CONTINUATION_MAX_LANES):budget;
+      const ordinaryBudget=this.batchMsPerSample>0
+        ? Math.max(minimum,batchTuning.batchTargetMs/this.batchMsPerSample) : minimum;
+      const costly=continuationSupported && batchTuning.hardPixelBudget>0 && this.batchMsPerSample>0 &&
+        this.batchMsPerSample*minimum>batchTuning.batchTargetMs;
+      // Only the continuation route consults its separate, bounded feedback.
+      const continuedBudget=costly?this.batchFeedback.budget(minimum,batchTuning.batchTargetMs,
+        freshWork?request.width*request.height:Math.min(request.width*request.height,minimum)):ordinaryBudget;
+      const spatialBudget=costly?Math.min(continuedBudget,CONTINUATION_MAX_LANES):ordinaryBudget;
       const region = this.pending.take(spatialBudget,this.regionDemand(request),request.tileRows,{
         pointer:batchTuning.pointerWeight,distributed:batchTuning.distributedWeight,
         oldest:batchTuning.oldestWeight,pointerRadius:batchTuning.pointerRadius});
@@ -2102,7 +2116,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const visits=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride);
       const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
       // Only a naturally selected costly region may use the separate shader.
-      // Region selection remains bounded by the local admission feedback.
+      // Off and unsupported continuation retain the ordinary donor allowance.
       let shape=costly &&
         visits<=CONTINUATION_MAX_LANES && CONTINUATION_HEADER_BYTES+visits*CONTINUATION_STATE_BYTES<=limit
         ? continuationRegion(width,rows,region.stride,limit) : null;
@@ -2122,12 +2136,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         continuationReadback=device.createBuffer({label:'continuation-counter-readback',size:56,
           usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
       }
-      const measurement=this.batchFeedback.submit(visits,region.stride,batchTuning.batchTargetMs);
-      const learnBatch=(ms:number,kind:'gpu'|'fallback')=>{
-        this.batchFeedback.observe(measurement,ms,kind);
-      };
-      let batchStarted=0,timingUnavailable=false,timingInvalid=false,fallbackApplied=false,baselineWallMs=0;
+      let batchStarted=0;
       if(shape){
+        const measurement=this.batchFeedback.submit(visits,region.stride,batchTuning.batchTargetMs);
+        const learnBatch=(ms:number,kind:'gpu'|'fallback')=>{
+          this.batchFeedback.observe(measurement,ms,kind);
+        };
         const regionStarted=performance.now();
         let sliceExpected=0,sliceReported=0,sliceGpuMs=0,sliceUnavailable=false,slicesFinished=false,costApplied=false,regionWallMs=0;
         const learnRegion=()=>{
@@ -2217,7 +2231,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         batchStarted=performance.now();
         const encoder = device.createCommandEncoder({ label: "calculate-region" });
         const sample = this.timing.begin("calculate");
-        timingUnavailable=!sample;
         const pass = encoder.beginComputePass({ label: "calculate-region", timestampWrites: this.timing.writes(sample) });
         pass.setPipeline(calculatePipeline);
         pass.setBindGroup(0, bind);
@@ -2226,14 +2239,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         if (progressive) shade(encoder, width, rows);
         device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
         submittedVisits+=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride)*grid*grid;
-        if(sample){
-          this.timing.collect(sample,ms=>{
-            learnBatch(ms,'gpu');
-          },()=>{
-            timingInvalid=true;
-            if(baselineWallMs>0&&!fallbackApplied){fallbackApplied=true;learnBatch(baselineWallMs,'fallback');}
-          });
-        }
+        this.timing.collect(sample);
         collectTimings();
         if (progressive && request.isCurrent!()) {
           this.incomingFrame = frame; this.partialSerial++; this.partialRegions++;
@@ -2251,11 +2257,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       }
       if(region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
       if(!shape){
-        const elapsed = performance.now() - batchStarted;
-        baselineWallMs=elapsed;
-        // Queue fences include unrelated work; use this only as a conservative
-        // fallback when timestamp queries are unavailable.
-        if((timingUnavailable||timingInvalid)&&!fallbackApplied){fallbackApplied=true;learnBatch(elapsed,'fallback');}
+        const elapsed=performance.now()-batchStarted;
+        const cost=elapsed/visits;
+        this.batchMsPerSample=this.batchMsPerSample
+          ? .75*this.batchMsPerSample+.25*cost : cost;
       }
       await yieldToEvents();
       if (!request.isCurrent!() || this.abortRequested) {
