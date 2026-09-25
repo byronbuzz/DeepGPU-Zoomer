@@ -19,8 +19,8 @@ export interface TuningSettings {
 }
 
 export const DEFAULT_TUNING: Readonly<TuningSettings> = Object.freeze({
-  batchMultiplier: 4, hardPixelBudget: 256,
-  overscanBase: 0, overscanMax: 0,
+  batchMultiplier: 4, hardPixelBudget: 0,
+  overscanBase: 64, overscanMax: 128,
   dynamicDepthGain: 1000, dynamicCapGain: 0,
   directExponent: 14.75, hdrExponent: 25, batchTargetMs: 8,
   pointerWeight: 8, distributedWeight: 4, oldestWeight: 4,
@@ -52,8 +52,8 @@ export function normalizeTuning(value: unknown, changed?: EditableTuningKey): Tu
     batchTargetMs: stepped(input.batchTargetMs, 8, 2, 16, 1),
     batchMultiplier: stepped(input.batchMultiplier, 4, 1, 16, 1),
     hardPixelBudget: hardBudget(input.hardPixelBudget),
-    overscanBase: stepped(input.overscanBase, 0, 0, 128, 1),
-    overscanMax: stepped(input.overscanMax, 0, 0, 256, 1),
+    overscanBase: stepped(input.overscanBase, DEFAULT_TUNING.overscanBase, 0, 128, 1),
+    overscanMax: stepped(input.overscanMax, DEFAULT_TUNING.overscanMax, 0, 256, 1),
     dynamicDepthGain: stepped(input.dynamicDepthGain, 1000, 0, 3000, 50),
     dynamicCapGain: stepped(input.dynamicCapGain, 0, 0, 3000, 50),
   };
@@ -94,14 +94,9 @@ export function loadTuning(storage?: Pick<Storage, 'getItem'>): TuningSettings {
     if (!parsed || typeof parsed !== 'object' || (parsed as {version?: unknown}).version !== 2) return { ...DEFAULT_TUNING };
     const old = (parsed as {settings?: unknown}).settings;
     const settings = old && typeof old === 'object' ? old as Partial<TuningSettings> : {};
-    // Old factory values should adopt the new starting defaults; explicit deviations survive.
-    return normalizeTuning({
-      ...settings,
-      overscanBase: settings.overscanBase === 64 ? 0 : settings.overscanBase,
-      overscanMax: settings.overscanMax === 192 ? 0 : settings.overscanMax,
-      dynamicDepthGain: settings.dynamicDepthGain === 2000 ? 1000 : settings.dynamicDepthGain,
-      dynamicCapGain: settings.dynamicCapGain === 1000 ? 0 : settings.dynamicCapGain,
-    });
+    // Saved values have no factory/explicit provenance. Preserve every supported
+    // choice; only absent/invalid fields adopt current defaults.
+    return normalizeTuning(settings);
   } catch { return { ...DEFAULT_TUNING }; }
 }
 

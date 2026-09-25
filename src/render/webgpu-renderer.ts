@@ -48,12 +48,15 @@ const IDENTITY_XFORM = new Float32Array([1, 1, 0, 0]);
 import { hexToRgb, MAX_STOPS, stopPositions, needsEndpoints, type ColorSettings } from "../logic/colorSettings";
 import { BASE_STEP, ENTRY_FLOATS, buildBlaAsync } from "./bla";
 import { DEFAULT_TUNING, startingBatchVisits, type TuningSettings } from "../tuning";
+import { upwardCapRemap, type AdmittedSamples } from './cap-reuse';
+import { BatchFeedback } from './batch-feedback';
 
 /** Precision profiles, chosen from the zoom depth. */
 const LIMB_PROFILES = [8, 16, 32, 64, 128, 256] as const;
 // 64K expensive samples measured >120ms; 16K preserved presentation cadence.
 // Grow cheap batches from measured cost, without changing policy on release.
 const MIN_BATCH_SAMPLES = 16_384;
+class LiveMethodChanged extends Error {}
 
 export interface RenderRequest {
   centerX: Decimal;
@@ -88,6 +91,8 @@ export interface RenderRequest {
   betweenBatches?: () => Promise<void>;
   /** Preview callers publish only complete images and matching metadata. */
   publishPartial?: boolean;
+  /** The app animation loop presents published regions; other callers present immediately. */
+  presentationOwner?: 'animation';
   focus?: { x: number; y: number };
   zoom?: number;
   /** Requested symmetric numerical padding in backing pixels; presentation stays visible-sized. */
@@ -387,7 +392,7 @@ export class WebGpuRenderer {
   private reuseMapping: SampleGridRemap | null = null;
   private reusableView: FrameView | null = null;
   private reusableComplete = false;
-  private batchMsPerSample = 0;
+  private readonly batchFeedback = new BatchFeedback();
   private batchCostKey = "";
   private retainedAnchor: SampleGridAnchor | null = null;
   private pending = new PendingRegions();
@@ -441,6 +446,7 @@ export class WebGpuRenderer {
   private spareCapacity = 0;
   private fieldView: FrameView | null = null;
   private sampleKey = "";
+  private admittedSamples: AdmittedSamples | null = null;
   private reusePipeline: GPUComputePipeline | null = null;
   private reuseUniform: GPUBuffer | null = null;
   private cachedStats: RenderStats | null = null;
@@ -831,6 +837,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const { device } = this.ctx;
     const tuning=request.tuning??DEFAULT_TUNING;
     const started = performance.now();
+    this.requireLiveMethod(request);
 
     const maxDelta = approximationDeltaBound(request.family ?? "mandelbrot", request, this.refX, this.refY);
 
@@ -841,8 +848,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const table = await buildBlaAsync(samples, this.refLength, maxDelta, async()=>{
       await yieldToEvents();
       if(this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException("Superseded table","AbortError");
+      this.requireLiveMethod(request);
     }, { sampleWords: 20, epsilonLog2: request.family === "julia" ? -40 : undefined },
       tuning.blaChunkMs>0 ? () => this.isInteracting(request) ? tuning.blaChunkMs : 0 : undefined);
+    this.requireLiveMethod(request);
     if(table.data.byteLength>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('The approximation table exceeds this GPU’s buffer capacity.');
     this.tableMaxDelta = maxDelta;
 
@@ -903,10 +912,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    * Retain one useful completed source while preparing the incoming image.
    * Neither source changes geometry without its corresponding pixel copy.
    */
-  private commitHistory(request: RenderRequest,candidate:GPUTexture) {
+  private commitHistory(request: NonNullable<WebGpuRenderer["lastFrame"]>,candidate:GPUTexture) {
     const { width, height } = request;
-    const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request);
-    const view = this.currentView ?? request;
+    const live=this.currentView,view=live??request;
+    const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request)||
+      !!(live?.dynamicIterations&&live.followView&&live.provisionalNavigationCap&&
+        this.presentationCompatible(request,live)&&this.presentationCompatible(frame,live));
     const bounds = (frame: FrameView) => {
       if((frame.angle??0)!==(view.angle??0))return [0,0,0,0];
       const m = reprojectionFor(frame, view);
@@ -922,7 +933,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const detail = Math.max(0, Math.log2(request.unitsPerPixel.div(frame.unitsPerPixel).toNumber()));
       return (area-overlap)*1000 + area + area*Math.min(8,detail)*.1 + (area ? Math.min(64,extent)*.0001 : 0);
     };
-    const keepFront = this.historyValid && this.lastFrame?.snapshotComplete && compatible(this.lastFrame) &&
+    const priorCap=!!(this.lastFrame&&this.lastFrame.maxIterations!==request.maxIterations&&compatible(this.lastFrame));
+    const keepFront = this.historyValid && (this.lastFrame?.snapshotComplete||priorCap) && compatible(this.lastFrame) &&
       (!compatible(this.coverageFrame) || score(this.lastFrame!) > score(this.coverageFrame!));
     let available: GPUTexture | null;
     if (keepFront) {
@@ -984,10 +996,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     throw Error('The sample field exceeds this GPU’s buffer capacity. Reduce the viewport.');
   }
 
-  private moveField(request: RenderRequest, samples: number, key: string, reuse: boolean, grid = 1): boolean {
+  private moveField(request: RenderRequest, samples: number, key: string, reuse: boolean, grid = 1, capMapping: SampleGridRemap | null = null): boolean {
     const previous = this.fieldBuffer, previousCapacity = this.fieldCapacity;
-    const mapping = reuse && previous && this.fieldView && this.sampleKey === key
-      ? sampleGridRemap(this.fieldView, request) : null;
+    const mapping = capMapping ?? (reuse && previous && this.fieldView && this.sampleKey === key
+      ? sampleGridRemap(this.fieldView, request) : null);
     this.reuseMapping = mapping; this.reusableView = this.fieldView; this.reusableComplete = this.fieldComplete;
     this.fieldComplete = false;
     if (!this.spareField || this.spareCapacity < samples) {
@@ -1160,6 +1172,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    * advisory: a frame that has already finished simply ignores it.
    */
   abort() {
+    this.batchFeedback.enterTarget(true);this.batchCostKey="";
     this.abortRequested = true;
     this.cancelPendingReference("Reference generation aborted");
   }
@@ -1177,7 +1190,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.publicationEpoch++;
     this.lastPresentedKey='';
     this.currentImageValid=false;
-    this.cachedRequest='';this.cachedStats=null;this.fieldKey='';this.sampleKey='';
+    this.cachedRequest='';this.cachedStats=null;this.fieldKey='';this.sampleKey='';this.admittedSamples=null;
     this.fieldComplete=false;this.fieldDescriptor=null;this.fieldUniforms=null;this.fieldStats=null;
     this.partialAppearanceUniforms=null;this.incomingFrame=null;this.appearanceHoldFrame=null;
     this.pending.reset(0,0);this.partialRegions=0;this.determined=new CoverageRegions();
@@ -1254,7 +1267,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.incomingFrame=null; this.appearanceHoldFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
-    this.retainedAnchor=null; this.fieldView=null; this.sampleKey=""; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
+    this.retainedAnchor=null; this.fieldView=null; this.sampleKey="";this.admittedSamples=null; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
     this.capPresentationTarget=null;
     this.fieldStats=null;this.fieldDescriptor=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
     this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
@@ -1348,7 +1361,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         request.maxIterations>held.maxIterations&&
         this.samePresentation({...held,maxIterations:request.maxIterations},request)?held:null);
     return !!(request.dynamicIterations&&request.followView&&request.provisionalNavigationCap&&frame&&
-      frame.maxIterations<request.maxIterations&&
+      frame.maxIterations!==request.maxIterations&&
       this.samePresentation({...frame,maxIterations:request.maxIterations},request)) ||
       !!(base&&frame&&frame.maxIterations===base.maxIterations&&
       this.samePresentation({...frame,maxIterations:request.maxIterations},request)) ||
@@ -1608,6 +1621,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const retainedCoverage=new CoverageRegions();
     for(const c of candidates)retainedCoverage.add({...c,spacing:c.spacing.div(retained.unitsPerPixel).toNumber()});
     const epoch=this.publicationEpoch,history=this.history;
+    // The snapshot below has the incoming cap's identity. Keep a useful prior
+    // cap in its own texture/metadata slot instead of relabelling its pixels.
+    const keepPriorCap=!!(this.historyValid&&this.lastFrame&&this.currentView&&
+      !this.samePresentation(this.lastFrame,frame)&&this.presentationCompatible(this.lastFrame,this.currentView)&&
+      reprojectionFor(this.lastFrame,this.currentView,true,true));
     let snapshot:GPUTexture|undefined;
     this.spareHistory?.destroy();this.spareHistory=null;
     const pending=checkedGpu(device,()=>{
@@ -1627,7 +1645,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       if(this.deviceLost||epoch!==this.publicationEpoch||this.incomingFrame!==frame||this.history!==history)return false;
       if(this.currentView&&!this.presentationCompatible(frame,this.currentView)&&
         !(allowStaleAppearance&&this.stalePresentationCompatible(frame,this.currentView)))return false;
-      if(this.historyValid&&this.lastFrame?.snapshotComplete){
+      if(this.historyValid&&(this.lastFrame?.snapshotComplete||keepPriorCap)){
         this.coverageHistory?.destroy();this.coverageHistory=this.history;this.coverageFrame=this.lastFrame;
       }else this.history?.destroy();
       this.history=snapshot!;snapshot=undefined;this.historySize={width:retained.width,height:retained.height};
@@ -1642,6 +1660,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private isInteracting(request: RenderRequest): boolean {
     return !!(request.followView ? this.currentView ?? request : request).interacting;
+  }
+  /** Camera drift may preserve useful preparation; a different numerical
+   * method must not admit another old-mode region after an async boundary. */
+  private requireLiveMethod(request:RenderRequest){
+    const live=request.followView?this.currentView:null;
+    if(!live)return;
+    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
+    const next=live.forceMethod??methodForScale(live.unitsPerPixel,live.tuning);
+    const wide=request.family==='julia'||method!==Method.Direct;
+    if(method!==next||request.family!==live.family||request.useApprox!==live.useApprox||
+      (request.family==='julia'&&(!request.juliaX?.eq(live.juliaX!)||!request.juliaY?.eq(live.juliaY!)))||
+      limbsForScale(request.unitsPerPixel,wide?96:48)!==limbsForScale(live.unitsPerPixel,wide?96:48))
+      throw new LiveMethodChanged();
   }
   /** Expand only the numerical field; the visible camera and output stay fixed. */
   private workRequest(visible:RenderRequest):RenderRequest {
@@ -1696,10 +1727,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.retarget=false;
       try{result=await this.renderTarget(request);}catch(error){
         this.referencePreparing=false;this.finalizing=false;this.cachedRequest='';
+        if(error instanceof LiveMethodChanged&&this.currentView&&!this.abortRequested&&
+            (!request.isCurrent||request.isCurrent())){
+          this.retainPartial();await this.pendingRetain;
+          request=this.workRequest({...this.currentView,followView:true,isCurrent:request.isCurrent});
+          continue;
+        }
         if(!(error instanceof DOMException&&error.name==='AbortError')){this.fieldKey='';this.fieldComplete=false;}
-        if(!(error instanceof DOMException&&error.name==='AbortError')){this.incomingFrame=null;this.sampleKey='';this.fieldView=null;this.aborted=true;this.exactCompletedSamples=0;}
+        if(!(error instanceof DOMException&&error.name==='AbortError')){this.incomingFrame=null;this.sampleKey='';this.admittedSamples=null;this.fieldView=null;this.aborted=true;this.exactCompletedSamples=0;}
         throw error;
-      }
+      }finally{this.batchFeedback.enterTarget();}
       // Counter readback also yields. Demand arriving during that last fence
       // must be serviced before reporting the stream complete.
       if (request.followView && result.completed && this.currentView && !this.isComplete(this.currentView)) this.retarget=true;
@@ -1711,6 +1748,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private async renderTarget(request: RenderRequest): Promise<RenderStats> {
+    this.batchFeedback.enterTarget();
 
     const { device } = this.ctx;
     const tuning=request.tuning??DEFAULT_TUNING;
@@ -1743,6 +1781,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
+    this.requireLiveMethod(request);
     const initialGrid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     let recoloured=await this.recolorCompleted(request,requestKey,method,initialGrid);
     if(recoloured)return recoloured;
@@ -1820,6 +1859,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.referencePreparing=false;
     const started = performance.now();
     if (!request.isCurrent!()) throw new DOMException("Superseded render", "AbortError");
+    this.requireLiveMethod(request);
     const approximationLevels =
       request.useApprox !== true || method === Method.Direct || !approximationEligible(family, request.colors.mode) ||
       !this.laHasUsableMultiStep || requiredDelta.gt(this.tableMaxDelta.times(1 + 1e-12)) ? 0 : this.laLevels;
@@ -1924,25 +1964,42 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // only rebuilt when one of these changes.
     const fieldKey = this.fieldIdentity(request,family,constant,method,grid,this.retainEndpoints,u32[20]);
     const fieldStale = fieldKey !== this.fieldKey || this.aborted;
-    const capUpgrade=fieldStale&&!!this.capUpgradeBase(request);
-    if(capUpgrade)this.capPresentationTarget=request.maxIterations;
     const sampleKey = this.sampleIdentity(request,family,constant,method,grid,limbs,u32[20]);
-    if (fieldStale && !capUpgrade) {
+    const ordinary=colors.mode===0&&grid===1&&colors.supersample===1&&!colors.postAntialias&&
+      (colors.capped??0)===0&&!this.retainEndpoints&&!needsEndpoints(colors);
+    const admitted:AdmittedSamples={view:request,maxIterations:request.maxIterations,ordinary,
+      policy:this.sampleIdentity({...request,maxIterations:0},family,constant,method,grid,limbs,u32[20]),
+      reference:method===Method.Direct?null:this.refSamples,
+      approximation:u32[20]>0?this.laBuffer:null};
+    const capMapping=fieldStale&&this.fieldBuffer?
+      upwardCapRemap(this.admittedSamples,admitted,!!(request.dynamicIterations&&request.followView&&request.provisionalNavigationCap)):null;
+    const inPlaceCapUpgrade=fieldStale&&!!capMapping&&!!this.capUpgradeBase(request);
+    const capUpgrade=inPlaceCapUpgrade||!!capMapping;
+    if(inPlaceCapUpgrade)this.capPresentationTarget=request.maxIterations;
+    if (fieldStale && !inPlaceCapUpgrade) {
       this.currentImageValid=false;
-      await checkedGpu(device,()=>this.moveField(request, request.width * request.height * grid * grid, sampleKey,
-        grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid));
+      this.admittedSamples=null;
+      await checkedGpu(device,()=>{
+        this.moveField(request, request.width * request.height * grid * grid, sampleKey,
+          grid === 1 && colors.mode === 0 && !this.retainEndpoints, grid,capMapping);
+        this.admittedSamples=admitted;
+      });
       if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded field','AbortError');
       // A calculated anchor remains authoritative when refinement changes only
       // sample density: sparse and dense visits use the same numerical policy.
-      u32[41] = grid === 1 && colors.mode !== 2 ? 1 : 0;
+      // A partial upward upgrade can contain stamps from several caps. Even
+      // a later same-cap remap must reopen the older unresolved stamps.
+      u32[41] = ordinary ? 2 : grid === 1 && colors.mode !== 2 ? 1 : 0;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-    } else if(capUpgrade) {
+    } else if(inPlaceCapUpgrade) {
       // Keep the old field and visible target. Reopened regions will visit only
       // samples stamped with an older cap; no CPU whole-region reuse applies.
       this.reuseMapping=null;this.reusableComplete=false;
+      this.fieldComplete=false;this.sampleKey=sampleKey;this.currentImageValid=false;
       u32[41]=2;
       device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
     }
+    this.admittedSamples=admitted;
     this.exactTotalSamples=request.width*request.height;
     this.exactCompletedSamples=fieldStale?0:this.exactTotalSamples;
 
@@ -1968,7 +2025,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let exactCoverage=fieldStale?0:request.width*request.height;
     u32[40] = 0; u32[42] = 0; u32[43] = request.width;
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
-    if (fieldStale && !capUpgrade) {
+    if (fieldStale && !inPlaceCapUpgrade) {
       // Initialize once: copied exact samples become visible, unknown positions
       // have zero alpha. A recycled allocation never supplies validity.
       const init = device.createCommandEncoder({ label: "initialize-incoming" });
@@ -1977,17 +2034,21 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       collectTimings();
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
-    const batchCostKey=[family,method,pipelineKind,limbs,colors.mode,grid].join("|");
-    if (this.batchCostKey!==batchCostKey) {
-      this.batchCostKey=batchCostKey;
-      this.batchMsPerSample=0;
-    }
+    const freshWork=!this.reuseMapping&&!capUpgrade;
+    const feedbackPolicy=[family,method,pipelineKind,limbs,colors.mode,grid,request.maxIterations,
+      this.retainEndpoints,request.useApprox===true,freshWork].join("|");
+    const syncFeedbackPolicy=(hardBudget:number)=>{
+      const key=feedbackPolicy+"|"+hardBudget;
+      if(this.batchCostKey!==key){this.batchCostKey=key;this.batchFeedback.enterTarget(true);}
+    };
+    syncFeedbackPolicy(tuning.hardPixelBudget);
     if (!fieldStale) this.pending.reset(0,0);
     if (fieldStale) { this.pending.reset(request.width,request.height,previewStride,request.followView); this.determined=new CoverageRegions(); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++; }
     const pipelineStarted=performance.now();
     const calculatePipeline=await calculationPreparation;
     this.pipelineWaitMs+=performance.now()-pipelineStarted;
     if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded pipeline','AbortError');
+    this.requireLiveMethod(request);
     const targetStarted=performance.now();
     const serviceAppearance=()=>{
       if(!request.followView)return true;
@@ -2010,19 +2071,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let scratch:GPUBuffer|undefined,scratchBind:GPUBindGroup|undefined,scratchCapacity=0;
     let continuationReadback:GPUBuffer|undefined;
     const continuationOrbit=this.orbitBuffer;
-    const learnCost=(key:string,cost:number)=>{
-      // A quantized zero is no evidence for a view-wide batch. Keep the
-      // existing starting allowance until a positive duration is observed.
-      if(this.batchCostKey!==key||!Number.isFinite(cost)||cost<=0)return;
-      this.batchMsPerSample=this.batchMsPerSample ? .75*this.batchMsPerSample+.25*cost : cost;
-    };
+    // Reused-anchor feedback has a separate policy and cannot train fresh work.
     try { while (this.pending.size) {
+      this.requireLiveMethod(request);
       const batchTuning=this.currentView?.tuning??tuning;
+      syncFeedbackPolicy(batchTuning.hardPixelBudget);
       const minimum=startingBatchVisits(request.maxIterations,batchTuning.batchMultiplier);
-      const costly=continuationSupported && batchTuning.hardPixelBudget>0 && this.batchMsPerSample>0 &&
-        this.batchMsPerSample*minimum>batchTuning.batchTargetMs;
-      const budget = this.batchMsPerSample > 0 ?
-        Math.min(request.width*request.height,Math.max(64,batchTuning.batchTargetMs/this.batchMsPerSample)) : minimum;
+      const costly=continuationSupported && batchTuning.hardPixelBudget>0 && this.batchFeedback.msPerVisit>0 &&
+        this.batchFeedback.msPerVisit*minimum>batchTuning.batchTargetMs;
+      const total=request.width*request.height;
+      const budget=this.batchFeedback.budget(minimum,batchTuning.batchTargetMs,freshWork?total:Math.min(total,minimum));
       // Bound the selected area before take(); its queue splits larger regions.
       const spatialBudget=costly?Math.min(budget,CONTINUATION_MAX_LANES):budget;
       const region = this.pending.take(spatialBudget,this.regionDemand(request),request.tileRows,{
@@ -2040,7 +2098,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const visits=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride);
       const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
       // Only a naturally selected costly region may use the separate shader.
-      // Ordinary spatial budgets and CPU feedback remain exactly the baseline.
+      // Region selection remains bounded by the local admission feedback.
       let shape=costly &&
         visits<=CONTINUATION_MAX_LANES && CONTINUATION_HEADER_BYTES+visits*CONTINUATION_STATE_BYTES<=limit
         ? continuationRegion(width,rows,region.stride,limit) : null;
@@ -2050,6 +2108,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         regionPipeline=await this.ensureContinuationPipeline(pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox');
         this.pipelineWaitMs+=performance.now()-preparing;
         if(this.abortRequested||!request.isCurrent!()||continuationOrbit!==this.orbitBuffer)throw new DOMException('Superseded continuation','AbortError');
+        this.requireLiveMethod(request);
       }
       if(shape&&shape.bytes>scratchCapacity){
         scratch?.destroy();scratch=storageBuffer(device,shape.bytes/4,'wide-continuation');scratchCapacity=shape.bytes;
@@ -2059,23 +2118,29 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         continuationReadback=device.createBuffer({label:'continuation-counter-readback',size:56,
           usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
       }
+      const measurement=this.batchFeedback.submit(visits,region.stride,batchTuning.batchTargetMs);
+      const learnBatch=(ms:number,kind:'gpu'|'fallback')=>{
+        this.batchFeedback.observe(measurement,ms,kind);
+      };
       let batchStarted=0,timingUnavailable=false,timingInvalid=false,fallbackApplied=false,baselineWallMs=0;
       if(shape){
-        const measuredKey=this.batchCostKey,regionStarted=performance.now();
+        const regionStarted=performance.now();
         let sliceExpected=0,sliceReported=0,sliceGpuMs=0,sliceUnavailable=false,slicesFinished=false,costApplied=false,regionWallMs=0;
         const learnRegion=()=>{
           if(!slicesFinished||costApplied)return;
-          if(sliceUnavailable){costApplied=true;learnCost(measuredKey,regionWallMs/visits);}
-          else if(sliceReported===sliceExpected){costApplied=true;learnCost(measuredKey,sliceGpuMs/visits);}
+          if(sliceUnavailable){costApplied=true;learnBatch(regionWallMs,'fallback');}
+          else if(sliceReported===sliceExpected){costApplied=true;learnBatch(sliceGpuMs,'gpu');}
         };
         let resume=false,unfinished=0,publishedCompleted=submittedVisits;
         do {
+          this.requireLiveMethod(request);
           // Appearance service may rewrite full-frame uniforms between slices.
           u32[54]=region.stride;u32[26]=region.y+rows;
           u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
           const control=new Uint32Array(resume?4:CONTINUATION_HEADER_BYTES/4);
           const liveSliceBudget=this.currentView?.tuning?.hardPixelBudget??batchTuning.hardPixelBudget;
+          syncFeedbackPolicy(liveSliceBudget);
           // Off drains an already-paused region; it never dispatches zero work.
           control.set([liveSliceBudget>0?liveSliceBudget:request.maxIterations,resume?1:0,shape.columns,0]);
           device.queue.writeBuffer(scratch!,0,control);
@@ -2123,7 +2188,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
               }
             }
             this.lastPartialAt=performance.now();this.firstPartialAt||=this.lastPartialAt;
-            this.reproject(this.currentView??request);
+            if(request.presentationOwner!=='animation')this.reproject(this.currentView??request);
           }
           if(!unfinished)break;
           await yieldToEvents();
@@ -2158,13 +2223,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
         submittedVisits+=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride)*grid*grid;
         if(sample){
-          const measuredKey=this.batchCostKey;
-          const measuredVisits=visits;
           this.timing.collect(sample,ms=>{
-            if(measuredVisits)learnCost(measuredKey,ms/measuredVisits);
+            learnBatch(ms,'gpu');
           },()=>{
             timingInvalid=true;
-            if(baselineWallMs>0&&!fallbackApplied){fallbackApplied=true;learnCost(measuredKey,baselineWallMs/visits);}
+            if(baselineWallMs>0&&!fallbackApplied){fallbackApplied=true;learnBatch(baselineWallMs,'fallback');}
           });
         }
         collectTimings();
@@ -2178,7 +2241,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           this.lastPartialAt=performance.now(); this.firstPartialAt ||= this.lastPartialAt;
           // A render can also be used outside the application's animation loop.
           // Queue order presents only finished regions, never in-flight writes.
-          this.reproject(this.currentView ?? request);
+          if(request.presentationOwner!=='animation')this.reproject(this.currentView ?? request);
         }
         await device.queue.onSubmittedWorkDone();
       }
@@ -2188,7 +2251,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         baselineWallMs=elapsed;
         // Queue fences include unrelated work; use this only as a conservative
         // fallback when timestamp queries are unavailable.
-        if((timingUnavailable||timingInvalid)&&!fallbackApplied){fallbackApplied=true;learnCost(this.batchCostKey,elapsed/visits);}
+        if((timingUnavailable||timingInvalid)&&!fallbackApplied){fallbackApplied=true;learnBatch(elapsed,'fallback');}
       }
       await yieldToEvents();
       if (!request.isCurrent!() || this.abortRequested) {
@@ -2250,6 +2313,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           this.capPresentationTarget=null;
           if(candidateAa){this.spareAntialias?.destroy();this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
           this.antialiasFrame=colors.postAntialias?frame:null;
+        }else if(this.currentView&&this.presentationCompatible(frame,this.currentView)&&
+            reprojectionFor(frame,this.currentView,true,true)){
+          // A newer automatic cap does not make these finished pixels cease
+          // to exist. Retain their actual old-cap identity for display only.
+          this.commitHistory(retained,candidate!);candidate=undefined;this.lastFrame=retained;
         }
         this.incomingFrame=null;
       }else{

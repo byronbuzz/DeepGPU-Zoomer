@@ -9,6 +9,7 @@ import { setupPanels } from './panels';
 import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
+import { dynamicLimitForZoom } from './dynamic';
 import { setupRangeControls } from './range-controls';
 import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, HARD_PIXEL_BUDGETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
 
@@ -20,10 +21,9 @@ let tuning:TuningSettings=loadTuning();
 const DYNAMIC_STORAGE_KEY='gpu-zoomer-dynamic-v1';
 let dynamicEnabled=true;
 try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
-let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0,lastDynamicDecisionRevision=-1;
+let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0;
 let provisionalNavigationCap=false;
-let capTarget=0,capRevision=-1,sliderEditing=false;
-let deferredDynamicDecrease:number|null=null;
+let capTarget=0,sliderEditing=false;
 let baseEditTimer:ReturnType<typeof setTimeout>|undefined,baseEditing=false;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let stopped=false, refreshPending=false, refreshHolding=false, stoppedAppearancePending=false;
@@ -123,8 +123,7 @@ function currentDepth(){
   return Math.log10(2.8)-Math.log10(Number(mantissa))-Number(exponent);
 }
 function resetDynamicAnchor(){
-  anchorDepth=currentDepth();capTarget=0;capRevision=camera.revision;lastDynamicUpdate=0;
-  lastDynamicDecisionRevision=camera.revision;deferredDynamicDecrease=null;provisionalNavigationCap=false;
+  anchorDepth=currentDepth();capTarget=0;lastDynamicUpdate=0;provisionalNavigationCap=false;
 }
 function changeEffectiveLimit(limit:number,atBatchBoundary=false){
   const next=Math.max(1,Math.min(MAX_ITERATIONS,Math.round(limit)));
@@ -148,27 +147,16 @@ function commitPendingBaseForRefresh(){
   if(raw&&/^\d+$/.test(raw))setManualBase(Number(raw),true);
   else message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);
 }
-function maybeUpdateDynamicLimit(time:number){
-  if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing||time-lastDynamicUpdate<500)return;
-  // During navigation, a changed camera is already a new numerical target.
-  // Otherwise wait for a settled exact field before upgrading in place.
-  const navigationChange=camera.revision!==lastDynamicDecisionRevision;
-  if(!navigationChange&&(busy||!currentFieldComplete()))return;
-  // A new reference demand is allowed to finish; the live view is then picked
-  // up by the renderer's existing bounded retarget after a numerical batch.
+function updateDynamicForZoom(time:number,zoomDirection:number){
+  if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing)return;
   const progress=engine?.debugProgress();
-  if(progress?.referenceWorkerActive||progress?.referencePreparing)return;
-  if(capRevision!==camera.revision){capRevision=camera.revision;capTarget=0;}
-  const depthTarget=baseIterations+tuning.dynamicDepthGain*Math.max(0,currentDepth()-anchorDepth);
-  const desired=Math.min(MAX_ITERATIONS,Math.max(baseIterations,depthTarget,capTarget));
-  const difference=desired-view.iterations;
-  if(Math.abs(difference)<16)return;
-  if(difference<0){deferredDynamicDecrease=desired;lastDynamicUpdate=time;lastDynamicDecisionRevision=camera.revision;return;}
-  deferredDynamicDecrease=null;
-  const step=Math.max(128,Math.ceil(view.iterations*.15));
-  if(navigationChange&&(busy||!currentFieldComplete()))provisionalNavigationCap=true;
-  lastDynamicUpdate=time;lastDynamicDecisionRevision=camera.revision;
-  changeEffectiveLimit(Math.abs(difference)<=step?desired:view.iterations+Math.sign(difference)*step,true);
+  const next=dynamicLimitForZoom({zoomDirection,time,lastUpdate:lastDynamicUpdate,
+    base:baseIterations,current:view.iterations,depthDelta:currentDepth()-anchorDepth,
+    depthGain:tuning.dynamicDepthGain,capTarget,maximum:MAX_ITERATIONS,
+    referencePreparing:!!(progress?.referenceWorkerActive||progress?.referencePreparing)});
+  if(next===null)return;
+  provisionalNavigationCap=true;lastDynamicUpdate=time;
+  changeEffectiveLimit(next,true);
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
@@ -231,13 +219,7 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||rotating||rotationSliderHeld||controlDown&&rotationKeys.size>0||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;capTarget=0;capRevision=camera.revision;
-  if(dynamicEnabled&&deferredDynamicDecrease!==null){
-    // The camera already requires a new field, so apply the pending lower cap
-    // at this natural numerical boundary rather than invalidating in place.
-    view={...view,iterations:Math.max(1,Math.min(MAX_ITERATIONS,Math.round(baseIterations+tuning.dynamicDepthGain*Math.max(0,currentDepth()-anchorDepth))))};
-    deferredDynamicDecrease=null;syncIterationLabel();syncTuningLabels();
-  }
+function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;
   preparing(now);
 }
 function syncRotation(){el<HTMLInputElement>('rotation').value=String(camera.angle);el('rotation-value').textContent=`${Number(camera.angle.toFixed(1))}°`;}
@@ -334,7 +316,7 @@ function request():RenderRequest{
   const margin=zoom<0?overscanCssPx(speed,tuning.overscanBase,tuning.overscanMax):0;
   const overscanPixels={x:Math.floor(margin*width/Math.max(1,innerWidth)/2)*2,
     y:Math.floor(margin*height/Math.max(1,innerHeight)/2)*2};
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,tuning:{...tuning},isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:renderColors(colors),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,tuning:{...tuning},isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
@@ -344,7 +326,6 @@ async function compute(){
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
       provisionalNavigationCap=false;
       if(dynamicEnabled&&result.computed&&(result.computedSamples>0||result.capUpgrade)){
-        if(capRevision!==camera.revision){capRevision=camera.revision;capTarget=0;}
         capTarget=baseIterations+tuning.dynamicCapGain*Math.max(0,result.limitHitRatio*100-.5);
       }
       if(numericalWasPending)refinementTime.complete(performance.now());
@@ -366,11 +347,10 @@ function tick(time:number){
   if(!document.hidden){
     if(controlDown&&rotationKeys.size&&dt){const turn=(rotationKeys.has('ArrowRight')?1:0)-(rotationKeys.has('ArrowLeft')?1:0);if(turn)setRotation(camera.angle+turn*dt*.06);}
     const zoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
-    if(zoom && dt){const revision=camera.revision;camera.zoom(-zoom*speed*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){refinementTime.heldCameraChange();changed();}}
+    if(zoom && dt){const revision=camera.revision;camera.zoom(-zoom*speed*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){refinementTime.heldCameraChange();changed();updateDynamicForZoom(time,zoom);}}
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);refinementTime.heldCameraChange();changed();}
     if(engine){
-      maybeUpdateDynamicLimit(time);
       if(!stopped&&!refreshPending&&!error&&tuning.blaRebuildPercent<100&&!moving()&&engine.consumeSettledBlaRetry())refresh();
       if(refreshPending&&!busy)void refreshCalculation();
       engine.reproject(request(),stopped||refreshHolding);
@@ -412,7 +392,7 @@ canvas.addEventListener('pointermove',e=>{if(rotating){if(!e.ctrlKey){finishRota
 function endPointer(){if(selecting){stop();return;}stop();persist();}
 canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();persist();});
 canvas.addEventListener('lostpointercapture',()=>{if(activePointer!==null){activePointer=null;stop();persist();}});
-canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){refinementTime.wheelCameraChange(performance.now());changed('wheel');}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
+canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){const now=performance.now();refinementTime.wheelCameraChange(now);changed('wheel');updateDynamicForZoom(now,wheelDirection);}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
 canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();persist();return;}
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key)))return;
   if(e.ctrlKey||e.metaKey||e.altKey)return;

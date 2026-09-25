@@ -22,15 +22,24 @@ describe('navigation tuning contracts', () => {
     expect(loadTuning(storage)).toEqual(DEFAULT_TUNING);
   });
 
-  it('migrates old choices and old factory values without reviving removed hard-pixel slices', () => {
+  it('preserves supported saved choices without guessing whether factory values were explicit', () => {
     const entries = new Map<string,string>();
     const storage = { getItem: (key:string) => entries.get(key) ?? null };
     entries.set('gpu-zoomer-navigation-tuning-v2',JSON.stringify({version:2,settings:{
       batchMultiplier:8,hardPixelBudget:32,overscanBase:64,overscanMax:192,
       dynamicDepthGain:2000,dynamicCapGain:1000,
     }}));
-    expect(loadTuning(storage)).toEqual({...DEFAULT_TUNING,batchMultiplier:8,hardPixelBudget:128});
+    expect(loadTuning(storage)).toEqual({...DEFAULT_TUNING,batchMultiplier:8,hardPixelBudget:128,
+      overscanBase:64,overscanMax:192,dynamicDepthGain:2000,dynamicCapGain:1000});
     expect(normalizeTuning({...DEFAULT_TUNING,hardPixelBudget:16}).hardPixelBudget).toBe(128);
+    entries.set(TUNING_STORAGE_KEY,JSON.stringify({version:3,settings:{hardPixelBudget:256,overscanBase:0,overscanMax:0}}));
+    expect(loadTuning(storage)).toMatchObject({hardPixelBudget:256,overscanBase:0,overscanMax:0});
+  });
+
+  it('uses Off and 64/128 for missing or invalid settings', () => {
+    expect(loadTuning({getItem:()=>null})).toMatchObject({hardPixelBudget:0,overscanBase:64,overscanMax:128});
+    expect(normalizeTuning({hardPixelBudget:'256',overscanBase:NaN,overscanMax:null}))
+      .toMatchObject({hardPixelBudget:0,overscanBase:64,overscanMax:128});
   });
 
   it('keeps fixed policy fixed and the overscan endpoints ordered', () => {
