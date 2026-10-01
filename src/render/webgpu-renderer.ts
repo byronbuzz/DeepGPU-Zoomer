@@ -26,7 +26,7 @@ import qualityResolveSource from "./quality-resolve.wgsl?raw";
 import { oversampledView } from "./quality";
 import antialiasSource from "./antialias.wgsl?raw";
 export const ANTIALIAS_SHADER=antialiasSource;
-import { boundedRetainedView, createSampleGridAnchor, planRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
+import { boundedRetainedView, createSampleGridAnchor, planRetainedView, sourceAlignedRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
 import { planNumericalView, containsNumericalView, learnOutwardDelay, outwardHorizonMs, outwardPadding } from './numerical-grid';
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
@@ -737,7 +737,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // Held screen colours are a separate fallback, never a numeric source.
     frontValid = frontValid && front.a > 0.0;
     backValid = backValid && back.a > 0.0;
-    let frontSpacing=display.units.x / max(front.a, 1e-30);
+    // Raw preview densities encode dyadic steps up to 64 in rgba8unorm.
+    // Recover that integer step before comparison. Float history contains
+    // arbitrary world-grid ratios and must not undergo this correction.
+    let frontStep=1.0 / max(front.a, 1e-30);
+    let frontSpacing=display.units.x * select(frontStep,round(frontStep),display.options.w>0.0);
     let backSpacing=display.units.y / max(back.a, 1e-30);
     // A finer source grid can still contain coarser preview regions. Compare
     // the actual sample spacing before replacing valid current detail.
@@ -749,7 +753,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     var fresh = textureSample(incoming, smp, clamp(freshUV, vec2<f32>(0.0), vec2<f32>(1.0)));
     if(display.fallbackCounts.z>0.0){fresh=qualityResolve(incoming,freshUV,display.fallbackCounts.z);}
     let valid = display.freshOptions.x > 0.0 && fresh.a > 0.0 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
-    let freshSpacing=display.units.z / max(fresh.a,1e-30);
+    let freshSpacing=display.units.z * round(1.0 / max(fresh.a,1e-30));
     let prefer = (fresh.a > 0.99 && select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0) || freshSpacing < spacing;
     if (valid && (prefer || (!frontValid && !backValid))) { result = fresh; spacing=freshSpacing; }
     if (!frontValid && !backValid && !valid) {
@@ -1168,8 +1172,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       return (area-overlap)*1000 + area + area*Math.min(8,detail)*.1 + (area ? Math.min(64,extent)*.0001 : 0);
     };
     const priorCap=!!(this.lastFrame&&this.lastFrame.maxIterations!==request.maxIterations&&compatible(this.lastFrame));
-    const keepFront = this.historyValid && (this.lastFrame?.snapshotComplete||priorCap) && compatible(this.lastFrame) &&
-      (!compatible(this.coverageFrame) || score(this.lastFrame!) > score(this.coverageFrame!));
+    // A native completed view is already authoritative. Keep extra partial
+    // detail only when bounding the replacement actually coarsened the view.
+    const finerFront = request.unitsPerPixel.gt(view.unitsPerPixel) && compatible(this.lastFrame) &&
+      this.hasFinerRetainedCoverage(this.lastFrame,request,view);
+    const finerBack = finerFront && compatible(this.coverageFrame) && this.hasFinerRetainedCoverage(this.coverageFrame,request,view);
+    const coversView = incoming[0]===0 && incoming[1]===0 && incoming[2]===1 && incoming[3]===1;
+    const keepFront = this.historyValid && (this.lastFrame?.snapshotComplete||priorCap||finerFront) && compatible(this.lastFrame) &&
+      (coversView && finerFront && !finerBack || !compatible(this.coverageFrame) || score(this.lastFrame!) > score(this.coverageFrame!));
     let available: GPUTexture | null;
     if (keepFront) {
       available = this.coverageHistory;
@@ -1194,7 +1204,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private snapshotFrame(frame: NonNullable<WebGpuRenderer["lastFrame"]>) {
-    const retained=boundedRetainedView(frame,this.ctx.device.limits.maxTextureDimension2D);
+    const limit=this.ctx.device.limits.maxTextureDimension2D,live=this.currentView;
+    const bounded=boundedRetainedView(frame,limit);
+    // Preserve wider coverage when the source already fits: its full copy is
+    // lossless. Crop only to avoid the bounded snapshot's coarsening.
+    const retained=bounded.unitsPerPixel.gt(frame.unitsPerPixel)&&live&&(live.zoom??0)>=0&&frame.interacting&&
+      (frame.zoom??0)>0&&!frame.stationaryOversampling&&this.presentationCompatible(frame,live)
+      ? sourceAlignedRetainedView(frame,live,limit)??bounded : bounded;
     return {...frame,...retained,stationaryOversampling:frame.stationaryOversampling&&this.sameView(frame,retained),proxy:true,snapshotComplete:true,
       coveredRegions:[{x:0,y:0,width:retained.width,height:retained.height,spacing:retained.unitsPerPixel}]};
   }
@@ -1202,6 +1218,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private encodeCompletedSnapshot(encoder:GPUCommandEncoder,frame:NonNullable<WebGpuRenderer["lastFrame"]>,retained:FrameView,candidate:GPUTexture){
     if(this.sameView(frame,retained)){
       encoder.copyTextureToTexture({texture:this.target!},{texture:candidate},{width:frame.width,height:frame.height});
+      return;
+    }
+    const crop=sampleGridRemap(frame,retained);
+    if(crop?.step===1&&crop.denominator===1&&crop.offsetX>=0&&crop.offsetY>=0&&
+        crop.offsetX+retained.width<=frame.width&&crop.offsetY+retained.height<=frame.height){
+      encoder.copyTextureToTexture({texture:this.target!,origin:{x:crop.offsetX,y:crop.offsetY}},
+        {texture:candidate},{width:retained.width,height:retained.height});
       return;
     }
     const live=this.currentView,incoming=this.incomingFrame;
@@ -1328,6 +1351,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     transforms.set([xform.scaleX,xform.scaleY,xform.offsetX,xform.offsetY]);
     transforms.set([xform.crossX??0,xform.crossY??0],24);
     transforms[10] = source !== this.history || this.historyValid && matchesView(this.lastFrame) ? 1 : 0;
+    transforms[11] = source===this.target ? 1 : 0;
     if (xform.scaleX*xform.scaleY-(xform.crossX??0)*(xform.crossY??0) === 0) transforms[10] = 0;
     if (source === this.target && !this.currentImageValid) transforms[10] = 0;
     if (coverage && secondaryTexture) {
@@ -1971,6 +1995,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     }).filter(r=>r.width>0&&r.height>0);
   }
 
+  private hasFinerRetainedCoverage(frame: WebGpuRenderer["lastFrame"], replacement: FrameView, view: FrameView) {
+    return !!frame && frame.unitsPerPixel.lt(replacement.unitsPerPixel) &&
+      this.coverageIn(frame,view).some(region=>region.spacing.lt(replacement.unitsPerPixel));
+  }
+
   async retainDisplayedPartial(request:RenderRequest,keepIncoming=false):Promise<boolean>{
     if(this.disposed)return false;
     const live=this.currentView;
@@ -1998,9 +2027,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     // visible image at display resolution; retain wide coverage on zoom-out.
     const inward=!!(live?.interacting&&(live.zoom??0)>0&&!rotated&&!live.angle&&
       (frame.width>live.width||frame.height>live.height));
-    const geometry=inward?planRetainedView({centerX:live!.centerX,centerY:live!.centerY,
+    const geometry=inward?(sourceAlignedRetainedView(frame,live!,device.limits.maxTextureDimension2D)??planRetainedView({centerX:live!.centerX,centerY:live!.centerY,
       unitsPerPixel:live!.unitsPerPixel,width:live!.width,height:live!.height},this.retainedAnchor!,
-      {overscan:1,deviceLimit:device.limits.maxTextureDimension2D}):
+      {overscan:1,deviceLimit:device.limits.maxTextureDimension2D})):
       rotated?boundedRetainedView(frame,device.limits.maxTextureDimension2D):
         planRetainedView(frame,this.retainedAnchor!,{overscan:1,deviceLimit:device.limits.maxTextureDimension2D});
     const retained={...frame,...geometry};
@@ -2015,6 +2044,12 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const keepPriorCap=!!(this.historyValid&&this.lastFrame&&this.currentView&&
       !this.samePresentation(this.lastFrame,frame)&&this.presentationCompatible(this.lastFrame,this.currentView)&&
       reprojectionFor(this.lastFrame,this.currentView,true,true));
+    const keepFiner=!!(this.historyValid&&retained.unitsPerPixel.gt((live??retained).unitsPerPixel)&&
+      !retained.angle&&!live?.angle&&containsNumericalView(retained,live??retained)&&
+      this.samePresentation(this.lastFrame,frame)&&
+      this.hasFinerRetainedCoverage(this.lastFrame,retained,live??retained)&&
+      (!this.presentationCompatible(this.coverageFrame,live??retained)||
+        !this.hasFinerRetainedCoverage(this.coverageFrame,retained,live??retained)));
     let snapshot:GPUTexture|undefined;
     this.spareHistory?.destroy();this.spareHistory=null;
     const pending=checkedGpu(device,()=>{
@@ -2034,7 +2069,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if(this.deviceLost||epoch!==this.publicationEpoch||this.incomingFrame!==frame||this.history!==history)return false;
       if(this.currentView&&!this.presentationCompatible(frame,this.currentView)&&
         !(allowStaleAppearance&&this.stalePresentationCompatible(frame,this.currentView)))return false;
-      if(this.historyValid&&(this.lastFrame?.snapshotComplete||keepPriorCap)){
+      if(this.historyValid&&(this.lastFrame?.snapshotComplete||keepPriorCap||keepFiner)){
         this.coverageHistory?.destroy();this.coverageHistory=this.history;this.coverageFrame=this.lastFrame;
       }else this.history?.destroy();
       this.history=snapshot!;snapshot=undefined;this.historySize={width:retained.width,height:retained.height};
@@ -2671,7 +2706,6 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       this.motionSizingWasActive=sizingActive;
       const motionSizing=this.motionSizing;
       const sizingDecision=sizingActive?motionSizing.choose(gpuBudget,allowanceMs,batchTuning.motionPreference):{budget:gpuBudget,changed:false,reason:'inactive',trainedBins:0};
-      (this as any).auditMinimum={minimum,minimumApplied:navigationMinimum,allowanceMs,estimate:gpuCost.msPerVisit,interacting,zoom,gpuControlled,incumbentBudget:gpuBudget,decision:sizingDecision};
       // Include region selection, encoding, shading and the existing queue fence.
       // This is batch service time, not physical display latency.
       const sizingServiceStarted=sizingActive?performance.now():0;

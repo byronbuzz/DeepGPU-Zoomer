@@ -18,19 +18,39 @@ export interface RegionTuning {
 function disjointCoverage(covered: Demand['covered']) {
   const pieces=covered.filter(c=>c.width>0&&c.height>0).map(c=>({...c,right:c.x+c.width,bottom:c.y+c.height,quality:1/(c.spacing??1)}));
   const xs=[...new Set(pieces.flatMap(c=>[c.x,c.right]))].sort((a,b)=>a-b);
+  // Share stable y order across slabs; inactive pieces never change counts.
+  const events=pieces.flatMap(c=>[{y:c.y,q:c.quality,delta:1,x:c.x,right:c.right},{y:c.bottom,q:c.quality,delta:-1,x:c.x,right:c.right}]).sort((a,b)=>a.y-b.y);
   const result:Demand['covered']=[];
+  type Span={bottom:number;rectangle:Demand['covered'][number]};
+  let previousSlab=new Map<number,Span>();
   for(let i=1;i<xs.length;i++){
-    const active=pieces.filter(c=>c.x<xs[i]&&c.right>xs[i-1]);
-    const events=active.flatMap(c=>[{y:c.y,q:c.quality,delta:1},{y:c.bottom,q:c.quality,delta:-1}]).sort((a,b)=>a.y-b.y);
-    const counts=new Map<number,number>();let quality=0,previous=events[0]?.y??0;
-    for(const e of events){
-      if(quality>0&&e.y>previous)result.push({x:xs[i-1],y:previous,width:xs[i]-xs[i-1],height:e.y-previous,spacing:1/quality});
-      previous=e.y;
-      const count=(counts.get(e.q)??0)+e.delta;
-      if(count)counts.set(e.q,count);else counts.delete(e.q);
-      if(e.delta>0)quality=Math.max(quality,e.q);
-      else if(e.q===quality&&!count)quality=Math.max(0,...counts.keys());
+    const counts=new Map<number,number>(),slab=new Map<number,Span>();
+    let quality=0,start=events[0]?.y??0;
+    for(let j=0;j<events.length;){
+      const y=events[j].y,previousQuality=quality;
+      do{
+        const e=events[j++];
+        if(!(e.x<xs[i]&&e.right>xs[i-1]))continue;
+        const count=(counts.get(e.q)??0)+e.delta;
+        if(count)counts.set(e.q,count);else counts.delete(e.q);
+        if(e.delta>0)quality=Math.max(quality,e.q);
+        else if(e.q===quality&&!count)quality=Math.max(0,...counts.keys());
+      }while(j<events.length&&events[j].y===y);
+      // Hidden coarse boundaries do not split the finest covered density.
+      if(quality===previousQuality)continue;
+      if(previousQuality>0&&y>start){
+        const spacing=1/previousQuality,prior=previousSlab.get(start);
+        // Join only exact adjacent intervals: no snapping or gap filling.
+        if(prior&&prior.bottom===y&&prior.rectangle.spacing===spacing){
+          prior.rectangle.width=xs[i]-prior.rectangle.x;slab.set(start,prior);
+        }else{
+          const rectangle={x:xs[i-1],y:start,width:xs[i]-xs[i-1],height:y-start,spacing};
+          result.push(rectangle);slab.set(start,{bottom:y,rectangle});
+        }
+      }
+      start=y;
     }
+    previousSlab=slab;
   }
   return result;
 }

@@ -45,6 +45,29 @@ function coordinateDecimal(values: Decimal[], extra = 0): typeof Decimal {
   return Decimal.clone({ precision: Math.max(Decimal.precision, top - bottom + 32 + extra) });
 }
 
+/** A visible crop on the source's own pixel edges. No resampling or finer
+ * allocation: every retained texel is exactly one source texel. Return null
+ * when preserving the whole visible footprint would exceed the history cap. */
+export function sourceAlignedRetainedView(source: FrameView, visible: FrameView, deviceLimit = Infinity): FrameView | null {
+  if (source.angle || visible.angle || source.unitsPerPixel.lte(0) || visible.unitsPerPixel.lte(0)) return null;
+  const limit = retainedLimits(deviceLimit);
+  const D = coordinateDecimal([source.centerX, source.centerY, source.unitsPerPixel,
+    visible.centerX, visible.centerY, visible.unitsPerPixel]);
+  const spacing = new D(source.unitsPerPixel), ratio = new D(visible.unitsPerPixel).div(spacing);
+  const middleX = new D(visible.centerX).minus(source.centerX).div(spacing).plus(source.width / 2);
+  const middleY = new D(source.centerY).minus(visible.centerY).div(spacing).plus(source.height / 2);
+  const halfWidth = ratio.times(visible.width).div(2), halfHeight = ratio.times(visible.height).div(2);
+  const left = middleX.minus(halfWidth).floor().toNumber(), right = middleX.plus(halfWidth).ceil().toNumber();
+  const top = middleY.minus(halfHeight).floor().toNumber(), bottom = middleY.plus(halfHeight).ceil().toNumber();
+  const width = right - left, height = bottom - top;
+  if (![left, right, top, bottom].every(Number.isSafeInteger) || left < 0 || top < 0 ||
+      right > source.width || bottom > source.height || width <= 0 || height <= 0 ||
+      width > limit.width || height > limit.height) return null;
+  return {centerX: new D(source.centerX).plus(spacing.times(left + (width - source.width) / 2)),
+    centerY: new D(source.centerY).minus(spacing.times(top + (height - source.height) / 2)),
+    unitsPerPixel: spacing, width, height};
+}
+
 export function createSampleGridAnchor(view: FrameView): SampleGridAnchor {
   const D = coordinateDecimal([view.centerX, view.centerY, view.unitsPerPixel]);
   const h = new D(view.unitsPerPixel);

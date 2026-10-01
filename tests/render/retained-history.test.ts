@@ -3,6 +3,7 @@ import {describe,expect,it,vi} from 'vitest';
 import {WebGpuRenderer} from '../../src/render/webgpu-renderer';
 import {CoverageRegions} from '../../src/render/regions';
 import {DEFAULT_COLORS} from '../../src/logic/colorSettings';
+import {BatchFeedback} from '../../src/render/batch-feedback';
 
 function deferred<T>(){let resolve!:(v:T)=>void;const promise=new Promise<T>(r=>resolve=r);return {promise,resolve};}
 const frame=()=>({family:'mandelbrot',centerX:new Decimal('-.6'),centerY:new Decimal(0),unitsPerPixel:new Decimal('.00099'),
@@ -14,7 +15,7 @@ function fixture(){
     createTexture:(d:any)=>{const t={...d,width:d.size.width??d.size[0],height:d.size.height??d.size[1],destroy:vi.fn()};textures.push(t);return t;},
     createCommandEncoder:()=>({finish:()=>({})}),queue:{submit:vi.fn()}};
   const r:any=Object.create(WebGpuRenderer.prototype),f=frame();
-  Object.assign(r,{ctx:{device},publicationEpoch:1,pendingRetain:null,currentView:f,incomingFrame:f,target:{},partialRegions:1,
+  Object.assign(r,{ctx:{device},batchFeedback:new BatchFeedback(),numericalQuadratic:null,publicationEpoch:1,pendingRetain:null,currentView:f,incomingFrame:f,target:{},partialRegions:1,
     retainedAnchor:null,lastFrame:{...f,unitsPerPixel:new Decimal('.001'),snapshotComplete:true},history:old,historyValid:true,
     coverageFrame:null,coverageHistory:null,determined:new CoverageRegions(),encodeBlit:vi.fn()});
   r.determined.add({x:0,y:0,width:128,height:128,spacing:1});
@@ -22,6 +23,94 @@ function fixture(){
 }
 
 describe('bounded retained history lifecycle (GPU validation mocked)',()=>{
+  it('keeps inward partial and completed crops on the same source pixels, including release',async()=>{
+    const {r,f,validation}=fixture();
+    Object.assign(f,{centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal('.5'),
+      width:3200,height:1856,interacting:true,zoom:1});
+    const live={...f,unitsPerPixel:new Decimal('.75'),width:1600,height:900};
+    Object.assign(r,{currentView:live,historyValid:false,lastFrame:null,history:null});
+    const publication=r.retainDisplayedPartial(live,true);validation.resolve(null);expect(await publication).toBe(true);
+    const partial=r.lastFrame;
+    expect(partial.unitsPerPixel.eq('.5')).toBe(true);
+    expect(partial.width).toBe(2400);expect(partial.height).toBe(1350);
+    r.currentView={...live,interacting:false,zoom:0};
+    const completed=r.snapshotFrame(f);
+    for(const key of ['centerX','centerY','unitsPerPixel'])expect(completed[key].eq(partial[key])).toBe(true);
+    expect(completed.width).toBe(partial.width);expect(completed.height).toBe(partial.height);
+    const encoder={copyTextureToTexture:vi.fn()},candidate={};
+    r.encodeCompletedSnapshot(encoder,f,completed,candidate);
+    expect(encoder.copyTextureToTexture).toHaveBeenCalledWith({texture:r.target,origin:{x:400,y:253}},
+      {texture:candidate},{width:2400,height:1350});
+  });
+  it('preserves outward and rotated completed snapshot coverage',()=>{
+    const {r,f}=fixture();
+    Object.assign(f,{interacting:true,zoom:-1});
+    r.currentView={...f,width:1600,height:900,unitsPerPixel:f.unitsPerPixel.times(.5)};
+    for(const angle of [0,37]){
+      f.angle=angle;r.currentView.angle=angle;
+      const retained=r.snapshotFrame(f);
+      expect(retained.width).toBe(2560);expect(retained.height).toBe(1440);
+      expect(retained.unitsPerPixel.eq(f.unitsPerPixel.times(2))).toBe(true);
+    }
+    Object.assign(f,{angle:0,zoom:1});Object.assign(r.currentView,{angle:0,zoom:-1});
+    const reversed=r.snapshotFrame(f);
+    expect([reversed.width,reversed.height]).toEqual([2560,1440]);
+    expect(reversed.unitsPerPixel.eq(f.unitsPerPixel.times(2))).toBe(true);
+  });
+  it('keeps useful finer partial coverage when a capped complete snapshot already covers the view',()=>{
+    const {r,f,old}=fixture();
+    const view={...f,centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(1),width:1600,height:900};
+    const fine={...view,unitsPerPixel:new Decimal('.5'),proxy:true,snapshotComplete:false,
+      coveredRegions:[{x:0,y:0,width:1600,height:900,spacing:new Decimal('.5')}]};
+    const broad={...view,unitsPerPixel:new Decimal(2),proxy:true,snapshotComplete:true};
+    const back={destroy:vi.fn()},candidate={};
+    Object.assign(r,{currentView:{...view,unitsPerPixel:new Decimal('.75')},lastFrame:fine,coverageFrame:broad,coverageHistory:back});
+    r.commitHistory({...view,proxy:true,snapshotComplete:true},candidate);
+    expect(r.coverageHistory).toBe(old);expect(r.coverageFrame).toBe(fine);
+    expect(r.history).toBe(candidate);expect(r.spareHistory).toBe(back);
+    expect(old.destroy).not.toHaveBeenCalled();
+  });
+  it('keeps broad history after an authoritative native completion instead of retaining subpixel partials',()=>{
+    const {r,f,old}=fixture();
+    const view={...f,centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(1),width:1600,height:900};
+    const fine={...view,unitsPerPixel:new Decimal('.5'),proxy:true,snapshotComplete:false,
+      coveredRegions:[{x:0,y:0,width:1600,height:900,spacing:new Decimal('.5')}]};
+    const broad={...view,unitsPerPixel:new Decimal(4),proxy:true,snapshotComplete:true},back={destroy:vi.fn()};
+    Object.assign(r,{currentView:view,lastFrame:fine,coverageFrame:broad,coverageHistory:back});
+    r.commitHistory({...view,proxy:true,snapshotComplete:true},{});
+    expect(r.coverageHistory).toBe(back);expect(r.coverageFrame).toBe(broad);expect(r.spareHistory).toBe(old);
+  });
+  it('keeps full inward completed coverage when the source already fits losslessly',()=>{
+    const {r,f}=fixture();
+    Object.assign(f,{width:1600,height:900,unitsPerPixel:new Decimal(1),interacting:true,zoom:1});
+    r.currentView={...f,unitsPerPixel:new Decimal('.75')};
+    const retained=r.snapshotFrame(f),candidate={},encoder={copyTextureToTexture:vi.fn()};
+    expect([retained.width,retained.height]).toEqual([1600,900]);
+    expect(retained.unitsPerPixel.eq(f.unitsPerPixel)).toBe(true);
+    r.encodeCompletedSnapshot(encoder,f,retained,candidate);
+    expect(encoder.copyTextureToTexture).toHaveBeenCalledWith({texture:r.target},{texture:candidate},{width:1600,height:900});
+    expect(r.encodeBlit).not.toHaveBeenCalled();
+  });
+  it('does not evict useful back coverage for a fine raster with only coarse samples',()=>{
+    const {r,f,old}=fixture();
+    const view={...f,centerX:new Decimal(0),centerY:new Decimal(0),unitsPerPixel:new Decimal(1),width:1600,height:900};
+    const sparse={...view,unitsPerPixel:new Decimal('.5'),proxy:true,snapshotComplete:false,
+      coveredRegions:[{x:0,y:0,width:1600,height:900,spacing:new Decimal(8)}]};
+    const back={destroy:vi.fn()};
+    Object.assign(r,{currentView:view,lastFrame:sparse,coverageFrame:{...view,snapshotComplete:true},coverageHistory:back});
+    r.commitHistory({...view,proxy:true,snapshotComplete:true},{});
+    expect(r.coverageHistory).toBe(back);expect(r.spareHistory).toBe(old);
+  });
+  it('preserves a finer partial source when bounded partial retention must coarsen',async()=>{
+    const {r,f,old,validation}=fixture();
+    const fine={...f,width:2560,height:1440,unitsPerPixel:new Decimal('.0005'),proxy:true,snapshotComplete:false,
+      coveredRegions:[{x:0,y:0,width:2560,height:1440,spacing:new Decimal('.0005')}]};
+    const back={destroy:vi.fn()};
+    Object.assign(r,{lastFrame:fine,coverageHistory:back,coverageFrame:{...f,unitsPerPixel:new Decimal('.002'),snapshotComplete:true}});
+    const publication=r.retainDisplayedPartial(f,true);validation.resolve(null);expect(await publication).toBe(true);
+    expect(r.coverageHistory).toBe(old);expect(r.coverageFrame).toBe(fine);
+    expect(old.destroy).not.toHaveBeenCalled();expect(back.destroy).toHaveBeenCalledOnce();
+  });
   it('keeps old history until validation, coalesces allocations and never declares proxy completion',async()=>{
     const {r,f,old,validation,textures}=fixture();
     const publication=r.retainDisplayedPartial(f,true);
