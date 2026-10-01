@@ -14,14 +14,18 @@ export function canReuseExportPixels(choice:ExportChoice){
   // output texture, padded readback and detached CPU pixels.
   return checked.pixels*32+checked.maxEncodedBytes*2+16*1024*1024<=EXPORT_MEMORY_LIMIT;
 }
-export async function encodeCapturedExport(frame:CapturedExport):Promise<Blob>{
+export async function encodeCapturedExport(frame:CapturedExport,signal?:AbortSignal):Promise<Blob>{
+  signal?.throwIfAborted();
   const choice=checkedExportDimensions(frame.width,frame.height);
   if(frame.pixels.length!==choice.pixels*4||!canReuseExportPixels(choice))throw Error('The captured image exceeds the export memory limit.');
-  const writer=createStreamingPng(frame.width,frame.height,{maxEncodedBytes:choice.maxEncodedBytes});
+  const writer=createStreamingPng(frame.width,frame.height,{maxEncodedBytes:choice.maxEncodedBytes,signal});
   const bytes=new Uint8Array(frame.pixels.buffer,frame.pixels.byteOffset,frame.pixels.byteLength);
   try{
-    for(let y=0;y<frame.height;y+=64)await writer.appendRows(bytes.subarray(y*frame.width*4,Math.min(frame.height,y+64)*frame.width*4));
-    return await writer.finish();
+    for(let y=0;y<frame.height;y+=64){
+      signal?.throwIfAborted();
+      await writer.appendRows(bytes.subarray(y*frame.width*4,Math.min(frame.height,y+64)*frame.width*4));
+    }
+    const blob=await writer.finish();signal?.throwIfAborted();return blob;
   }finally{await writer.cancel();}
 }
 
@@ -35,7 +39,7 @@ export function snapshotExportRequest(request:RenderRequest):RenderRequest {
     // coordinate scratch protocol is deliberately outside this export port.
     tuning:{...(request.tuning??DEFAULT_TUNING),hardPixelBudget:0},
     followView:false,publishPartial:false,dynamicIterations:false,provisionalNavigationCap:false,
-    betweenBatches:undefined,isCurrent:undefined,isCalculationCurrent:undefined,focus:undefined,zoom:0,
+    betweenBatches:undefined,beforePreparation:undefined,isCurrent:undefined,isCalculationCurrent:undefined,focus:undefined,zoom:0,
     interacting:false,stationaryOversampling:false,overscanPixels:undefined,workView:undefined,exportDomain:undefined,tileRows:undefined};
 }
 

@@ -16,13 +16,12 @@ export const RANGE_DEFAULTS: Record<string, number> = {
   'ambient-light': DEFAULT_COLORS.ambientLight,
   'specular-strength': DEFAULT_COLORS.specularStrength,
   'panel-opacity': 0.8,
-  'tuning-batch-target': DEFAULT_TUNING.batchTargetMs,
-  'tuning-batch-multiplier': DEFAULT_TUNING.batchMultiplier,
   'tuning-hard-budget': HARD_PIXEL_BUDGETS.indexOf(DEFAULT_TUNING.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number]),
   'tuning-overscan-base': DEFAULT_TUNING.overscanBase,
   'tuning-overscan-max': DEFAULT_TUNING.overscanMax,
   'tuning-depth-gain': DEFAULT_TUNING.dynamicDepthGain,
-  'tuning-cap-gain': DEFAULT_TUNING.dynamicCapGain,
+  'tuning-bla-epsilon': -DEFAULT_TUNING.blaPrecisionLog2,
+  'tuning-pointer-priority': DEFAULT_TUNING.pointerPriority,
 };
 
 export function wheelRangeValue(value: number, min: number, max: number, step: string, deltaY: number) {

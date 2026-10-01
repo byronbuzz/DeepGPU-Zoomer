@@ -83,7 +83,9 @@ export interface BuildOptions {
   maxLevels?: number;
   epsilonLog2?: number;
   /** Legacy reduced samples or the renderer's four-word reference samples. */
-  sampleWords?: 6 | 20;
+  sampleWords?: 6 | 10 | 20;
+  /** GPU lookup uses spans >= 2; retain level numbering but omit one-step storage. */
+  omitSingleStep?: boolean;
 }
 
 /** Preserve ordinary binary64 bounds, but never narrow a deep Decimal to zero. */
@@ -113,37 +115,76 @@ function* buildBlaSteps(
   // Store entries for reference indices 1..length-2; the shader uses the same
   // index-1 alignment at every merged level.
   const count = Math.max(0, length - 2);
-  const refX = new Float64Array(count), refY = new Float64Array(count);
-  for (let i = 0; i < count; i++) {
-    if (i % 8192 === 0 || shouldYield?.()) yield;
-    if (options.sampleWords === 20) {
-      const at = (i + 1) * 20;
-      refX[i] = (orbit[at] + orbit[at + 1] + orbit[at + 2] + orbit[at + 3]) * 2 ** orbit[at + 4];
-      refY[i] = (orbit[at + 5] + orbit[at + 6] + orbit[at + 7] + orbit[at + 8]) * 2 ** orbit[at + 9];
-    } else {
-      const at = (i + 1) * 6;
-      refX[i] = (orbit[at] + orbit[at + 1]) * 2 ** orbit[at + 2];
-      refY[i] = (orbit[at + 3] + orbit[at + 4]) * 2 ** orbit[at + 5];
-    }
+  const counts = [count], maxLevels = options.maxLevels ?? 21;
+  for (let level = 1; level < maxLevels; level++) {
+    const nextCount = Math.floor(counts[level - 1] / 2);
+    if (nextCount < 1) break;
+    counts.push(nextCount);
   }
-
+  const levelOffsets: number[] = [], levelCounts: number[] = [];
+  let entryCount = 0;
+  for (let level = 0; level < counts.length; level++) {
+    const storedCount = options.omitSingleStep && level === 0 ? 0 : counts[level];
+    levelOffsets.push(entryCount); levelCounts.push(storedCount); entryCount += storedCount;
+  }
+  const data = new Float32Array(Math.max(1, entryCount) * ENTRY_FLOATS);
+  // Keep full binary64 coefficients until every dependent merge is complete.
+  // Only the current and next levels live here; the f32 transport is output,
+  // never input to a higher level's coefficient or radius calculation.
+  const STEP_DOUBLES = 7;
+  let current = new Float64Array(count * STEP_DOUBLES);
+  const store = (target: Float64Array, index: number, a: Scaled, b: Scaled, radius: number) => {
+    const at = index * STEP_DOUBLES;
+    target[at] = a.x; target[at + 1] = a.y; target[at + 2] = a.e;
+    target[at + 3] = b.x; target[at + 4] = b.y; target[at + 5] = b.e; target[at + 6] = radius;
+  };
+  const load = (source: Float64Array, index: number, step: Step) => {
+    const at = index * STEP_DOUBLES;
+    step.a.x = source[at]; step.a.y = source[at + 1]; step.a.e = source[at + 2];
+    step.b.x = source[at + 3]; step.b.y = source[at + 4]; step.b.e = source[at + 5]; step.radiusLog2 = source[at + 6];
+  };
   const maxDeltaLog2 = deltaBoundLog2(maxDelta);
-  const levels: Step[][] = [[]];
   for (let i = 0; i < count; i++) {
     if (i % 4096 === 0 || shouldYield?.()) yield;
-    const a = normalise(2 * refX[i], 2 * refY[i], 0);
+    let x: number, y: number;
+    if (options.sampleWords === 10 || options.sampleWords === 20) {
+      const at = (i + 1) * options.sampleWords;
+      x = (orbit[at] + orbit[at + 1] + orbit[at + 2] + orbit[at + 3]) * 2 ** orbit[at + 4];
+      y = (orbit[at + 5] + orbit[at + 6] + orbit[at + 7] + orbit[at + 8]) * 2 ** orbit[at + 9];
+    } else {
+      const at = (i + 1) * 6;
+      x = (orbit[at] + orbit[at + 1]) * 2 ** orbit[at + 2];
+      y = (orbit[at + 3] + orbit[at + 4]) * 2 ** orbit[at + 5];
+    }
+    const a = normalise(2 * x, 2 * y, 0);
     const magnitude = log2Magnitude(a);
-    levels[0].push({ a, b: ONE, radiusLog2: Number.isFinite(magnitude) ? magnitude + (options.epsilonLog2 ?? EPSILON_LOG2) : NEVER });
+    store(current, i, a, ONE, Number.isFinite(magnitude) ? magnitude + (options.epsilonLog2 ?? EPSILON_LOG2) : NEVER);
   }
-
-  const maxLevels = options.maxLevels ?? 21;
-  for (let level = 1; level < maxLevels; level++) {
-    const previous = levels[level - 1], mergedCount = Math.floor(previous.length / 2);
-    if (mergedCount < 1) break;
-    const merged: Step[] = [];
+  const first: Step = { a: {x:0,y:0,e:0}, b: {x:0,y:0,e:0}, radiusLog2:NEVER };
+  const second: Step = { a: {x:0,y:0,e:0}, b: {x:0,y:0,e:0}, radiusLog2:NEVER };
+  let hasUsableMultiStep = false;
+  for (let levelIndex = 0; levelIndex < counts.length; levelIndex++) {
+    // Finalize this level directly into its predetermined transport range.
+    // The omitted base level is still retained in binary64 for its first merge.
+    const offset = levelOffsets[levelIndex];
+    for (let index = 0; index < levelCounts[levelIndex]; index++) {
+      if (index % 4096 === 0 || shouldYield?.()) yield;
+      const target = (offset + index) * ENTRY_FLOATS, source = index * STEP_DOUBLES;
+      for (let slot = 0; slot < 2; slot++) {
+        const at = source + slot * 3, to = target + slot * 5;
+        data[to] = current[at]; data[to + 1] = current[at] - Math.fround(current[at]);
+        data[to + 2] = current[at + 1]; data[to + 3] = current[at + 1] - Math.fround(current[at + 1]);
+        data[to + 4] = current[at + 2];
+      }
+      const radius = current[source + 6];
+      data[target + 10] = radius;
+      if (levelIndex > 0 && radius > MIN_USABLE_RADIUS_LOG2) hasUsableMultiStep = true;
+    }
+    if (levelIndex + 1 === counts.length) break;
+    const mergedCount = counts[levelIndex + 1], merged = new Float64Array(mergedCount * STEP_DOUBLES);
     for (let i = 0; i < mergedCount; i++) {
       if (i % 2048 === 0 || shouldYield?.()) yield;
-      const first = previous[2 * i], second = previous[2 * i + 1];
+      load(current, 2 * i, first); load(current, 2 * i + 1, second);
       const injectedLog2 = log2Magnitude(first.b) + maxDeltaLog2;
       let radiusLog2 = NEVER;
       if (injectedLog2 < second.radiusLog2) {
@@ -151,36 +192,12 @@ function* buildBlaSteps(
         radiusLog2 = Math.min(first.radiusLog2, remaining - log2Magnitude(first.a));
       }
       if (!Number.isFinite(radiusLog2)) radiusLog2 = NEVER;
-      merged.push({ ...compose(first, second), radiusLog2 });
+      const combined = compose(first, second);
+      store(merged, i, combined.a, combined.b, radiusLog2);
     }
-    levels.push(merged);
+    current = merged;
   }
-
-  const entryCount = levels.reduce((sum, level) => sum + level.length, 0);
-  const data = new Float32Array(Math.max(1, entryCount) * ENTRY_FLOATS);
-  const levelOffsets: number[] = [], levelCounts: number[] = [];
-  let offset = 0, hasUsableMultiStep = false;
-  for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
-    const level = levels[levelIndex];
-    levelOffsets.push(offset); levelCounts.push(level.length);
-    for (let index = 0; index < level.length; index++) {
-      if (index % 4096 === 0 || shouldYield?.()) yield;
-      const target = (offset + index) * ENTRY_FLOATS, step = level[index];
-      const put = (slot: number, value: Scaled) => {
-        data[target + slot * 5] = value.x;
-        data[target + slot * 5 + 1] = value.x - Math.fround(value.x);
-        data[target + slot * 5 + 2] = value.y;
-        data[target + slot * 5 + 3] = value.y - Math.fround(value.y);
-        data[target + slot * 5 + 4] = value.e;
-      };
-      put(0, step.a); put(1, step.b); data[target + 10] = step.radiusLog2;
-      // Level zero spans one iteration and is deliberately ignored by the
-      // shader. Use the same radius eligibility cutoff as takeSkip.
-      if (levelIndex > 0 && step.radiusLog2 > MIN_USABLE_RADIUS_LOG2) hasUsableMultiStep = true;
-    }
-    offset += level.length;
-  }
-  return { data, levelOffsets, levelCounts, levels: levels.length, entryCount, hasUsableMultiStep };
+  return { data, levelOffsets, levelCounts, levels: counts.length, entryCount, hasUsableMultiStep };
 }
 
 export function buildBla(orbit: Float32Array, length: number, maxDelta: number | Decimal, options: BuildOptions = {}): BlaTable {
@@ -211,6 +228,7 @@ export async function buildBlaAsync(
 }
 
 export function readStep(table: BlaTable, level: number, index: number): Step {
+  if(!Number.isInteger(level)||!Number.isInteger(index)||index < 0 || index >= (table.levelCounts[level] ?? 0))throw new RangeError('BLA entry is not stored');
   const base = (table.levelOffsets[level] + index) * ENTRY_FLOATS;
   const get = (slot: number): Scaled => ({
     x: table.data[base + slot * 5] + table.data[base + slot * 5 + 1],
@@ -225,5 +243,6 @@ export function applyStep(step: Step, w: Scaled, delta: Scaled): Scaled {
 }
 
 export function stepRadiusLog2(table: BlaTable, level: number, index: number): number {
+  if(!Number.isInteger(level)||!Number.isInteger(index)||index < 0 || index >= (table.levelCounts[level] ?? 0))throw new RangeError('BLA entry is not stored');
   return table.data[(table.levelOffsets[level] + index) * ENTRY_FLOATS + 10];
 }

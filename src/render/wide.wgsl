@@ -1,11 +1,12 @@
 // Shared QD-derived transport and recurrence for sensitive perturbation orbits.
 // Coordinates, reference samples and rebased deltas retain all four words.
 struct Wide { x: vec4<f32>, y: vec4<f32>, e: i32 };
-struct DecodedReference { absolute: Wide, relative: Wide };
 
 // Each immutable raw reference sample is normalised once by
 // decodeReferenceOrbit. Pixel recurrences only load these decoded bits.
-@group(0) @binding(9) var<storage, read_write> decodedOrbit: array<DecodedReference>;
+// One Wide per Mandelbrot sample; Julia retains adjacent absolute/relative
+// Wides. Each Wide has the same 48-byte layout as either half of the old pair.
+@group(0) @binding(9) var<storage, read_write> decodedOrbit: array<Wide>;
 @group(0) @binding(10) var<storage, read_write> decodeMismatches: atomic<u32>;
 
 fn wideNorm(a: Wide) -> Wide {
@@ -94,8 +95,8 @@ fn analyticMandelbrotInterior(c: Wide) -> bool {
     return decisivelyPositive(wideAdd(right, wideNegate(left)));
 }
 
-fn decodeRawReference(index: u32, relative: bool) -> Wide {
-    let base = index * 20u + select(0u, 10u, relative);
+fn decodeRawReference(index: u32) -> Wide {
+    let base = index * 10u;
     let ex = i32(rawOrbit[base + 4u]);
     let ey = i32(rawOrbit[base + 9u]);
     // The producer emits adjacent unsigned chunks; renormalize them into the
@@ -110,18 +111,15 @@ fn decodeRawReference(index: u32, relative: bool) -> Wide {
 }
 
 fn wideReference(index: u32, relative: bool) -> Wide {
-    let decoded = decodedOrbit[index];
-    if (relative) { return decoded.relative; }
-    return decoded.absolute;
+    let component = index * select(1u, 2u, JULIA) + select(0u, 1u, JULIA && relative);
+    return decodedOrbit[component];
 }
 
 @compute @workgroup_size(64)
-fn decodeReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let index = gid.x;
+fn decodeReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let index = gid.x + gid.y * groups.x * 64u;
     if (index >= arrayLength(&decodedOrbit)) { return; }
-    decodedOrbit[index] = DecodedReference(
-        decodeRawReference(index, false),
-        decodeRawReference(index, true));
+    decodedOrbit[index] = decodeRawReference(index);
 }
 
 fn sameWideBits(a: Wide, b: Wide) -> bool {
@@ -132,12 +130,11 @@ fn sameWideBits(a: Wide, b: Wide) -> bool {
 // Development validation compares stored entries with the incumbent decoder
 // on the GPU, avoiding a second arithmetic implementation on the CPU.
 @compute @workgroup_size(64)
-fn verifyDecodedReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let index = gid.x;
+fn verifyDecodedReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
+    let index = gid.x + gid.y * groups.x * 64u;
     if (index >= arrayLength(&decodedOrbit)) { return; }
     let decoded = decodedOrbit[index];
-    if (!sameWideBits(decoded.absolute, decodeRawReference(index, false)) ||
-        !sameWideBits(decoded.relative, decodeRawReference(index, true))) {
+    if (!sameWideBits(decoded, decodeRawReference(index))) {
         atomicAdd(&decodeMismatches, 1u);
     }
 }
@@ -193,6 +190,7 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var checkpointPower = 1u;
     var checkpointLength = 0u;
     var haveCheckpoint = false;
+    var termination = SAMPLE_LIMIT;
 
     while (n < u.maxIterations && !escaped) {
         var span = 0u;
@@ -248,7 +246,9 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
         }
         if (detectPeriodic && !escaped && (n & 63u) == 0u) {
             if (haveCheckpoint && referenceIndex == checkpointReference &&
-                sameWideBits(delta, checkpointDelta) && sameWideBits(z, checkpointZ)) { break; }
+                sameWideBits(delta, checkpointDelta) && sameWideBits(z, checkpointZ)) {
+                termination = SAMPLE_NUMERICAL_PERIODIC; break;
+            }
             checkpointLength += 1u;
             // Brent checkpoints on the sparse sample stream also catch exact
             // cycles whose period does not divide the 64-iteration stride.
@@ -263,5 +263,5 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
         }
     }
     return Sample(escaped, n, zValue, z2, hdrLog2(derivative), skipped, skips, rebases,
-                  wideLog(delta), referenceIndex);
+                  wideLog(delta), referenceIndex, select(termination, SAMPLE_ESCAPE, escaped));
 }

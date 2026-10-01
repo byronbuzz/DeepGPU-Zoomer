@@ -1,4 +1,5 @@
-import type { PackedReferenceOrbit, ReferenceOrbitInput, ReferenceStage } from "./reference-orbit";
+import { REFERENCE_CHUNK_ITERATIONS,
+  type PackedReferenceOrbit, type ReferenceOrbitInput, type ReferenceResumeState, type ReferenceStage } from "./reference-orbit";
 
 type WorkerResponse =
   | { id: number; stage: ReferenceStage }
@@ -49,12 +50,14 @@ export class ReferenceWorkerClient {
     return worker;
   }
 
-  generate(input: ReferenceOrbitInput, diagnosticStages = false): Promise<PackedReferenceOrbit> {
+  /** Returns one bounded suffix; the owner admits it before requesting the next. */
+  generate(input: ReferenceOrbitInput, diagnosticStages = false, resume?: ReferenceResumeState,
+    iterationBudget = REFERENCE_CHUNK_ITERATIONS): Promise<PackedReferenceOrbit> {
     if (this.activeJob) throw new Error("Reference worker already has an active job");
     const id = this.nextId++, worker = this.ensureWorker();
     return new Promise((resolve, reject) => {
       this.activeJob = { id, resolve, reject };
-      try { worker.postMessage({ id, input, diagnosticStages }); }
+      try { worker.postMessage({ id, input, diagnosticStages, resume, iterationBudget }); }
       catch (error) {
         this.activeJob = null; this.worker = null; worker.terminate(); reject(error);
       }

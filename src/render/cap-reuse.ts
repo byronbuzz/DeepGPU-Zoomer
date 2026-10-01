@@ -11,11 +11,13 @@ export interface AdmittedSamples {
   approximation: unknown;
 }
 
-/** This permits only an automatic upward-cap remap at identical sample coordinates.
- * The existing shader cap stamps decide which copied samples need more work. */
-export function upwardCapRemap(previous: AdmittedSamples | null, next: AdmittedSamples, automatic: boolean) {
+/** Automatic cap changes may reuse identical sample coordinates. Decreases
+ * additionally filter the remapped entries; only earlier escapes and analytic
+ * interiors are retained. Numerical periodicity remains provisional and is
+ * retried on a cap change; upgrades use the per-sample cap/provisional stamps. */
+export function automaticCapRemap(previous: AdmittedSamples | null, next: AdmittedSamples, automatic: boolean) {
   if(!automatic||!previous||!previous.ordinary||!next.ordinary||
-    next.maxIterations<=previous.maxIterations||previous.policy!==next.policy||
+    next.maxIterations===previous.maxIterations||previous.policy!==next.policy||
     previous.reference!==next.reference||previous.approximation!==next.approximation)return null;
   return sampleGridRemap(previous.view,next.view);
 }

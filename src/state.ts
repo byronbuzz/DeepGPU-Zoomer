@@ -31,12 +31,22 @@ export function encodeView(v: SavedView): string { return encodeURIComponent(JSO
 export function decodeView(s: string): SavedView { return validateView(JSON.parse(decodeURIComponent(s))); }
 export class Camera {
   x = new Decimal(HOME.x); y = new Decimal(HOME.y); span = new Decimal(HOME.span);
+  private pixelScale?: {span:Decimal;height:number;value:Decimal};
   angle = 0;
   revision = 0;
   load(v: SavedView) { this.x=new Decimal(v.x);this.y=new Decimal(v.y);this.span=new Decimal(v.span);this.angle=v.angle??0;this.precision();this.revision++; }
   precision() { Decimal.set({precision:Math.max(100,-this.span.e+85)}); }
+  unitsPerPixel(height:number) {
+    if(this.pixelScale?.span===this.span&&this.pixelScale.height===height)return this.pixelScale.value;
+    // Renderer preparation changes global precision. The same camera must
+    // still describe exactly the same sample grid before and after it yields.
+    const D=Decimal.clone({precision:Math.max(100,-this.span.e+85,this.span.sd()+32),rounding:Decimal.ROUND_HALF_UP});
+    const value=new Decimal(new D(this.span).div(height));
+    this.pixelScale={span:this.span,height,value};
+    return value;
+  }
   point(px:number,py:number,width:number,height:number) {
-    const u=this.span.div(height),dx=px-width/2,dy=height/2-py;
+    const u=this.unitsPerPixel(height),dx=px-width/2,dy=height/2-py;
     if(this.angle===0)return {x:this.x.plus(u.times(dx)),y:this.y.plus(u.times(dy))};
     const {c,s}=rotationBasis(this.angle);
     return {x:this.x.plus(u.times(new Decimal(dx).times(c).minus(new Decimal(dy).times(s)))),
@@ -49,7 +59,7 @@ export class Camera {
     const before=this.point(px,py,width,height);this.span=next;
     const after=this.point(px,py,width,height);this.x=this.x.plus(before.x.minus(after.x));this.y=this.y.plus(before.y.minus(after.y));this.revision++;
   }
-  pan(dx:number,dy:number,height:number) {this.precision();const u=this.span.div(height);
+  pan(dx:number,dy:number,height:number) {this.precision();const u=this.unitsPerPixel(height);
     if(this.angle===0){this.x=this.x.minus(u.times(dx));this.y=this.y.plus(u.times(dy));}
     else {const {c,s}=rotationBasis(this.angle);
       this.x=this.x.minus(u.times(new Decimal(dx).times(c).plus(new Decimal(dy).times(s))));

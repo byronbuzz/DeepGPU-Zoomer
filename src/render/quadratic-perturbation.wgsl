@@ -240,10 +240,13 @@ const LA_NEVER: f32 = -1e29;
 struct Skip {
     a: Hdr,
     b: Hdr,
+    c: Hdr,
+    d: Hdr,
+    e: Hdr,
     radiusLog2: f32,
 };
 
-const SKIP_FLOATS: u32 = 12u;
+const SKIP_FLOATS: u32 = 32u;
 
 fn loadCoefficient(base: u32, slot: u32) -> Hdr {
     let at = base + slot * 5u;
@@ -252,25 +255,27 @@ fn loadCoefficient(base: u32, slot: u32) -> Hdr {
 
 fn loadSkip(entry: u32) -> Skip {
     let base = entry * SKIP_FLOATS;
-    return Skip(
-        loadCoefficient(base, 0u),
-        loadCoefficient(base, 1u),
-        la[base + 10u]
-    );
+    return Skip(loadCoefficient(base,0u),loadCoefficient(base,1u),
+        loadCoefficient(base,2u),loadCoefficient(base,3u),
+        loadCoefficient(base,4u),la[base+25u]);
 }
 
-/// Applies the linear map for the precomputed range.
-// Intentionally narrow only the BLA affine operands from Wide to Hdr; the
-// ordinary recurrence, rebase and escape paths retain full Wide arithmetic.
 fn hdrFromWide(value: Wide) -> Hdr {
     return Hdr(vec2<f32>(value.x.x, value.y.x), vec2<f32>(value.x.y, value.y.y), value.e);
 }
 
+// Research-only two-word application of the same factored quadratic map.
+// The ordinary recurrence, reference, rebases, and escape test remain Wide.
 fn applySkip(skip: Skip, w: Wide, d: Wide) -> Wide {
-    return wideFromHdr(hdrAdd(hdrMul(skip.a, hdrFromWide(w)), hdrMul(skip.b, hdrFromWide(d))));
+    let hw=hdrFromWide(w);
+    let hd=hdrFromWide(d);
+    let wFactor=hdrAdd(skip.a,hdrAdd(hdrMul(skip.c,hw),hdrMul(skip.d,hd)));
+    let dFactor=hdrAdd(skip.b,hdrMul(skip.e,hd));
+    return wideFromHdr(hdrAdd(hdrMul(hw,wFactor),hdrMul(hd,dFactor)));
 }
 
-/// log2 of |v|, for comparing against a step's validity radius.
+/// log2 of |v|
+
 fn hdrLog2(v: Hdr) -> f32 {
     let m = dot(v.m, v.m);
     if (m == 0.0) { return -1e30; }
@@ -308,17 +313,18 @@ fn takeSkip(
 
     // Every longer same-start entry has a radius no greater than level 1's
     // stored radius. If this shortest multi-step entry fails, no skip can fit.
-    if (level < 1) { return 0u; }
-    let shortestSpan = u.laBaseStep << 1u;
-    let shortestIndex = unit >> 1u;
-    if (shortestSpan > remaining || shortestIndex >= laIndex[u.laLevels + 1u]) { return 0u; }
-    let shortestRadius = la[(laIndex[1u] + shortestIndex) * SKIP_FLOATS + 10u];
+    let minimumLevel = 0u;
+    if (level < 0) { return 0u; }
+    let shortestSpan = u.laBaseStep << minimumLevel;
+    let shortestIndex = unit >> minimumLevel;
+    if (shortestSpan > remaining || shortestIndex >= laIndex[u.laLevels + minimumLevel]) { return 0u; }
+    let shortestRadius = la[(laIndex[minimumLevel] + shortestIndex) * SKIP_FLOATS + 25u];
     if (shortestRadius <= LA_NEVER || dzLog2 > shortestRadius) { return 0u; }
 
     loop {
         // A one-iteration BLA does not eliminate an iteration; use the ordinary
         // Wide recurrence instead and reserve BLA application for spans >= 2.
-        if (level < 1) { break; }
+        if (level < 0) { break; }
         let count = laIndex[u.laLevels + u32(level)];
         let index = unit >> u32(level);
 

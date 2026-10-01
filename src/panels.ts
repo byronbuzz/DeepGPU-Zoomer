@@ -7,7 +7,7 @@ const RESIZABLE_IDS=['controls','julia-preview'];
 const panelDimension=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)&&value>0?Math.min(32768,Math.max(1,value)):undefined;
 export interface PanelSettings {
   positions:Record<string,{x:number;y:number;width?:number;height?:number}>;
-  opacity:number;accent:string;activeTab:string;details:Record<string,boolean>;controlsHidden:boolean;
+  opacity:number;accent:string;activeTab:string;details:Record<string,boolean>;controlsHidden:boolean;hideStatusWithMenu:boolean;
 }
 export function normalizePanelSettings(value:unknown):PanelSettings{
   const input=value&&typeof value==='object'?value as Partial<PanelSettings>:{};
@@ -18,7 +18,7 @@ export function normalizePanelSettings(value:unknown):PanelSettings{
   return {positions,opacity:typeof input.opacity==='number'&&Number.isFinite(input.opacity)?Math.max(.15,Math.min(1,input.opacity)):.8,
     accent:typeof input.accent==='string'&&/^#[0-9a-fA-F]{6}$/.test(input.accent)?input.accent:FACTORY_ACCENT,
     activeTab:TAB_IDS.includes(input.activeTab??'')?input.activeTab!:'tab-main',
-    details:Object.fromEntries(DETAILS_IDS.map(id=>[id,input.details?.[id]===true])),controlsHidden:input.controlsHidden===true};
+    details:Object.fromEntries(DETAILS_IDS.map(id=>[id,input.details?.[id]===true])),controlsHidden:input.controlsHidden===true,hideStatusWithMenu:input.hideStatusWithMenu===true};
 }
 export interface PanelController { reset():void;snapshot():PanelSettings }
 export function setupPanels(initial?:PanelSettings):PanelController{
@@ -26,8 +26,8 @@ export function setupPanels(initial?:PanelSettings):PanelController{
   const defaultAccent=FACTORY_ACCENT;
   let restored=normalizePanelSettings(initial);
   if(initial===undefined)try{restored=normalizePanelSettings(JSON.parse(localStorage.getItem('gpu-zoomer-layout')||'{}'));}catch{}
-  let saved=restored.positions,opacity=restored.opacity,accent=restored.accent;
-  const persist=()=>{try{localStorage.setItem('gpu-zoomer-layout',JSON.stringify({positions:saved,opacity,accent}));}catch{}};
+  let saved=restored.positions,opacity=restored.opacity,accent=restored.accent,hideStatusWithMenu=restored.hideStatusWithMenu;
+  const persist=()=>{try{localStorage.setItem('gpu-zoomer-layout',JSON.stringify({positions:saved,opacity,accent,hideStatusWithMenu}));}catch{}};
   const clamp=(p:HTMLElement,x:number,y:number)=>{
     const r=p.getBoundingClientRect();
     const pos={x:Math.max(8,Math.min(innerWidth-r.width-8,x)),y:Math.max(8,Math.min(innerHeight-r.height-8,y))};
@@ -101,7 +101,16 @@ export function setupPanels(initial?:PanelSettings):PanelController{
   tabs.forEach((tab,index)=>{tab.onclick=()=>selectTab(tab);tab.onkeydown=e=>{let next=index;if(e.key==='ArrowRight')next=(index+1)%tabs.length;else if(e.key==='ArrowLeft')next=(index+tabs.length-1)%tabs.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=tabs.length-1;else return;e.preventDefault();selectTab(tabs[next],true);};});
   const toggle=document.getElementById('toggle')!;
   const syncToggle=(hidden:boolean)=>{const label=hidden?'Show controls':'Hide controls';toggle.setAttribute('aria-label',label);toggle.title=label;toggle.setAttribute('aria-expanded',String(!hidden));};
-  toggle.onclick=()=>syncToggle(document.body.classList.toggle('controls-hidden'));
+  const toggleMenu=()=>{const hidden=document.body.classList.toggle('controls-hidden');syncToggle(hidden);if(hidden&&controls.contains(document.activeElement))toggle.focus();};
+  toggle.onclick=toggleMenu;
+  document.addEventListener('keydown',e=>{
+    if(e.key!=='Tab'||e.shiftKey||e.ctrlKey||e.altKey||e.metaKey)return;
+    e.preventDefault();if(!e.repeat)toggleMenu();
+  });
+  const statusSwitch=document.getElementById('status-with-menu') as HTMLInputElement;
+  const syncStatus=()=>{statusSwitch.checked=hideStatusWithMenu;document.body.classList.toggle('status-with-menu',hideStatusWithMenu);};
+  statusSwitch.onchange=()=>{hideStatusWithMenu=statusSwitch.checked;syncStatus();persist();};
+  syncStatus();
   selectTab(tabs.find(tab=>tab.id===restored.activeTab)??tabs[0]);
   document.querySelectorAll<HTMLDetailsElement>('#controls details').forEach(details=>details.open=restored.details[details.id]===true);
   document.body.classList.toggle('controls-hidden',restored.controlsHidden);syncToggle(restored.controlsHidden);
@@ -119,9 +128,9 @@ export function setupPanels(initial?:PanelSettings):PanelController{
     }
     return normalizePanelSettings({positions,opacity,accent,activeTab:tabs.find(tab=>tab.getAttribute('aria-selected')==='true')?.id,
       details:Object.fromEntries(Array.from(document.querySelectorAll<HTMLDetailsElement>('#controls details')).map(details=>[details.id,details.open])),
-      controlsHidden:document.body.classList.contains('controls-hidden')});
+      controlsHidden:document.body.classList.contains('controls-hidden'),hideStatusWithMenu});
   },reset(){
-    opacity=.8;accent=defaultAccent;setOpacity();setAccent();resetLayout(false);document.body.classList.remove('controls-hidden');syncToggle(false);
+    opacity=.8;accent=defaultAccent;hideStatusWithMenu=false;syncStatus();setOpacity();setAccent();resetLayout(false);document.body.classList.remove('controls-hidden');syncToggle(false);
     selectTab(tabs[0]);document.querySelectorAll<HTMLDetailsElement>('#controls details').forEach(details=>details.open=false);
   }};
 }

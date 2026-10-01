@@ -1,5 +1,5 @@
 import { validateColors, type ColorSettings } from './logic/colorSettings';
-import { normalizeTuning, type TuningSettings } from './tuning';
+import { normalizeTuning, migrateSavedTuning, type TuningSettings } from './tuning';
 import { normalizePanelSettings, type PanelSettings } from './panels';
 
 export const DEFAULTS_STORAGE_KEY='gpu-zoomer-defaults-v1';
@@ -31,7 +31,8 @@ export function readDefaults(storage?:Pick<Storage,'getItem'>):{value:SavedDefau
     if(raw===null)return {value:null,error:null};
     const parsed:unknown=JSON.parse(raw);
     if(!object(parsed)||parsed.version!==1)throw new Error('Unsupported saved defaults.');
-    return {value:validateDefaults(parsed.settings),error:null};
+    const defaults=validateDefaults(parsed.settings);
+    return {value:{...defaults,tuning:migrateSavedTuning((parsed.settings as Record<string,unknown>).tuning)},error:null};
   }catch{return {value:null,error:'Saved defaults could not be read. Factory settings will be used.'};}
 }
 export function saveDefaults(value:SavedDefaults,storage?:Pick<Storage,'setItem'>):{error:string|null}{

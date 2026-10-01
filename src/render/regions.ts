@@ -45,17 +45,23 @@ export function coverageDeficit(r:Region,covered:Demand['covered']){
   return disjointDeficit(r,disjointCoverage(covered));
 }
 export function schedulerService(turn:number,distributed:boolean,rows=false,tuning?:RegionTuning):'pointer'|'distributed'|'oldest'{
+  // Keep two pointer selections between evenly spaced oldest/distributed turns.
+  // Other weights and unavailable-distributed fallbacks retain their behaviour.
+  if(tuning?.pointer===12 && tuning.distributed===3 && tuning.oldest===3 && distributed && !rows){
+    const phase=(turn-1)%6;
+    return phase===2?'oldest':phase===5?'distributed':'pointer';
+  }
   // The incumbent 4:2:2 sequence is intentional, including its row fallback.
   if(!tuning || tuning.pointer===8 && tuning.distributed===4 && tuning.oldest===4)
     return turn%4===0?'oldest':distributed&&turn%2===0&&!rows?'distributed':'pointer';
   const weights=[tuning.pointer,distributed&&!rows?tuning.distributed:0,tuning.oldest]
-    .map(n=>Number.isFinite(n)?Math.max(0,Math.min(16,Math.trunc(n))):0);
+    .map(n=>Number.isFinite(n)?Math.max(0,Math.min(20,Math.trunc(n))):0);
   // Distributed work cannot run in row mode or without sparse refinement.
   if(!weights.some(Boolean))weights[0]=1;
   const total=weights[0]+weights[1]+weights[2];
   const balance=[0,0,0];
   let chosen=0;
-  // Smooth weighted round robin repeats within at most 48 turns. Deriving the
+  // Smooth weighted round robin repeats within at most 60 turns. Deriving the
   // current turn avoids scheduler state changes across compatible retargets.
   for(let n=0;n<((turn-1)%total)+1;n++){
     for(let i=0;i<3;i++)balance[i]+=weights[i];
@@ -87,15 +93,22 @@ export class PendingRegions {
   private distributedTurns=0;
   private deficits=new Map<Region,number>();
   private coverage:Demand['covered']=[];
-  reset(width: number, height: number, previewStride=1, compatible=false) {
+  private previewStride=1;
+  reset(width: number, height: number, previewStride=1, compatible=false, singlePreview=false) {
     this.width=width;this.height=height;
+    this.previewStride=previewStride;
     this.distributed=previewStride>1;
     this.pending = width && height ? [{ x: 0, y: 0, width, height, order: 0, stride: 1 }] : [];
     if(!compatible){this.turns=0;this.distributedTurns=0;}
     for(let stride=2;width&&height&&stride<=previewStride;stride*=2)
-      this.pending.push({x:0,y:0,width,height,order:0,stride});
+      if(!singlePreview||stride===previewStride)
+        this.pending.push({x:0,y:0,width,height,order:0,stride});
   }
   get size() { return this.pending.length; }
+  /** Adopt the existing settled preview policy without restarting exact work. */
+  settle(previewStride:number) {
+    this.pending=this.pending.filter(r=>r.stride===1||r.stride===previewStride);
+  }
   private deficit(r: Region, d: Demand) {
     let value=this.deficits.get(r);
     if(value===undefined){value=disjointDeficit(r,this.coverage);this.deficits.set(r,value);}
@@ -115,13 +128,36 @@ export class PendingRegions {
     const focusWeight=this.distributed&&this.turns%2===1?4:1;
     return deficit * 4 + visiblePriority + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
   }
-  take(budget: number, demand: Demand, rows?: number, tuning?: RegionTuning): Region | undefined {
+  /** Only changes density inside the selected region; never chooses its priority. */
+  private nextStride(r:Region,d:Demand,levels:number):number {
+    const v=d.visible;
+    const x=Math.max(r.x,v?.x??r.x),y=Math.max(r.y,v?.y??r.y);
+    const right=Math.min(r.x+r.width,v?v.x+v.width:r.x+r.width);
+    const bottom=Math.min(r.y+r.height,v?v.y+v.height:r.y+r.height);
+    if(right<=x||bottom<=y)return r.stride;
+    let area=0,spacing=1;
+    for(const c of this.coverage){
+      const w=Math.min(right,c.x+c.width)-Math.max(x,c.x);
+      const h=Math.min(bottom,c.y+c.height)-Math.max(y,c.y);
+      if(w>0&&h>0){area+=w*h;spacing=Math.max(spacing,c.spacing??1);}
+    }
+    // Missing coverage gets the incumbent preview, not invented sample validity.
+    let next=area<(right-x)*(bottom-y)-1e-6 ? this.previewStride :
+      Math.min(this.previewStride,2**Math.max(0,Math.ceil(Math.log2(spacing))-levels));
+    // Shading addresses anchors on the global power-of-two lattice. A region
+    // previously split at a finer density must not introduce shifted anchors.
+    while(next>r.stride&&(r.x%next!==0||r.y%next!==0))next/=2;
+    return Math.max(r.stride,next);
+  }
+  take(budget: number, demand: Demand, rows?: number, tuning?: RegionTuning, gradual=false): Region | undefined {
     this.deficits.clear();
     this.coverage=disjointCoverage(demand.covered);
     this.pending=this.pending.filter(r=>r.stride===1 || this.deficit(r,demand)>0);
     if (!this.pending.length) return;
     // Two oldest turns per eight prevent a moving focus from starving gaps.
     const service=schedulerService(++this.turns,this.distributed,!!rows,tuning);
+    // Pointer turns favour navigable detail; other turns retain broad progress.
+    const refinementLevels=service==='pointer'?2:1;
     const oldest=service==='oldest';
     const pointerRadius=service==='pointer' && tuning && Number.isFinite(tuning.pointerRadius)
       ? Math.max(16,Math.min(512,tuning.pointerRadius)) : 64;
@@ -139,6 +175,8 @@ export class PendingRegions {
         this.score(this.pending[i],demand,pointerRadius) > this.score(this.pending[index],demand,pointerRadius)) index=i;
     }
     let region = this.pending.splice(index,1)[0];
+    const originalStride=region.stride;
+    if(gradual&&!rows)region={...region,stride:this.nextStride(region,demand,refinementLevels)};
     while (Math.ceil(region.width/region.stride)*Math.ceil(region.height/region.stride) > budget || rows && region.height > rows) {
       const horizontal = rows ? false : region.width >= region.height;
       const length = horizontal ? region.width : region.height;
@@ -148,10 +186,18 @@ export class PendingRegions {
       const a = {...region}, b = {...region};
       if (horizontal) { a.width=half; b.x+=half; b.width-=half; }
       else { a.height=half; b.y+=half; b.height-=half; }
-      const first = rows || oldest || this.score(a,demand,pointerRadius) >= this.score(b,demand,pointerRadius);
+      const first = rows || oldest || this.score(a.stride===originalStride?a:{...a,stride:originalStride},demand,pointerRadius) >=
+        this.score(b.stride===originalStride?b:{...b,stride:originalStride},demand,pointerRadius);
       region = first ? a : b;
-      this.pending.push({...(first ? b : a), order:this.turns});
+      this.pending.push({...(first ? b : a),stride:originalStride, order:this.turns});
+      // A coarse neighbour may have determined the parent's density. Once the
+      // incumbent spatial selection isolates a finer child, use that child's
+      // own next level and recheck the same budget before dispatching it.
+      if(gradual&&!rows)region={...region,stride:this.nextStride({...region,stride:originalStride},demand,refinementLevels)};
     }
+    // This coarse visit supplements, rather than consumes, the selected work.
+    // Exact obligations remain disjoint and survive release to stationary mode.
+    if(region.stride!==originalStride)this.pending.push({...region,stride:originalStride});
     return region;
   }
 }

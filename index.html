@@ -27,7 +27,7 @@
       <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
       <div id="replace-location" class="linked-location" role="group" aria-labelledby="replace-location-text" hidden><p id="replace-location-text"></p><div class="row"><button id="replace-cancel" type="button">Cancel</button><button id="replace-confirm" type="button">Replace location</button></div></div>
       <div class="row save-action-row"><button id="save-defaults" type="button">Save defaults</button><button id="screenshot" type="button" aria-haspopup="dialog" aria-controls="png-export" aria-expanded="false" disabled>Save PNG</button></div>
-      <p class="help">Controls:<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag</p>
+      <p class="help">Controls:<br>Tab = open/close menu<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag</p>
     </div>
     <div id="panel-colouring" class="tab-panel" role="tabpanel" aria-labelledby="tab-colouring" hidden>
       <label>Colour spacing <output id="cycle-value">64</output><input id="cycle" type="range" min="0" max="1" value="0.5" step="0.001"></label>
@@ -61,17 +61,16 @@
     </div>
     <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
       <label>Panel opacity<input id="panel-opacity" type="range" min="0.15" max="1" step="0.01" value="0.8"></label>
-      <label class="panel-accent-label" for="panel-accent">Panel Accent Colour<input id="panel-accent" type="color" value="#eba046"></label>
+      <label class="panel-accent-label" for="panel-accent"><input id="panel-accent" type="color" value="#eba046">Panel Accent Colour</label>
+      <label class="check"><input id="status-with-menu" type="checkbox"> hide/show status line with menu</label>
       <label class="check"><input id="oversampling" type="checkbox"> 2x oversampling</label>
-      <p class="help compact">higher quality final image. no effect while zooming.</p>
-      <label class="profiling-switch"><input id="profiling" type="checkbox"> Measure GPU timings</label><p id="profiling-data">GPU timings are off.</p>
       <section id="tuning" aria-labelledby="tuning-title">
+        <!-- Keep slider help copy absent unless explicitly requested. -->
         <h2 id="tuning-title">Tuning</h2>
-        <p id="tuning-status" role="status">Navigation defaults</p>
-        <label class="tuning-control">GPU batch target <span id="tuning-batch-target-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-target-value"></output><input id="tuning-batch-target" type="range" min="2" max="16" step="1" value="8"></label>
-        <label class="tuning-control">Batch size multiplier <span id="tuning-batch-multiplier-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-batch-multiplier-value"></output><input id="tuning-batch-multiplier" type="range" min="1" max="64" step="1" value="16"></label>
-        <label class="tuning-control">Dynamic depth gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="5000" step="50" value="1000"></label>
-        <label class="tuning-control">Dynamic cap gain <span id="tuning-cap-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-cap-gain-value"></output><input id="tuning-cap-gain" type="range" min="0" max="10000" step="50" value="1500"></label>
+        <label class="tuning-control" for="tuning-pointer-priority">Pointer Priority <span id="tuning-pointer-priority-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-pointer-priority-value">3 / 5 · Default</output><input id="tuning-pointer-priority" type="range" min="0" max="4" step="1" value="2"></label>
+        <label class="tuning-control" for="tuning-bla-epsilon">BLA Precision <span id="tuning-bla-epsilon-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-bla-epsilon-value">2^-16</output><input id="tuning-bla-epsilon" type="range" min="14" max="32" step="1" value="16"></label>
+        <div class="tuning-endpoints"><span>Fast</span><span>Precise</span></div>
+        <label class="tuning-control" for="tuning-depth-gain">Dynamic Limit Gain <span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><output id="tuning-depth-gain-value"></output><input id="tuning-depth-gain" type="range" min="0" max="30000" step="50" value="5000"></label>
         <button id="tuning-reset" type="button">Reset tuning</button>
       </section>
     </div>

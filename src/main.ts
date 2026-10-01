@@ -1,7 +1,7 @@
 import './style.css';
 import Decimal from 'decimal.js';
 import { acquireGpu, backingSize, type GpuContext } from './gpu/device';
-import { WebGpuRenderer, type RenderRequest, type RenderStats } from './render/webgpu-renderer';
+import { WebGpuRenderer, Method, type RenderRequest, type RenderStats } from './render/webgpu-renderer';
 import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './logic/colorSettings';
 import { Camera, HOME, MAX_ITERATIONS, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
@@ -28,7 +28,7 @@ if(savedDefaults)dynamicEnabled=savedDefaults.dynamicEnabled;
 else if(!defaultsRead.error)try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
 let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0;
 let provisionalNavigationCap=false;
-let capTarget=0,sliderEditing=false;
+let sliderEditing=false;
 let baseEditTimer:ReturnType<typeof setTimeout>|undefined,baseEditing=false;
 let generation=0, busy=false, dirty=true, error='', lastInteraction=0, lastRevision=-1;
 let qualitySizeError=false;
@@ -41,7 +41,7 @@ let rotating=false,rotationSliderHeld=false,controlDown=false,rotationPointerAng
 const rotationKeys=new Set<string>();
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
-let profilingEnabled=false;
+
 let previewEnabled=false, selecting=false, previewBusy=false, previewPending=false, previewEpoch=0, previewRenderedEpoch=-1;
 let selectedJulia:{x:string;y:string}|null=null;
 let displayedJulia:{x:string;y:string}|null=null,previewLifetime=0;
@@ -63,7 +63,7 @@ const freshness=el('freshness'),depth=el('depth');
 let syncAppearance=()=>{};
 let messageDismissTimer=0,messageFadeTimer=0,messageVersion=0;
 let wheelSave:ReturnType<typeof setTimeout>|undefined,appearanceSave:ReturnType<typeof setTimeout>|undefined;
-function message(text:string,transient=false){
+function message(text:string,transient=true){
   const target=el('message'),version=++messageVersion;
   clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);target.classList.remove('message-fading');target.textContent=text;
   if(!text||!transient)return;
@@ -95,28 +95,36 @@ function syncIterationLabel(){
   el<HTMLButtonElement>('iteration-dynamic').setAttribute('aria-pressed',String(dynamicEnabled));
 }
 function syncTuningLabels(){
-  const count=modifiedTuningCount(tuning);
-  setText(el('tuning-status'),count?`${count} tuning settings modified`:'Navigation defaults');
   const fields:[EditableTuningKey,string][]=[
-    ['batchTargetMs','batch-target'],['batchMultiplier','batch-multiplier'],
-    ['dynamicDepthGain','depth-gain'],['dynamicCapGain','cap-gain'],
+    ['dynamicDepthGain','depth-gain'],
+    ['blaPrecisionLog2','bla-epsilon'],
+    ['pointerPriority','pointer-priority'],
   ];
   for(const [key,id] of fields){
-    el<HTMLInputElement>(`tuning-${id}`).value=String(tuning[key]);
+    el<HTMLInputElement>(`tuning-${id}`).value=String(key==='blaPrecisionLog2'?-tuning[key]:tuning[key]);
     el(`tuning-${id}-modified`).hidden=tuning[key]===DEFAULT_TUNING[key];
   }
-  setText(el('tuning-batch-target-value'),`${tuning.batchTargetMs} ms`);
-  setText(el('tuning-batch-multiplier-value'),`${tuning.batchMultiplier}×`);
   setText(el('tuning-depth-gain-value'),`${tuning.dynamicDepthGain.toLocaleString()} iterations/decade`);
-  setText(el('tuning-cap-gain-value'),`${tuning.dynamicCapGain.toLocaleString()} iterations/percentage point`);
+  setText(el('tuning-bla-epsilon-value'),`2^${tuning.blaPrecisionLog2}${tuning.blaPrecisionLog2===DEFAULT_TUNING.blaPrecisionLog2?' · Default':''}`);
+  el<HTMLInputElement>('tuning-bla-epsilon').setAttribute('aria-valuetext',`2 to the power ${tuning.blaPrecisionLog2}${tuning.blaPrecisionLog2===DEFAULT_TUNING.blaPrecisionLog2?', default':''}`);
+  el<HTMLInputElement>('tuning-bla-epsilon').disabled=view.family!=='mandelbrot';
+  const share=Math.round(100*tuning.pointerWeight/(tuning.pointerWeight+tuning.distributedWeight+tuning.oldestWeight));
+  setText(el('tuning-pointer-priority-value'),`${tuning.pointerPriority+1} / 5${tuning.pointerPriority===DEFAULT_TUNING.pointerPriority?' · Default':''}`);
+  el<HTMLInputElement>('tuning-pointer-priority').setAttribute('aria-valuetext',`${tuning.pointerPriority+1} of 5, ${share} percent pointer selection priority`);
 }
 function changeTuning(key:EditableTuningKey,value:number){
   const next=normalizeTuning({...tuning,[key]:value});
   if(EDITABLE_TUNING_KEYS.every(field=>next[field]===tuning[field]))return;
   tuning=next;
-  if(key==='dynamicCapGain')capTarget=0;
   if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
   syncTuningLabels();
+  if((key==='blaPrecisionLog2')&&view.family==='mandelbrot'){
+    // Let the renderer retire only the affected numerical policy at its next
+    // boundary; changing tolerance does not invalidate the reference orbit.
+    completedQuality=0;lastRevision=-1;stats=undefined;dirty=true;
+    engine?.reproject(request());
+    refinementTime.demand(performance.now());preparing();
+  }
   // Navigation controls apply to the next scheduling decision. They do not
   // invalidate already calculated pixels or restart the current view.
 }
@@ -125,7 +133,7 @@ function currentDepth(){
   return Math.log10(2.8)-Math.log10(Number(mantissa))-Number(exponent);
 }
 function resetDynamicAnchor(){
-  anchorDepth=currentDepth();capTarget=0;lastDynamicUpdate=0;provisionalNavigationCap=false;
+  anchorDepth=currentDepth();lastDynamicUpdate=0;provisionalNavigationCap=false;
 }
 function changeEffectiveLimit(limit:number,atBatchBoundary=false){
   const next=Math.max(1,Math.min(MAX_ITERATIONS,Math.round(limit)));
@@ -150,15 +158,22 @@ function commitPendingBaseForRefresh(){
   else message(`Base iterations must be 1–${MAX_ITERATIONS.toLocaleString()}.`);
 }
 function updateDynamicForZoom(time:number,zoomDirection:number){
-  if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing)return;
-  const progress=engine?.debugProgress();
+  if(engine?.methodForRequest(request())!==Method.Direct)return;
+  applyDynamicLimit(time,zoomDirection,500);
+}
+function applyDynamicLimit(time:number,zoomDirection:number,updateIntervalMs:number):number|null{
+  if(!dynamicEnabled||stopped||refreshPending||error||sliderEditing||baseEditing)return null;
   const next=dynamicLimitForZoom({zoomDirection,time,lastUpdate:lastDynamicUpdate,
     base:baseIterations,current:view.iterations,depthDelta:currentDepth()-anchorDepth,
-    depthGain:tuning.dynamicDepthGain,capTarget,maximum:MAX_ITERATIONS,
-    referencePreparing:!!(progress?.referenceWorkerActive||progress?.referencePreparing)});
-  if(next===null)return;
+    depthGain:tuning.dynamicDepthGain,maximum:MAX_ITERATIONS,
+    referencePreparing:false,updateIntervalMs});
+  if(next===null)return null;
   provisionalNavigationCap=true;lastDynamicUpdate=time;
   changeEffectiveLimit(next,true);
+  return next;
+}
+function updateDynamicBeforePreparation():number|null{
+  return applyDynamicLimit(performance.now(),request().zoom??0,0)??null;
 }
 function currentFieldComplete(){return !dirty&&!busy&&completedQuality===1&&lastRevision===camera.revision&&!!engine&&engine.isComplete(request());}
 function releasePointer(){const id=activePointer;activePointer=null;if(id!==null&&canvas.hasPointerCapture(id))canvas.releasePointerCapture(id);}
@@ -318,7 +333,7 @@ function request():RenderRequest{
   const margin=zoom<0?overscanCssPx(speed,tuning.overscanBase,tuning.overscanMax):0;
   const overscanPixels={x:Math.floor(margin*width/Math.max(1,innerWidth)/2)*2,
     y:Math.floor(margin*height/Math.max(1,innerHeight)/2)*2};
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.span.div(height),width,height,maxIterations:view.iterations,colors:{...renderColors(colors),postAntialias:false,...(colors.oversampling&&!moving()?{supersample:1}:{})},stationaryOversampling:colors.oversampling===true&&!moving(),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,tuning:{...tuning},isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.unitsPerPixel(height),width,height,maxIterations:view.iterations,colors:{...renderColors(colors),postAntialias:false,...(colors.oversampling&&!moving()?{supersample:1}:{})},stationaryOversampling:colors.oversampling===true&&!moving(),family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting:moving(),followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,zoomRate:speed,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,beforePreparation:()=>g===generation?updateDynamicBeforePreparation():null,tuning:{...tuning},isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
@@ -327,9 +342,6 @@ async function compute(){
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;stats=result;if(result.computed)fields++;else recolours++;
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
       provisionalNavigationCap=false;
-      if(dynamicEnabled&&result.computed&&(result.computedSamples>0||result.capUpgrade)){
-        capTarget=baseIterations+tuning.dynamicCapGain*Math.max(0,result.limitHitRatio*100-.5);
-      }
       if(numericalWasPending)refinementTime.complete(performance.now());
     }
   }catch(e){if(g===generation&&!(e instanceof DOMException && e.name==='AbortError')){error=String(e);qualitySizeError=error.includes('2x oversampling is unsupported');message(error);}}
@@ -370,11 +382,7 @@ function tick(time:number){
       preparing(time);
       setText(depth,`${depthLabel(camera.span)} · ${view.iterations.toLocaleString()} iterations`);
       el<HTMLButtonElement>('screenshot').disabled=!engine;
-      if(profilingEnabled&&engine){
-        const profile=engine.performance();
-        const phases=Object.entries(profile.phases).filter(([,p])=>p.count).map(([name,p])=>`${name==='calculate'?'Calculation':name==='antialias'?'Antialias pass':'Shading'}: ${p.meanMs.toFixed(2)} ms mean, ${p.p95Ms.toFixed(2)} ms p95 (${p.count} samples)`);
-        el('profiling-data').textContent=!profile.supported?'GPU timings are unavailable on this device.':phases.join(' · ')||'Waiting for the next render.';
-      }
+
     }
   }
   requestAnimationFrame(tick);
@@ -424,7 +432,6 @@ rotationSlider.oninput=()=>setRotation(Number(rotationSlider.value));
 rotationSlider.onchange=()=>{if(!rotationSliderHeld)finishSliderRotation();};
 rotationSlider.onpointerup=finishSliderRotation;rotationSlider.onpointercancel=finishSliderRotation;rotationSlider.onkeyup=finishSliderRotation;rotationSlider.onblur=finishSliderRotation;
 el<HTMLInputElement>('speed').oninput=e=>{speed=Number((e.target as HTMLInputElement).value);el('speed-value').textContent=speed.toFixed(1)+'×';};
-el<HTMLInputElement>('profiling').onchange=e=>{profilingEnabled=(e.target as HTMLInputElement).checked;engine?.setProfiling(profilingEnabled);el('profiling-data').textContent=profilingEnabled?'Waiting for the next render.':'GPU timings are off.';};
 el<HTMLInputElement>('iteration-slider').oninput=e=>{sliderEditing=true;const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));el('iteration-value').textContent=n.toLocaleString();};
 el<HTMLInputElement>('iteration-slider').onchange=e=>{sliderEditing=false;const n=iterationFromSlider(Number((e.target as HTMLInputElement).value));setManualBase(n);};
 const baseInput=el<HTMLInputElement>('iteration-base');
@@ -440,9 +447,9 @@ el<HTMLButtonElement>('iteration-dynamic').onclick=()=>{
   persist(false);syncIterationLabel();
 };
 const tuningInputs:[EditableTuningKey,string,(value:number)=>number][]=[
-  ['batchTargetMs','batch-target',Number],
-  ['batchMultiplier','batch-multiplier',Number],
-  ['dynamicDepthGain','depth-gain',Number],['dynamicCapGain','cap-gain',Number],
+  ['dynamicDepthGain','depth-gain',Number],
+  ['blaPrecisionLog2','bla-epsilon',value=>-Number(value)],
+  ['pointerPriority','pointer-priority',Number],
 ];
 for(const [key,id,parse] of tuningInputs){
   const control=el<HTMLInputElement>(`tuning-${id}`);
@@ -451,7 +458,7 @@ for(const [key,id,parse] of tuningInputs){
 el('tuning-reset').onclick=()=>{
   if(!modifiedTuningCount(tuning))return;
   tuning={...DEFAULT_TUNING};
-  capTarget=0;
+  
   if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
   syncTuningLabels();refresh();
 };
@@ -459,11 +466,13 @@ const locationEntry=el<HTMLInputElement>('location-entry'),locationOptions=el<HT
 const replaceLocation=el<HTMLElement>('replace-location');
 let visibleLocations:LocationChoice[]=[],locationOptionsOpen=false,filterLocations=false,activeLocation=-1;
 let pendingReplacement:{name:string;index:number;view:SavedView}|null=null;
+// Location names are shown without category or test prefixes.
+function locationLabel(name:string){return name.replace(/^(?:(?:place|saved)\s*[·:]\s*|test:\s*)+/i,'').trim();}
 function closeLocationOptions(){locationOptionsOpen=false;activeLocation=-1;locationOptions.hidden=true;locationEntry.setAttribute('aria-expanded','false');locationEntry.removeAttribute('aria-activedescendant');}
 function dismissReplacement(){pendingReplacement=null;replaceLocation.hidden=true;}
 function selectLocation(choice:LocationChoice){
   const item=choice.kind==='place'?PLACES[choice.index]:saved[choice.index];if(!item)return;
-  selectedLocation={...choice,name:item.name};locationEntry.value=item.name;dismissReplacement();closeLocationOptions();load(choice.kind==='place'?PLACES[choice.index]:saved[choice.index].view);
+  selectedLocation={...choice,name:item.name};locationEntry.value=locationLabel(item.name);dismissReplacement();closeLocationOptions();load(choice.kind==='place'?PLACES[choice.index]:saved[choice.index].view);
 }
 function highlightLocation(){
   locationOptions.querySelectorAll<HTMLElement>('[role=option]').forEach((item,index)=>item.setAttribute('aria-selected',String(index===activeLocation)));
@@ -473,13 +482,13 @@ function highlightLocation(){
 }
 function renderLocationOptions(){
   const query=filterLocations?locationEntry.value.trim().toLocaleLowerCase():'';
-  visibleLocations=[...PLACES.map((item,index)=>({kind:'place' as const,index,name:item.name})),...saved.map((item,index)=>({kind:'saved' as const,index,name:item.name}))]
-    .filter(item=>item.name.toLocaleLowerCase().includes(query));
+  visibleLocations=[...saved.map((item,index)=>({kind:'saved' as const,index,name:item.name})).reverse(),...PLACES.map((item,index)=>({kind:'place' as const,index,name:item.name}))]
+    .filter(item=>locationLabel(item.name).toLocaleLowerCase().includes(query));
   locationOptions.replaceChildren();
   visibleLocations.forEach((choice,index)=>{
     const option=document.createElement('div');option.id=`location-option-${index}`;option.className='location-option';option.setAttribute('role','option');
     option.dataset.locationKind=choice.kind;option.dataset.locationIndex=String(choice.index);
-    option.textContent=`${choice.kind==='place'?'Place':'Saved'} · ${choice.name}`;
+    option.textContent=locationLabel(choice.name);
     option.onpointerdown=event=>event.preventDefault();option.onclick=()=>selectLocation(choice);locationOptions.append(option);
   });
   if(!visibleLocations.length){const empty=document.createElement('div');empty.className='location-empty';empty.textContent='No matching location. Save to create one.';locationOptions.append(empty);}
@@ -497,15 +506,15 @@ locationEntry.onkeydown=event=>{
   else if(event.key==='Escape')closeLocationOptions();
 };
 function storeLocation(name:string,index:number,nextView:SavedView){
-  const next=saved.slice(),target=index<0?next.length:index;next[target]={name,view:nextView};
-  try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(next));saved=next;selectedLocation={kind:'saved',index:target,name};locationEntry.value=name;dismissReplacement();closeLocationOptions();message(index<0?'Location saved on this browser.':'Location updated on this browser.',true);}
+  const next=saved.filter((_,i)=>i!==index),target=next.length;next.push({name,view:nextView});
+  try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(next));saved=next;selectedLocation={kind:'saved',index:target,name};locationEntry.value=locationLabel(name);dismissReplacement();closeLocationOptions();message(index<0?'Location saved on this browser.':'Location updated on this browser.',true);}
   catch{dismissReplacement();message('Local storage is unavailable. Copy a share link instead.');}
 }
 el('save').onclick=()=>{
-  const name=locationEntry.value.trim()||`${view.family} ${saved.length+1}`,nextView=snapshot();
+  const name=locationLabel(locationEntry.value)||`${view.family} ${saved.length+1}`,nextView=snapshot();
   const selectedIndex=selectedLocation?.kind==='saved'?selectedLocation.index:-1;
-  if(selectedIndex>=0&&saved[selectedIndex]?.name.toLocaleLowerCase()===name.toLocaleLowerCase()){storeLocation(name,selectedIndex,nextView);return;}
-  const collision=saved.findIndex(item=>item.name.toLocaleLowerCase()===name.toLocaleLowerCase());
+  if(selectedIndex>=0&&saved[selectedIndex]&&locationLabel(saved[selectedIndex].name).toLocaleLowerCase()===name.toLocaleLowerCase()){storeLocation(saved[selectedIndex].name,selectedIndex,nextView);return;}
+  const collision=saved.findIndex(item=>locationLabel(item.name).toLocaleLowerCase()===name.toLocaleLowerCase());
   if(collision<0){storeLocation(name,-1,nextView);return;}
   pendingReplacement={name,index:collision,view:nextView};el('replace-location-text').textContent=`Replace saved location “${saved[collision].name}” with this view?`;
   replaceLocation.hidden=false;closeLocationOptions();el<HTMLButtonElement>('replace-cancel').focus();
@@ -527,7 +536,7 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
       generation++;engine?.abort();preparingColourData=false;dirty=false;
       stoppedAppearancePending=true;
     }else{
-      if(stopped){stopped=false;refinementTime.demand(performance.now());}
+      if(stopped||previous.oversampling!==c.oversampling){stopped=false;refinementTime.demand(performance.now());}
       if(numericalChange){
         const wasPreparing=preparingColourData,previousTarget=colourDataTarget,currentTarget=engine?.debugProgress().targets??0;
         const resized=resize(false);
@@ -546,7 +555,7 @@ setupRangeControls();
 el('save-defaults').onclick=()=>{
   if(baseEditing){const raw=baseInput.value.trim();if(!/^\d+$/.test(raw)){message('Base iterations must be a positive whole number.');return;}if(!setManualBase(Number(raw)))return;}
   const next:SavedDefaults={appearance:validateColors(colors),tuning:{...tuning},speed,baseIterations,dynamicEnabled,
-    profilingEnabled,randomStyle:el<HTMLSelectElement>('random-style').value==='unrestricted'?'unrestricted':'harmonious',panels:panelController.snapshot()};
+    profilingEnabled:false,randomStyle:el<HTMLSelectElement>('random-style').value==='unrestricted'?'unrestricted':'harmonious',panels:panelController.snapshot()};
   const result=saveDefaults(next);
   if(result.error){message(result.error);return;}
   savedDefaults=next;message('Defaults saved. Camera position and saved locations were kept separate.',true);
@@ -556,7 +565,7 @@ el('full-reset').onclick=()=>{
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
   speed=.7;el<HTMLInputElement>('speed').value='.7';el('speed-value').textContent='0.7×';
   selectedLocation=null;locationEntry.value='';dismissReplacement();closeLocationOptions();el<HTMLSelectElement>('random-style').value='harmonious';
-  profilingEnabled=false;el<HTMLInputElement>('profiling').checked=false;engine?.setProfiling(false);el('profiling-data').textContent='GPU timings are off.';
+  engine?.setProfiling(false);
   tuning={...DEFAULT_TUNING};saveTuning(tuning);syncTuningLabels();
   dynamicEnabled=true;try{localStorage.setItem(DYNAMIC_STORAGE_KEY,'on');}catch{}
   savedDefaults=null;
@@ -570,13 +579,13 @@ export const ready=(async()=>{
   try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}
   let rememberedAppearance=savedDefaults?.appearance??DEFAULT_COLORS;
   if(!savedDefaults&&!defaultsRead.error)try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
-  if(savedDefaults){speed=savedDefaults.speed;profilingEnabled=savedDefaults.profilingEnabled;el<HTMLSelectElement>('random-style').value=savedDefaults.randomStyle;}
-  el<HTMLInputElement>('speed').value=String(speed);el('speed-value').textContent=speed.toFixed(1)+'×';el<HTMLInputElement>('profiling').checked=profilingEnabled;
+  if(savedDefaults){speed=savedDefaults.speed;el<HTMLSelectElement>('random-style').value=savedDefaults.randomStyle;}
+  el<HTMLInputElement>('speed').value=String(speed);el('speed-value').textContent=speed.toFixed(1)+'×';
   let linkedError=false;if(location.hash){try{linkedView=decodeView(location.hash.slice(1));}catch{linkedError=true;}}
   load({...HOME,iterations:savedDefaults?.baseIterations??HOME.iterations,appearance:validateColors(rememberedAppearance)},false);
   el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');else if(defaultsRead.error)message(defaultsRead.error);
   resize();requestAnimationFrame(tick);
-  try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerEngine?:WebGpuRenderer}).__gpuZoomerEngine=renderer;engine.setProfiling(profilingEnabled);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
+  try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerEngine?:WebGpuRenderer}).__gpuZoomerEngine=renderer;engine.setProfiling(false);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
   catch(e){error=String(e);message(error);throw e;}
 })();
 // Development-only access exercises the displayed app and its real field.

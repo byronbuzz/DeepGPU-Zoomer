@@ -26,6 +26,7 @@ fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     var z = hdrZero();
     var checkpoint = hdrZero();
     var n = 0u; var cyclePower = 0u; var cycleLength = 0u;
+    var termination = SAMPLE_LIMIT;
     if (continuation.resume != 0u) {
         let saved = continuation.states[stateIndex];
         c = hdrFromWide(saved.delta); z = hdrFromWide(saved.z);
@@ -43,7 +44,7 @@ fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
                 if (n >= 64u) { checkpoint = z; cyclePower = 1u; }
             } else {
                 cycleLength += 1u;
-                if (sameHdrBits(z,checkpoint)) { break; }
+                if (sameHdrBits(z,checkpoint)) { termination = SAMPLE_NUMERICAL_PERIODIC; break; }
                 if (cycleLength == cyclePower) {
                     checkpoint = z; cycleLength = 0u;
                     cyclePower = min(cyclePower << 1u,u.maxIterations);
@@ -57,10 +58,11 @@ fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
                 n,cyclePower,cycleLength,0u,0u,0u,0u,0u,0u,0u,hdrValue(z),z2,0u);
             atomicOr(&continuation.pendingBits[stateIndex / 32u],1u << (stateIndex % 32u));
             atomicAdd(&stats[7],1u);
-            return Sample(false,n,hdrValue(z),-1.0,0.0,0u,0u,0u,0.0,0u);
+            return Sample(false,n,hdrValue(z),-1.0,0.0,0u,0u,0u,0.0,0u,SAMPLE_PENDING);
         }
     }
-    return Sample(escaped,n,hdrValue(z),z2,0.0,0u,0u,0u,hdrLog2(z),0u);
+    return Sample(escaped,n,hdrValue(z),z2,0.0,0u,0u,0u,hdrLog2(z),0u,
+                  select(termination, SAMPLE_ESCAPE, escaped));
 }
 fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     if (DIRECT) { return iterateDirectContinued(pixel,stateIndex); }
@@ -107,6 +109,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     var checkpointPower = 1u;
     var checkpointLength = 0u;
     var haveCheckpoint = false;
+    var termination = SAMPLE_LIMIT;
 
     if (continuation.resume != 0u) {
         let saved = continuation.states[stateIndex];
@@ -175,7 +178,9 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
         }
         if (detectPeriodic && !escaped && (n & 63u) == 0u) {
             if (haveCheckpoint && referenceIndex == checkpointReference &&
-                sameWideBits(delta, checkpointDelta) && sameWideBits(z, checkpointZ)) { break; }
+                sameWideBits(delta, checkpointDelta) && sameWideBits(z, checkpointZ)) {
+                termination = SAMPLE_NUMERICAL_PERIODIC; break;
+            }
             checkpointLength += 1u;
             if (!haveCheckpoint || checkpointLength >= checkpointPower) {
                 checkpointZ = z; checkpointDelta = delta; checkpointReference = referenceIndex;
@@ -192,9 +197,9 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
             atomicOr(&continuation.pendingBits[stateIndex / 32u], 1u << (stateIndex % 32u));
             atomicAdd(&stats[7], 1u);
             // Negative z2 means unresolved. compute must not publish a field or counters.
-            return Sample(false, n, zValue, -1.0, 0.0, skipped, skips, rebases, 0.0, referenceIndex);
+            return Sample(false, n, zValue, -1.0, 0.0, skipped, skips, rebases, 0.0, referenceIndex, SAMPLE_PENDING);
         }
     }
     return Sample(escaped, n, zValue, z2, hdrLog2(derivative), skipped, skips, rebases,
-                  wideLog(delta), referenceIndex);
+                  wideLog(delta), referenceIndex, select(termination, SAMPLE_ESCAPE, escaped));
 }

@@ -12,22 +12,24 @@ export function dynamicLimitForZoom(input: {
   current: number;
   depthDelta: number;
   depthGain: number;
-  capTarget: number;
+
   maximum: number;
   referencePreparing: boolean;
+  /** Direct retains its timed cadence; deep changes are gated by preparation. */
+  updateIntervalMs?: number;
 }): number | null {
   if (!input.zoomDirection) return null;
+  if (input.time - input.lastUpdate < (input.updateIntervalMs??500)) return null;
   const depthTarget=dynamicDepthTarget(input.base,input.depthDelta,input.depthGain,input.maximum);
-  const uplift=input.zoomDirection>0?Math.max(0,input.capTarget-input.base):0;
-  const desired=Math.min(input.maximum,Math.round(depthTarget+uplift));
+
+  const desired=Math.min(input.maximum,Math.round(depthTarget));
   const difference = desired - input.current;
   if (Math.abs(difference) < 16) return null;
   const step=Math.max(128,Math.ceil(input.current*.15));
-  // Ignore stale cap feedback on the outward path. Bound removal of any old
-  // uplift so reversal does not collapse the effective limit in one event.
+  // Bound depth-driven decreases on outward zoom events.
   if(difference<0)return input.zoomDirection<0?Math.max(desired,input.current-step):null;
   // Preserve useful reference preparation. A later actual zoom event can retry;
-  // completion or release alone must never make another cap decision.
-  if (input.zoomDirection < 0 || input.referencePreparing || input.time - input.lastUpdate < 500) return null;
+  // completion or release alone must never change the iteration limit.
+  if (input.zoomDirection < 0 || input.referencePreparing) return null;
   return Math.min(desired, input.current + step);
 }
