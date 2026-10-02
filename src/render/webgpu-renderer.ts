@@ -1,8 +1,6 @@
 import {motionBatchBudget} from './motion-sizing';
 import {deliveryWorkgroup} from './delivery-workgroup';
-import {predictInwardView,predictedGridDemand} from './inward-prediction';
-import {SizeCostPredictor} from './size-cost-predictor';
-// Isolated candidate: these dimensions are passed only to ordinary variants.
+// Ordinary variants use these workgroup dimensions.
 const ORDINARY_WORKGROUP_X = 16;
 const ORDINARY_WORKGROUP_Y = 4;
 import {MIN_BATCH_SAMPLES,ordinaryStripeRows,learnOrdinaryStripeCost} from './ordinary-stripes';
@@ -11,30 +9,24 @@ import {MIN_BATCH_SAMPLES,ordinaryStripeRows,learnOrdinaryStripeCost} from './or
  * CPU worker, then a perturbation compute pass whose per-pixel deltas carry
  * their own exponent.
  *
- * Unlike the WebGL path there is no f32 underflow floor, so zoom depth is
+ * Scaled arithmetic avoids an f32 underflow floor, so zoom depth is
  * bounded by the precision profile (limb count) rather than by the renderer.
  */
 
 import Decimal from "decimal.js";
 import { assertCoordinatePreparation, coordinateToFixed } from "../coordinate";
 import { checkedGpu, validateRenderSize, compileShader, readBuffer, storageBuffer, type GpuContext } from "../gpu/device";
-import { GpuTiming, type TimingSample } from "../gpu/timing";
+import { GpuTiming } from "../gpu/timing";
 import compensatedSource from "../arithmetic/compensated.wgsl?raw";
 import quadSource from "../arithmetic/quad.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
-import quadraticSource from './quadratic-perturbation.wgsl?raw';
-import {parallelBla,disposeBlaWorkers} from './parallel-bla-client';
 import wideSource from "./wide.wgsl?raw";
 import continuationSource from "./continuation.wgsl?raw";
 import { continuationEntry, continuationRegion, continuationOperations, resumedContinuationOperations, continuationLaneLimit, measuredContinuationBudget, COLD_CONTINUATION_OPERATIONS, CONTINUATION_HEADER_BYTES } from "./continuation";
-import { continuationShaderSource, deferredRegion, deferredLaneLimit, deferredContinuationOperations, learnDeferredOperationCost,
-  CONTINUATION_DISPATCH_OPERATIONS,DEFERRED_MAX_DISPATCH_OPERATIONS,DEFERRED_HEADER_BYTES } from './continuation';
 import { PendingContinuationSlot, translatedContinuationRegion, type ContinuationIdentity, type PendingContinuation } from './pending-continuation';
 import reuseSource from "./reuse.wgsl?raw";
 import qualityResolveSource from "./quality-resolve.wgsl?raw";
 import { oversampledView } from "./quality";
-import antialiasSource from "./antialias.wgsl?raw";
-export const ANTIALIAS_SHADER=antialiasSource;
 import { boundedRetainedView, createSampleGridAnchor, planRetainedView, sourceAlignedRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
 import { planNumericalView, containsNumericalView, learnOutwardDelay, outwardHorizonMs, outwardPadding } from './numerical-grid';
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
@@ -60,9 +52,6 @@ function yieldToEvents(): Promise<void> {
     yieldChannel.port2.postMessage(0);
   });
 }
-
-/** No scaling, no offset: show the frame exactly as rendered. */
-const IDENTITY_XFORM = new Float32Array([1, 1, 0, 0]);
 import { hexToRgb, MAX_STOPS, stopPositions, needsEndpoints, type ColorSettings } from "../logic/colorSettings";
 import { BASE_STEP, ENTRY_FLOATS, buildBlaAsync } from "./bla";
 import { DEFAULT_TUNING, mandelbrotBlaEpsilon, startingBatchVisits, navigationBatchMinimum, perturbationAllowanceMs, type TuningSettings } from "../tuning";
@@ -76,26 +65,6 @@ class LiveDemandChanged extends Error {}
 /** A local export tile (including its clipped halo) within the full image. */
 export interface ExportDomain { width: number; height: number; x: number; y: number }
 type DomainView = FrameView & { exportDomain?: ExportDomain; stationaryOversampling?: boolean };
-
-/** A bounded continuation owns its scratch until completion or explicit transfer. */
-interface DeferredRegionWork extends PendingContinuation {
-  shape:ReturnType<typeof deferredRegion>;
-  bind?:GPUBindGroup;
-  workgroupShape:TuningSettings['workgroupShape'];
-  specialized:boolean;
-  initialized:boolean;
-  deferred:boolean;
-  firstWork:number;
-  ownsExact:boolean;
-  imported:boolean;
-  activeMs:number;
-  gpuMs:number;
-  timingsExpected:number;
-  timingsReceived:number;
-  missingTiming:boolean;
-  finished:boolean;
-  costApplied:boolean;
-}
 
 export function renderDomain(view: Pick<RenderRequest, "width" | "height" | "exportDomain">): ExportDomain {
   return view.exportDomain ?? { width: view.width, height: view.height, x: 0, y: 0 };
@@ -147,18 +116,14 @@ export interface RenderRequest {
   colors: ColorSettings;
   /** Enables standard linear BLA wherever the selected method supports it. */
   useApprox?: boolean;
-  /** Forces an iteration method instead of picking one from the zoom. */
-  forceMethod?: Method;
-  /** Overrides the band height, for measuring the cost of splitting a frame. */
-  tileRows?: number;
-  /** Input status for callers and diagnostics; geometry governs calculation. */
+  /** Input status; geometry governs calculation. */
   interacting?: boolean;
   /** Continuous held inward input; wheel impulses do not predict future input. */
   heldInwardZoom?: boolean;
   /** Follow live demand until its exact field is complete. Preview/one-shot
    * callers use the same region queue without following another camera. */
   followView?: boolean;
-  /** Local experimental controls; omitted requests use the 5183 defaults. */
+  /** Local navigation settings; omitted requests use the defaults. */
   tuning?: Readonly<TuningSettings>;
   betweenBatches?: () => Promise<void>;
   /** Preview callers publish only complete images and matching metadata. */
@@ -229,20 +194,13 @@ export interface RenderStats {
 export const enum Method {
   /** Direct compensated iteration. No reference orbit. */
   Direct = 0,
-  /** Historical perturbation label retained for explicit forced-method diagnostics. */
-  Plain = 1,
-  /** Canonical automatic perturbation label. Both nonzero labels permit BLA. */
+  /** Perturbation with an optional BLA table. */
   Hdr = 2,
 }
 
-/**
- * Use one automatic identity for the shared Wide perturbation path. The former
- * Plain/Hdr scale boundary changes neither arithmetic nor BLA eligibility.
- * Explicit forceMethod callers retain their labels; limb changes remain checked.
- */
-export function methodForScale(unitsPerPixel: Decimal, tuning: Pick<TuningSettings,'directExponent'|'hdrExponent'> = DEFAULT_TUNING): Method {
+export function methodForScale(unitsPerPixel: Decimal, tuning: Pick<TuningSettings,'directExponent'> = DEFAULT_TUNING): Method {
   const upp = unitsPerPixel.toNumber();
-  if (upp > (tuning.directExponent===5 ? 1e-5 : 10 ** -tuning.directExponent)) return Method.Direct;
+  if (upp > 10 ** -tuning.directExponent) return Method.Direct;
   return Method.Hdr;
 }
 
@@ -309,13 +267,13 @@ type BlaPrecisionPolicy = Pick<RenderRequest,'tuning'>;
 export function effectiveBlaEpsilon(request:BlaPrecisionPolicy):number {
   return mandelbrotBlaEpsilon(request.tuning);
 }
-export function blaTableEpsilon(request: Pick<RenderRequest,'family'> & BlaPrecisionPolicy, quadratic=false): number {
-  return quadratic ? -29 : request.family==='julia' ? -40 : effectiveBlaEpsilon(request);
+export function blaTableEpsilon(request: Pick<RenderRequest,'family'> & BlaPrecisionPolicy, ): number {
+  return request.family==='julia' ? -40 : effectiveBlaEpsilon(request);
 }
 
 export function linearBlaPolicy(request: Pick<RenderRequest,'family'|'useApprox'|'colors'> & BlaPrecisionPolicy,
-    method:Method,quadratic=false):number|undefined {
-  return !quadratic&&(request.family??'mandelbrot')==='mandelbrot'&&request.useApprox===true&&
+    method:Method,):number|undefined {
+  return(request.family??'mandelbrot')==='mandelbrot'&&request.useApprox===true&&
     method!==Method.Direct&&approximationEligible('mandelbrot',request.colors.mode)
     ? effectiveBlaEpsilon(request) : undefined;
 }
@@ -388,7 +346,6 @@ export function appearanceUpgradeCompatible(
   request: RenderRequest,
   method: Method,
   grid: number,
-  quadratic=false,
 ): frame is AppearanceFrameIdentity {
   const family=request.family??"mandelbrot",frameFamily=frame?.family??"mandelbrot";
   return !!frame&&!frame.proxy&&frame.width===request.width&&frame.height===request.height&&
@@ -396,24 +353,8 @@ export function appearanceUpgradeCompatible(
     frame.centerX.eq(request.centerX)&&frame.centerY.eq(request.centerY)&&frame.unitsPerPixel.eq(request.unitsPerPixel)&&(frame.angle??0)===(request.angle??0)&&
     frameFamily===family&&frame.maxIterations===request.maxIterations&&frame.useApprox===(request.useApprox===true)&&
     frame.method===method&&frame.grid===grid&&
-    linearBlaPolicy(frame,frame.method,quadratic)===linearBlaPolicy(request,method,quadratic)&&
+    linearBlaPolicy(frame,frame.method)===linearBlaPolicy(request,method)&&
     (family!=="julia"||!!frame.juliaX?.eq(request.juliaX!)&&!!frame.juliaY?.eq(request.juliaY!));
-}
-
-async function readTexturePoints(device:GPUDevice,texture:GPUTexture,size:{width:number;height:number},points:[number,number][]):Promise<number[][]>{
-  const {width,height}=size,bytesPerRow=Math.ceil(width*4/256)*256;
-  const staging=device.createBuffer({size:bytesPerRow*height,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});let mapped=false;
-  try{const encoder=device.createCommandEncoder();encoder.copyTextureToBuffer({texture},{buffer:staging,bytesPerRow,rowsPerImage:height},{width,height});device.queue.submit([encoder.finish()]);await staging.mapAsync(GPUMapMode.READ);mapped=true;const bytes=new Uint8Array(staging.getMappedRange());return points.map(([x,y])=>{const i=y*bytesPerRow+x*4;return [bytes[i],bytes[i+1],bytes[i+2],bytes[i+3]];});}
-  finally{if(mapped)staging.unmap();staging.destroy();}
-}
-
-export interface WebGpuRenderer {
-  debugReadOrbit(count:number):Promise<Float32Array>;
-  debugReferenceDecodeMismatches():number;
-  debugReadPixels(points:[number,number][]):Promise<number[][]>;
-  debugReadAntialiasPixels(points:[number,number][]):Promise<number[][]>;
-  debugReadField():Promise<Float32Array>;
-  debugReadEndpoints():Promise<Float32Array>;
 }
 
 export class WebGpuRenderer {
@@ -426,30 +367,20 @@ export class WebGpuRenderer {
   private renderPipeline: GPUComputePipeline | null = null;
   private directPipeline: GPUComputePipeline | null = null;
   private approxPipeline: GPUComputePipeline | null = null;
-  private quadraticPipeline: GPUComputePipeline | null = null;
-  private quadraticModule: GPUShaderModule | null = null;
-  private tableQuadratic = false;
-  private numericalQuadratic: boolean | null = null;
-  private usedQuadraticWorkers = false;
-  private wantsQuadratic(_request:RenderRequest) { return false; }
 
   private referenceDecodePipeline: GPUComputePipeline | null = null;
-  private referenceVerifyPipeline: GPUComputePipeline | null = null;
   private juliaPipeline: GPUComputePipeline | null = null;
   private juliaApproxPipeline: GPUComputePipeline | null = null;
   private blitPipeline: GPURenderPipeline | null = null;
   private retainPipeline: GPURenderPipeline | null = null;
   private retainFloatPipeline: GPURenderPipeline | null = null;
-  private antialiasPipeline: GPURenderPipeline | null = null;
   private ordinaryPlainPipeline: GPUComputePipeline | null = null;
   private ordinaryShapePipelines = new Map<string,GPUComputePipeline>();
   private ordinaryApproxPipeline: GPUComputePipeline | null = null;
   private renderModule: GPUShaderModule | null = null;
   private continuationModule: GPUShaderModule | null = null;
-  private deferredModule: GPUShaderModule | null = null;
   private continuationLayout: GPUBindGroupLayout | null = null;
   private continuationPipelines = new Map<string,GPUComputePipeline>();
-  private deferredPipelines = new Map<string,GPUComputePipeline>();
   private reuseModule: GPUShaderModule | null = null;
   private blitModule: GPUShaderModule | null = null;
   private screenHold: GPUTexture | null = null;
@@ -461,21 +392,16 @@ export class WebGpuRenderer {
   private lastPresentedCoverage: WebGpuRenderer['coverageFrame'] = null;
   private pipelineLayout: GPUPipelineLayout | null = null;
   private pendingPipelines = new Map<string, Promise<void>>();
-  private antialiasTexture: GPUTexture | null = null;
   private spareHistory: GPUTexture | null = null;
-  private spareAntialias: GPUTexture | null = null;
   private deviceLost=false;
   private disposed=false;
   private disposePromise: Promise<void> | null = null;
   private activeOperations = new Set<Promise<unknown>>();
   private lossHook: { notify: (() => void) | null } = { notify: null };
-  private antialiasSize = {width:0,height:0};
-  private antialiasFrame: WebGpuRenderer["lastFrame"] = null;
 
   private target: GPUTexture | null = null;
   private targetSize = { width: 0, height: 0 };
   private sampler: GPUSampler;
-  private antialiasSampler: GPUSampler;
 
   private uniformBuffer: GPUBuffer;
   private stopsBuffer: GPUBuffer;
@@ -496,7 +422,6 @@ export class WebGpuRenderer {
   private coverageHistory: GPUTexture | null = null;
   private coverageFrame: WebGpuRenderer["lastFrame"] = null;
   private currentView: RenderRequest | null = null;
-  private historySize = { width: 0, height: 0 };
   private historyValid = false;
   /** Exact current target identity is independent of bounded history pixels. */
   private completedFrame: WebGpuRenderer["lastFrame"] = null;
@@ -508,8 +433,6 @@ export class WebGpuRenderer {
   private partialAppearanceUniforms: ArrayBuffer | null = null;
   private partialSerial = 0;
   private partialRegions = 0;
-  private firstPartialAt = 0;
-  private lastPartialAt = 0;
   private fieldComplete = false;
   private reuseMapping: SampleGridRemap | null = null;
   private reusableView: FrameView | null = null;
@@ -517,16 +440,12 @@ export class WebGpuRenderer {
   private batchMsPerSample = 0;
   private gpuBatchCost = {msPerVisit:0};
   private gpuBatchPolicy = '';
-  private deferredPassEstimate={key:'',reference:null as unknown,table:null as unknown,
-    msPerOperation:0,lastBudget:CONTINUATION_DISPATCH_OPERATIONS};
   private perturbationActive = false;
   private ordinaryBatchCostKey = "";
   private readonly batchFeedback = new BatchFeedback();
   private readonly pendingContinuation = new PendingContinuationSlot();
-  private readonly pendingDeferrals = [new PendingContinuationSlot<DeferredRegionWork>(),new PendingContinuationSlot<DeferredRegionWork>()];
   private clearContinuationWork(){
     this.pendingContinuation?.clear();
-    this.pendingDeferrals?.forEach(slot=>slot.clear());
   }
   private continuationParked = 0;
   private continuationCarried = 0;
@@ -540,38 +459,23 @@ export class WebGpuRenderer {
   private pending = new PendingRegions();
   private retarget = false;
   private determinedRegion: {x:number;y:number;width:number;height:number} | null = null;
-  private determinedSpacing: Decimal | undefined;
   private determined = new CoverageRegions();
   private streamTargets = 0;
-  private latestRegion: {x:number;y:number;width:number;height:number;stride:number} | null = null;
   private exactCompletedSamples=0;
   private exactTotalSamples=0;
   private referencePreparing=false;
   private finalizing=false;
-  private calculationSubmissions=0;
-  private orbitSubmissions=0;
-  private antialiasPasses=0;
   private appearanceSubmissions=0;
-  private appearancePublications=0;
-  private targetAllocations=0;
   private timing: GpuTiming;
-  setProfiling(enabled: boolean) { this.timing.setEnabled(enabled); }
-  performance() { return this.timing.snapshot(); }
-  debugProgress() {
+  progress() {
     const progressCurrent=!!(this.currentView&&this.fieldView&&this.sameView(this.fieldView,this.workRequest(this.currentView)));
     const complete=!this.referencePreparing&&!!this.currentView&&this.isComplete(this.currentView)&&this.pending.size===0&&!this.incomingFrame&&!this.finalizing;
     const percentage=this.referencePreparing||!progressCurrent?null:complete&&this.exactTotalSamples?100:this.exactTotalSamples?Math.min(99,Math.floor(this.exactCompletedSamples/this.exactTotalSamples*100)):null;
-    let fieldHash=2166136261;for(let i=0;i<this.fieldKey.length;i++){fieldHash^=this.fieldKey.charCodeAt(i);fieldHash=Math.imul(fieldHash,16777619);}
     const displayed=this.incomingFrame??this.lastFrame;
     const appearancePending=!!(this.currentView&&displayed&&this.sameView(displayed,this.workRequest(this.currentView))&&!this.samePresentation(displayed,this.currentView));
-    return { epoch: this.publicationEpoch, serial: this.partialSerial, fieldIdentity:(fieldHash>>>0).toString(16).padStart(8,'0'),
-      regions: this.partialRegions, firstPublicationAt: this.firstPartialAt, lastPublicationAt: this.lastPartialAt,
-      active: !!this.incomingFrame, complete, percentage, exactCompletedSamples:this.exactCompletedSamples, exactTotalSamples:this.exactTotalSamples,
-      referencePreparing:this.referencePreparing, finalizing:this.finalizing, calculationSubmissions:this.calculationSubmissions, orbitSubmissions:this.orbitSubmissions, antialiasPasses:this.antialiasPasses,
-      appearancePending,appearanceSubmissions:this.appearanceSubmissions,appearancePublications:this.appearancePublications,targetAllocations:this.targetAllocations,
-      referenceWorkerActive:this.referenceWorker.active,
-      pending: this.pending.size, targets: this.streamTargets, latestRegion: this.latestRegion,
-      width: this.fieldView?.width ?? 0, height: this.fieldView?.height ?? 0 };
+    return {complete, percentage, exactCompletedSamples:this.exactCompletedSamples, exactTotalSamples:this.exactTotalSamples,
+      referencePreparing:this.referencePreparing, finalizing:this.finalizing, appearancePending,
+      referenceWorkerActive:this.referenceWorker.active, pending:this.pending.size, targets:this.streamTargets};
   }
   private abortRequested = false;
   private shadePipeline: GPUComputePipeline | null = null;
@@ -611,12 +515,9 @@ export class WebGpuRenderer {
   private laIndexBuffer: GPUBuffer | null = null;
   private laLevels = 0;
   private laHasUsableMultiStep = false;
-  private deferredBlaRetry = false;
   private statsBuffer: GPUBuffer;
   private orbitBuffer: GPUBuffer | null = null;
   private orbitCapacity = 0;
-  private referenceDecodeMismatches=0;
-  private referencePreparationTimings: Record<string, number> | null = null;
   private referenceWorker = new ReferenceWorkerClient();
   private pendingReferenceDemand: ReferenceDemand | null = null;
 
@@ -632,7 +533,6 @@ export class WebGpuRenderer {
   private refFormatVersion: typeof REFERENCE_FORMAT_VERSION = REFERENCE_FORMAT_VERSION;
   private refSampleWords: ReferenceSampleWords = 10;
   private refTerminal: ReferenceResumeState | null = null;
-  private referenceIterationsComputed = 0;
   private refFamily = "";
   private refConstant = "";
 
@@ -656,7 +556,6 @@ export class WebGpuRenderer {
       magFilter: "nearest",
       minFilter: "nearest",
     });
-    this.antialiasSampler=ctx.device.createSampler({magFilter:'linear',minFilter:'linear'});
     this.uniformBuffer = ctx.device.createBuffer({
       size: 416,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -668,15 +567,6 @@ export class WebGpuRenderer {
       "render-stats",
       GPUBufferUsage.COPY_SRC
     );
-    if(import.meta.env.DEV)Object.assign(this,{
-      debugReadOrbit:async(count:number)=>{const raw=this.refSamples;if(!raw)return new Float32Array(0);const n=Math.min(count,this.refLength),stride=this.refSampleWords,absolute=new Float32Array(n*6);for(let i=0;i<n;i++){const at=i*stride;absolute.set([raw[at],raw[at+1],raw[at+4],raw[at+5],raw[at+6],raw[at+9]],i*6);}return absolute;},
-      debugReferenceDecodeMismatches:()=>this.referenceDecodeMismatches,
-      debugReferencePreparationTimings:()=>this.referencePreparationTimings ? {...this.referencePreparationTimings} : null,
-      debugReadPixels:async(points:[number,number][])=>this.target?readTexturePoints(this.ctx.device,this.target,this.targetSize,points):[],
-      debugReadAntialiasPixels:async(points:[number,number][])=>this.antialiasTexture?readTexturePoints(this.ctx.device,this.antialiasTexture,this.antialiasSize,points):[],
-      debugReadField:async()=>this.fieldBuffer?new Float32Array(await readBuffer(this.ctx.device,this.fieldBuffer,this.targetSize.width*this.targetSize.height*8)):new Float32Array(),
-      debugReadEndpoints:async()=>this.endpointBuffer?new Float32Array(await readBuffer(this.ctx.device,this.endpointBuffer,this.targetSize.width*this.targetSize.height*16)):new Float32Array(),
-    });
     this.lossHook.notify = () => { this.deviceLost=true;this.screenHold?.destroy();this.screenHold=null;this.screenHoldValid=false;this.abort(); };
     observeDeviceLoss(ctx.lost, this.lossHook);
   }
@@ -822,7 +712,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
   }
 
-  private async ensureComputePipeline(kind:'quadratic'|'reuse'|'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|'julia'|'juliaApprox'|'shade'|'decode'|'verify'|'distance',shape:TuningSettings['workgroupShape']=DEFAULT_TUNING.workgroupShape) {
+  private async ensureComputePipeline(kind:'reuse'|'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|'julia'|'juliaApprox'|'shade'|'decode'|'distance',shape:TuningSettings['workgroupShape']=DEFAULT_TUNING.workgroupShape) {
     if((kind==='ordinaryPlain'||kind==='ordinaryApprox')&&shape!==DEFAULT_TUNING.workgroupShape){
       const key=kind+':'+shape;
       await this.oncePipeline(key,()=>this.ordinaryShapePipelines.has(key),async()=>{
@@ -838,18 +728,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       });
       return this.ordinaryShapePipelines.get(key)!;
     }
-    const slot={quadratic:'quadraticPipeline',reuse:'reusePipeline',direct:'directPipeline',plain:'renderPipeline',approx:'approxPipeline',ordinaryPlain:'ordinaryPlainPipeline',ordinaryApprox:'ordinaryApproxPipeline',julia:'juliaPipeline',juliaApprox:'juliaApproxPipeline',shade:'shadePipeline',decode:'referenceDecodePipeline',verify:'referenceVerifyPipeline',distance:'distanceToIterationPipeline'} as const;
+    const slot={reuse:'reusePipeline',direct:'directPipeline',plain:'renderPipeline',approx:'approxPipeline',ordinaryPlain:'ordinaryPlainPipeline',ordinaryApprox:'ordinaryApproxPipeline',julia:'juliaPipeline',juliaApprox:'juliaApproxPipeline',shade:'shadePipeline',decode:'referenceDecodePipeline',distance:'distanceToIterationPipeline'} as const;
     const field=slot[kind];
     await this.oncePipeline(kind,()=>!!this[field],async()=>{
-      if(kind==='quadratic')this.quadraticModule??=await compileShader(this.ctx.device,
-        [compensatedSource,quadSource,quadraticSource,wideSource].join('\n'),'quadratic-perturbation');
-      const module=kind==='quadratic'?this.quadraticModule:kind==='reuse'?this.reuseModule:this.renderModule;
+      const module=kind==='reuse'?this.reuseModule:this.renderModule;
       if(!module)throw Error('Shader module is unavailable.');
-      const names={quadratic:'quadratic-compute',reuse:'sample-reuse',direct:'direct-compute',plain:'perturbation-compute',approx:'approximation-compute',ordinaryPlain:'ordinary-perturbation-compute',ordinaryApprox:'ordinary-approximation-compute',julia:'julia-compute',juliaApprox:'julia-approximation-compute',shade:'perturbation-shade',decode:'reference-decode',verify:'reference-decode-verify',distance:'distance-to-iteration-field'} as const;
-      const entryPoint=kind==='reuse'?'remap':kind==='shade'?'shadePass':kind==='decode'?'decodeReferenceOrbit':kind==='verify'?'verifyDecodedReferenceOrbit':kind==='distance'?'distanceToIterationField':'compute';
+      const names={reuse:'sample-reuse',direct:'direct-compute',plain:'perturbation-compute',approx:'approximation-compute',ordinaryPlain:'ordinary-perturbation-compute',ordinaryApprox:'ordinary-approximation-compute',julia:'julia-compute',juliaApprox:'julia-approximation-compute',shade:'perturbation-shade',decode:'reference-decode',distance:'distance-to-iteration-field'} as const;
+      const entryPoint=kind==='reuse'?'remap':kind==='shade'?'shadePass':kind==='decode'?'decodeReferenceOrbit':kind==='distance'?'distanceToIterationField':'compute';
       const ordinaryKind=kind==='ordinaryPlain'||kind==='ordinaryApprox';
-      const constants:Record<string,number>|undefined=ordinaryKind?{ORDINARY:1,APPROX:kind==='ordinaryApprox'?1:0,SAMPLE_WORKGROUP_X:ORDINARY_WORKGROUP_X,SAMPLE_WORKGROUP_Y:ORDINARY_WORKGROUP_Y}:kind==='direct'?{DIRECT:1}:(kind==='approx'||kind==='quadratic')?{APPROX:1}:kind==='julia'?{JULIA:1}:kind==='juliaApprox'?{JULIA:1,APPROX:1}:undefined;
-      const pipeline=await this.ctx.device.createComputePipelineAsync({label:names[kind],layout:kind==='reuse'||kind==='decode'||kind==='verify'?'auto':this.pipelineLayout!,compute:{module,entryPoint,...(constants?{constants}:{})}});
+      const constants:Record<string,number>|undefined=ordinaryKind?{ORDINARY:1,APPROX:kind==='ordinaryApprox'?1:0,SAMPLE_WORKGROUP_X:ORDINARY_WORKGROUP_X,SAMPLE_WORKGROUP_Y:ORDINARY_WORKGROUP_Y}:kind==='direct'?{DIRECT:1}:kind==='approx'?{APPROX:1}:kind==='julia'?{JULIA:1}:kind==='juliaApprox'?{JULIA:1,APPROX:1}:undefined;
+      const pipeline=await this.ctx.device.createComputePipelineAsync({label:names[kind],layout:kind==='reuse'||kind==='decode'?'auto':this.pipelineLayout!,compute:{module,entryPoint,...(constants?{constants}:{})}});
       if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
       if(this.disposed)throw new Error('Renderer has been disposed.');
       (this[field] as GPUComputePipeline|null)=pipeline;
@@ -876,35 +764,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return this.continuationPipelines.get(kind)!;
   }
 
-  private async ensureDeferredPipeline(kind:'direct'|'plain'|'approx'|'julia'|'juliaApprox',shape:TuningSettings['workgroupShape'],specialized:boolean) {
-    const key=[kind,shape,specialized].join(':');
-    await this.oncePipeline('deferred:'+key,()=>this.deferredPipelines.has(key),async()=>{
-      const device=this.ctx.device,{x,y}=deliveryWorkgroup(shape);
-      if(device.limits.maxStorageBuffersPerShaderStage<8||x*y>device.limits.maxComputeInvocationsPerWorkgroup||
-          x>device.limits.maxComputeWorkgroupSizeX||y>device.limits.maxComputeWorkgroupSizeY)throw Error('Deferred work exceeds this device’s limits.');
-      this.deferredModule??=await compileShader(device,[compensatedSource,quadSource,continuationEntry(perturbationSource),
-        wideSource,continuationShaderSource(continuationSource,true)].join('\n'),'deferred-perturbation');
-      this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
-        {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
-      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')?1:0,APPROX:kind==='approx'||kind==='juliaApprox'?1:0,
-        ORDINARY:specialized?1:0,SAMPLE_WORKGROUP_X:x,SAMPLE_WORKGROUP_Y:y};
-      const pipeline=await device.createComputePipelineAsync({label:'deferred:'+key,
-        layout:device.createPipelineLayout({bindGroupLayouts:[this.bindLayout!,this.continuationLayout]}),
-        compute:{module:this.deferredModule,entryPoint:'compute',constants}});
-      if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
-      if(this.disposed)throw Error('Renderer has been disposed.');
-      this.deferredPipelines.set(key,pipeline);
-    });
-    return this.deferredPipelines.get(key)!;
-  }
-
-  private async ensureRenderPipeline(kind:'blit'|'retain'|'retainFloat'|'antialias') {
-    const field=kind==='blit'?'blitPipeline':kind==='retain'?'retainPipeline':kind==='retainFloat'?'retainFloatPipeline':'antialiasPipeline';
+  private async ensureRenderPipeline(kind:'blit'|'retain'|'retainFloat') {
+    const field=kind==='blit'?'blitPipeline':kind==='retain'?'retainPipeline':'retainFloatPipeline';
     await this.oncePipeline(kind,()=>!!this[field],async()=>{
       const device=this.ctx.device;
-      const module=kind==='antialias'?await compileShader(device,antialiasSource,'completed-image-antialias'):this.blitModule;
+      const module=this.blitModule;
       if(!module)throw Error('Presentation shader is unavailable.');
-      const format:GPUTextureFormat=kind==='blit'?this.format:kind==='retain'?'rgba8unorm':kind==='retainFloat'?'rgba16float':'rgba8unorm-srgb';
+      const format:GPUTextureFormat=kind==='blit'?this.format:kind==='retain'?'rgba8unorm':'rgba16float';
       const descriptor:GPURenderPipelineDescriptor={label:kind,layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'fs',targets:[{format}]},primitive:{topology:'triangle-strip'}};
       const pipeline=await device.createRenderPipelineAsync(descriptor);
       if(this.disposed)throw new Error('Renderer has been disposed.');
@@ -955,7 +821,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
   private referenceDemandCompatible(demand: ReferenceDemand, request: RenderRequest): boolean {
     request=this.workRequest(request);
-    const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
+    const method = methodForScale(request.unitsPerPixel,request.tuning);
     if (method === Method.Direct) return false;
     const family = request.family ?? "mandelbrot";
     if (family !== demand.input.family || this.referenceBudget(request.maxIterations,request.dynamicIterations,family) > demand.input.maxIterations) return false;
@@ -993,7 +859,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // orbit, without compiling unrelated numerical variants at startup.
     const decodePreparation=Promise.all([
       this.ensureComputePipeline('decode'),
-      ...(import.meta.env.DEV?[this.ensureComputePipeline('verify')]:[]),
     ]);
     // A superseded/failed worker may leave before the later await. Observe the
     // rejection now; the original promise still reports it to current demand.
@@ -1010,54 +875,36 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         (input, resume) => {
           const budget = Math.min(REFERENCE_CHUNK_ITERATIONS, capacity - (resume?.iteration ?? 0));
           if (budget < 1) throw new Error('This trajectory needs a longer reference than this GPU can hold. No result was finalised.');
-          return this.referenceWorker.generate(input, false, resume, budget);
+          return this.referenceWorker.generate(input, resume, budget);
         }, checkCurrent,
         this.refValid && this.refSamples && this.refTerminal ? { samples:this.refSamples, terminal:this.refTerminal,
           formatVersion:this.refFormatVersion, sampleWords:this.refSampleWords } : undefined,
         yieldToEvents);
       const samples = orbit.samples;
-      const timings = this.referencePreparationTimings = { ...orbit.timings,
-        rawSampleBytes: orbit.samples.byteLength, decodedSampleBytes: orbit.length * decodedBytesPerSample,
-        referenceSampleWords: orbit.sampleWords,
-        gpuAllocationCpuMs: 0, gpuAllocationWallMs: 0, uploadCpuMs: 0, uploadWallMs: 0,
-        uploadMaxSliceMs: 0, uploadSlices: 0, decodeEncodeCpuMs: 0, decodeWallMs: 0 };
-      this.referenceIterationsComputed = orbit.iterationsComputed;
       const pipelineStarted=performance.now();
       await decodePreparation;
       this.pipelineWaitMs+=performance.now()-pipelineStarted;
       if(this.pendingReferenceDemand!==demand||this.abortRequested||request.isCurrent&&!request.isCurrent())throw new DOMException('Superseded reference','AbortError');
       const device=this.ctx.device;
-      let raw:GPUBuffer|undefined,replacement:GPUBuffer|undefined,mismatches:GPUBuffer|undefined;
+      let raw:GPUBuffer|undefined,replacement:GPUBuffer|undefined;
       try{
-        const allocationStarted = performance.now();
         await checkedGpu(device,()=>{
-          const allocateCpuStarted = performance.now();
           raw=storageBuffer(device,orbit.length*orbit.sampleWords,"reference-orbit-raw");
           replacement=storageBuffer(device,orbit.length*(orbit.sampleWords/10)*12,"reference-orbit-decoded",GPUBufferUsage.COPY_SRC);
-          timings.gpuAllocationCpuMs = performance.now() - allocateCpuStarted;
         });
-        timings.gpuAllocationWallMs = performance.now() - allocationStarted;
-        const uploadStarted = performance.now();
         for (let offset = 0; offset < samples.length; offset += REFERENCE_TRANSFER_FLOATS) {
           checkCurrent();
           const part = samples.subarray(offset, Math.min(samples.length, offset + REFERENCE_TRANSFER_FLOATS));
           // Error scopes are opened and popped synchronously by checkedGpu;
           // another renderer may safely run at the following event-loop yield.
           await checkedGpu(device,()=>{
-            const sliceStarted = performance.now();
             device.queue.writeBuffer(raw!, offset * Float32Array.BYTES_PER_ELEMENT, part);
-            const elapsed = performance.now() - sliceStarted;
-            timings.uploadCpuMs += elapsed;
-            timings.uploadMaxSliceMs = Math.max(timings.uploadMaxSliceMs, elapsed);
-            timings.uploadSlices++;
+
           });
           if (offset + part.length < samples.length) await yieldToEvents();
         }
-        timings.uploadWallMs = performance.now() - uploadStarted;
         checkCurrent();
-        const decodeStarted = performance.now();
-        const mismatchBytes=await checkedGpu(device,()=>{
-          const encodeStarted = performance.now();
+        await checkedGpu(device,()=>{
           const encoder=device.createCommandEncoder({label:'decode-reference-orbit'});
           const decode=encoder.beginComputePass({label:'decode-reference-orbit'});
           decode.setPipeline(this.referenceDecodePipeline!);
@@ -1066,29 +913,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           ]}));
           const dispatch = referenceDecodeDispatch(orbit.length*(orbit.sampleWords/10), device.limits.maxComputeWorkgroupsPerDimension);
           decode.dispatchWorkgroups(...dispatch);decode.end();
-          if(import.meta.env.DEV){
-            if(!this.referenceVerifyPipeline)throw Error('Reference verification pipeline is unavailable.');
-            mismatches=storageBuffer(device,1,'reference-decode-mismatches',GPUBufferUsage.COPY_SRC);
-            device.queue.writeBuffer(mismatches,0,new Uint32Array(1));
-            const verify=encoder.beginComputePass({label:'verify-reference-decode'});
-            verify.setPipeline(this.referenceVerifyPipeline);
-            verify.setBindGroup(0,device.createBindGroup({layout:this.referenceVerifyPipeline.getBindGroupLayout(0),entries:[
-              {binding:0,resource:{buffer:raw!}},{binding:9,resource:{buffer:replacement!}},{binding:10,resource:{buffer:mismatches}},
-            ]}));
-            verify.dispatchWorkgroups(...dispatch);verify.end();
-          }
           device.queue.submit([encoder.finish()]);
-          timings.decodeEncodeCpuMs = performance.now() - encodeStarted;
-          return mismatches?readBuffer(device,mismatches,4):device.queue.onSubmittedWorkDone().then(()=>new ArrayBuffer(0));
+          return device.queue.onSubmittedWorkDone();
         });
-        timings.decodeWallMs = performance.now() - decodeStarted;
-        this.referenceDecodeMismatches=mismatchBytes.byteLength?new Uint32Array(mismatchBytes)[0]:0;
-        if(this.referenceDecodeMismatches)throw Error(`Reference decode mismatch in ${this.referenceDecodeMismatches} entries.`);
         const currentLive=demand.followView?this.currentView??request:request;
         if(this.pendingReferenceDemand!==demand||request.isCurrent&&!request.isCurrent()||!this.referenceDemandCompatible(demand,currentLive))throw new DOMException("Superseded reference","AbortError");
         this.clearContinuationWork();
         const previous=this.orbitBuffer;this.orbitBuffer=replacement!;replacement=undefined;this.orbitCapacity=orbit.length;previous?.destroy();
-      }finally{raw?.destroy();replacement?.destroy();mismatches?.destroy();}
+      }finally{raw?.destroy();replacement?.destroy();}
       return { length: orbit.length, escaped: orbit.escaped, ms: performance.now() - started, samples, terminal:orbit.terminal,
         formatVersion:orbit.formatVersion, sampleWords:orbit.sampleWords, referenceX:demand.referenceX,referenceY:demand.referenceY };
     } finally {
@@ -1105,7 +937,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    */
   private async buildApproxTable(request: RenderRequest) {
     const { device } = this.ctx;
-    const tuning=request.tuning??DEFAULT_TUNING;
     const started = performance.now();
     this.requireLiveMethod(request);
 
@@ -1119,8 +950,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (!samples || samples.length !== this.refLength * this.refSampleWords) {
       throw new Error("The CPU reference orbit is unavailable for approximation");
     }
-    const quadratic=this.wantsQuadratic(request);
-    const epsilonLog2=blaTableEpsilon(request,quadratic);
+    const epsilonLog2=blaTableEpsilon(request);
     const sourceOrbit=this.orbitBuffer;
     const checkCurrent=()=>{
       if(this.disposed||this.abortRequested||request.isCurrent&&!request.isCurrent()||
@@ -1131,11 +961,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       await yieldToEvents();
       checkCurrent();
     };
-    if(quadratic)this.usedQuadraticWorkers=true;
-    const table = quadratic ? await parallelBla(samples,this.refLength,maxDelta,checkpoint,{sampleWords:this.refSampleWords,epsilonLog2}) : await buildBlaAsync(samples, this.refLength, maxDelta, checkpoint,
-       { sampleWords: this.refSampleWords, epsilonLog2, omitSingleStep:true },
-      tuning.blaChunkMs>0 ? () => this.isInteracting(request) ? tuning.blaChunkMs : 0 : undefined);
-    if(this.referencePreparationTimings)this.referencePreparationTimings.tableBuildWallMs=performance.now()-started;
+    const table = await buildBlaAsync(samples, this.refLength, maxDelta, checkpoint,
+       { sampleWords: this.refSampleWords, epsilonLog2 });
     checkCurrent();
     if(table.data.byteLength>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('The approximation table exceeds this GPU’s buffer capacity.');
     const tableMs = performance.now() - started;
@@ -1148,49 +975,36 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       index[level] = table.levelOffsets[level];
       index[table.levels + level] = table.levelCounts[level];
     }
-    const timings=this.referencePreparationTimings;
-    if(timings){timings.tableCopyCpuMs=0;timings.tableViewCpuMs=0;timings.tableUploadCpuMs=0;
-      timings.tableUploadMaxSliceMs=0;timings.tableUploadSlices=0;}
     let nextTable:GPUBuffer|undefined,nextIndex:GPUBuffer|undefined;
     try{
-      const tableAllocationStarted=performance.now();
       await checkedGpu(device,()=>{
-        const allocationCpuStarted=performance.now();
+
         nextTable=storageBuffer(device,Math.max(8,table.data.length),'la-table');
         nextIndex=storageBuffer(device,index.length,'la-index');
         device.queue.writeBuffer(nextIndex,0,index);
-        if(timings)timings.tableAllocationCpuMs=performance.now()-allocationCpuStarted;
       });
-      if(timings)timings.tableAllocationWallMs=performance.now()-tableAllocationStarted;
-      const tableUploadStarted=performance.now();
+
       for(let offset=0;offset<table.data.length;offset+=REFERENCE_TRANSFER_FLOATS){
         checkCurrent();
-        const viewStarted=performance.now();
+
         const count=Math.min(REFERENCE_TRANSFER_FLOATS,table.data.length-offset);
         const part=new Float32Array(tableData,table.data.byteOffset+offset*4,count);
-        if(timings)timings.tableViewCpuMs+=performance.now()-viewStarted;
         await checkedGpu(device,()=>{
-          const uploadStarted=performance.now();
           device.queue.writeBuffer(nextTable!,offset*4,part);
-          const elapsed=performance.now()-uploadStarted;
-          if(timings){timings.tableUploadCpuMs+=elapsed;
-            timings.tableUploadMaxSliceMs=Math.max(timings.tableUploadMaxSliceMs,elapsed);
-            timings.tableUploadSlices++;}
+
         });
         if(offset+count<table.data.length)await checkpoint();
       }
-      if(timings)timings.tableUploadWallMs=performance.now()-tableUploadStarted;
       checkCurrent();
       // No partial upload or canceled identity can replace the admitted table.
       this.clearContinuationWork();
       const previousTable=this.laBuffer,previousIndex=this.laIndexBuffer;
       this.laBuffer=nextTable!;this.laIndexBuffer=nextIndex!;nextTable=undefined;nextIndex=undefined;
-      this.tableMaxDelta=maxDelta;this.tableQuadratic=quadratic;this.tableEpsilonLog2=epsilonLog2;
+      this.tableMaxDelta=maxDelta;this.tableEpsilonLog2=epsilonLog2;
       this.laLevels=table.entryCount===0?0:table.levels;
       this.laHasUsableMultiStep=table.entryCount!==0&&table.hasUsableMultiStep;
-      this.deferredBlaRetry=false;this.tableMs=tableMs;
+      this.tableMs=tableMs;
       previousTable?.destroy();previousIndex?.destroy();
-      if(timings)timings.tablePreparationWallMs=performance.now()-started;
     }finally{nextTable?.destroy();nextIndex?.destroy();}
   }
 
@@ -1213,7 +1027,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.incomingFrame=null;
     this.currentImageValid=false;this.target?.destroy();this.target=replacement!;
     this.targetSize = { width, height };
-    this.targetAllocations++;
   }
 
   /**
@@ -1224,7 +1037,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
    * Neither source changes geometry without its corresponding pixel copy.
    */
   private commitHistory(request: NonNullable<WebGpuRenderer["lastFrame"]>,candidate:GPUTexture) {
-    const { width, height } = request;
     const live=this.currentView,view=live??request;
     const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request)||
       !!(live?.dynamicIterations&&live.followView&&live.provisionalNavigationCap&&
@@ -1264,16 +1076,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       }
     }
     this.spareHistory?.destroy();this.spareHistory=available;this.history=candidate;
-    this.historySize = { width, height };this.historyValid=true;
+    this.historyValid=true;
   }
 
-  private candidateTexture(width:number,height:number,antialias=false){
-    const spare=antialias?this.spareAntialias:this.spareHistory;
-    if(antialias)this.spareAntialias=null;else this.spareHistory=null;
-    const usage=GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.RENDER_ATTACHMENT|(antialias?0:GPUTextureUsage.COPY_DST);
+  private candidateTexture(width:number,height:number){
+    const spare=this.spareHistory;
+    this.spareHistory=null;
+    const usage=GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC|GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_DST;
     if(spare&&spare.format==='rgba8unorm'&&spare.width===width&&spare.height===height&&(spare.usage&usage)===usage)return spare;
     spare?.destroy();
-    return this.ctx.device.createTexture({label:antialias?'candidate-antialias':'candidate-complete-frame',size:{width,height},format:'rgba8unorm',viewFormats:['rgba8unorm-srgb'],usage});
+    return this.ctx.device.createTexture({label:'complete-frame',size:{width,height},format:'rgba8unorm',viewFormats:['rgba8unorm-srgb'],usage});
   }
 
   private snapshotFrame(frame: NonNullable<WebGpuRenderer["lastFrame"]>) {
@@ -1304,13 +1116,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.currentView={...frame,...retained};this.incomingFrame=frame;
     try{this.encodeBlit(encoder,this.target!,reprojectionFor(frame,retained,true)!,candidate,false,true);}
     finally{this.currentView=live;this.incomingFrame=incoming;}
-  }
-
-  private encodeAntialias(encoder:GPUCommandEncoder,source:GPUTexture,target:GPUTexture,timingSamples:(TimingSample|undefined)[]){
-    const sample=this.timing.begin('antialias');
-    const pass=encoder.beginRenderPass({label:'completed-image-antialias',timestampWrites:this.timing.writes(sample) as GPURenderPassTimestampWrites|undefined,colorAttachments:[{view:target.createView({format:'rgba8unorm-srgb'}),loadOp:'clear',storeOp:'store',clearValue:{r:0,g:0,b:0,a:1}}]});
-    pass.setPipeline(this.antialiasPipeline!);pass.setBindGroup(0,this.ctx.device.createBindGroup({layout:this.antialiasPipeline!.getBindGroupLayout(0),entries:[{binding:0,resource:source.createView({format:'rgba8unorm-srgb',usage:GPUTextureUsage.TEXTURE_BINDING})},{binding:1,resource:this.antialiasSampler}]}));pass.draw(4);pass.end();
-    this.timing.resolve(encoder,sample);timingSamples.push(sample);this.antialiasPasses++;
   }
 
   /**
@@ -1414,8 +1219,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const secondaryTexture=completedSnapshot?null:source===this.history?this.coverageHistory:this.history;
     const coverage = secondaryTexture && secondaryFrame && matchesView(secondaryFrame) && this.currentView
       ? reprojectionFor(secondaryFrame, this.currentView, true, true) : null;
-    const frontFrame=source===this.history?this.lastFrame:source===this.antialiasTexture?this.antialiasFrame:
-      source===this.target?this.incomingFrame??this.completedFrame:null;
+    const frontFrame=source===this.history?this.lastFrame:      source===this.target?this.incomingFrame??this.completedFrame:null;
     const transforms = new Float32Array(36);
     transforms[32]=frontFrame?.stationaryOversampling?frontFrame.colors.gamma:0;
     transforms[33]=secondaryFrame?.stationaryOversampling?secondaryFrame.colors.gamma:0;
@@ -1516,13 +1320,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.cancelPendingReference("Reference generation aborted");
   }
 
-  /** One settled restart is enough to recheck a retry deferred during motion. */
-  consumeSettledBlaRetry() {
-    const pending=this.deferredBlaRetry;
-    this.deferredBlaRetry=false;
-    return pending;
-  }
-
   private trackOperation<T>(operation: () => Promise<T>): Promise<T> {
     if(this.disposed)return Promise.reject(new Error('Renderer has been disposed.'));
     const pending = operation();
@@ -1539,7 +1336,6 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.publicationEpoch++;
     this.abort();
     this.referenceWorker.cancel('Renderer disposed');
-    if(this.usedQuadraticWorkers)disposeBlaWorkers();
     this.disposePromise=(async()=>{
       await Promise.allSettled([...this.activeOperations,...this.pendingPipelines.values(),...(this.pendingRetain?[this.pendingRetain]:[])]);
       // Disposal must still release allocations after device loss or a failed fence.
@@ -1550,7 +1346,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         this.fieldBuffer,this.spareField,this.endpointBuffer,this.orbitBuffer,
         this.laBuffer,this.laIndexBuffer,this.reuseUniform,this.xformBuffer,
         this.target,this.history,this.coverageHistory,this.spareHistory,
-        this.antialiasTexture,this.spareAntialias,this.screenHold,
+        this.screenHold,
         this.lastPresentedSource,
       ].filter((value):value is GPUBuffer|GPUTexture=>!!value));
       for(const resource of resources)resource.destroy();
@@ -1558,19 +1354,15 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.fieldBuffer=null;this.spareField=null;this.endpointBuffer=null;this.orbitBuffer=null;
       this.laBuffer=null;this.laIndexBuffer=null;this.reuseUniform=null;this.xformBuffer=null;
       this.target=null;this.history=null;this.coverageHistory=null;this.spareHistory=null;this.screenHold=null;this.admittedSamples=null;
-      this.antialiasTexture=null;this.spareAntialias=null;
       this.refSamples=null;this.refValid=false;
       this.pendingReferenceDemand=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
       this.currentView=null;this.fieldView=null;this.completedFrame=null;this.lastFrame=null;this.regionCoverage=null;
-      this.coverageFrame=null;this.antialiasFrame=null;this.incomingFrame=null;this.appearanceHoldFrame=null;
+      this.coverageFrame=null;this.incomingFrame=null;this.appearanceHoldFrame=null;
       this.lastPresentedSource=null;this.lastPresentedFrame=null;this.lastPresentedCoverage=null;this.cachedStats=null;this.fieldStats=null;this.fieldDescriptor=null;
       this.retainedAnchor=null;this.reuseMapping=null;this.reusableView=null;
       this.pending.reset(0,0);this.determined=new CoverageRegions();
       this.activeOperations.clear();this.pendingPipelines.clear();this.pendingRetain=null;
-      this.ordinaryShapePipelines.clear();this.deferredPipelines.clear();this.deferredModule=null;
-      this.sizeCostReference=null;this.sizeCostTable=null;
-      this.predictionCost.reference=null;this.predictionCost.table=null;
-      this.deferredPassEstimate.reference=null;this.deferredPassEstimate.table=null;
+      this.ordinaryShapePipelines.clear();
       this.fieldComplete=false;this.currentImageValid=false;this.historyValid=false;
     })();
     return this.disposePromise;
@@ -1605,13 +1397,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if (this.pendingReferenceDemand?.followView && !this.referenceDemandCompatible(this.pendingReferenceDemand, request)) {
       this.cancelPendingReference("Reference demand changed");
     }
-    const heldAa=!!(heldAppearance&&this.antialiasFrame&&this.antialiasTexture&&this.appearanceHoldFrame&&
-      this.samePresentation(this.antialiasFrame,this.appearanceHoldFrame));
-    const aa=heldAa||!!(request.colors.postAntialias&&this.antialiasFrame&&this.antialiasTexture&&
-      this.samePresentation(this.antialiasFrame,request)&&this.sameView(this.antialiasFrame,this.workRequest(request)));
     const current=this.currentImageValid&&this.completedFrame&&this.samePresentation(this.completedFrame,request);
-    const last = aa ? this.antialiasFrame : current ? this.completedFrame : this.historyValid ? this.lastFrame : this.incomingFrame;
-    const source = aa ? this.antialiasTexture : current ? this.target : this.historyValid ? this.history : this.target;
+    const last = current ? this.completedFrame : this.historyValid ? this.lastFrame : this.incomingFrame;
+    const source = current ? this.target : this.historyValid ? this.history : this.target;
     if (!last || !source || !this.blitPipeline) {
       return false;
     }
@@ -1636,7 +1424,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       request.unitsPerPixel.toString(),request.angle??0,request.maxIterations,request.family,
       request.juliaX?.toString(),request.juliaY?.toString(),JSON.stringify(request.colors),
       this.partialSerial,this.publicationEpoch,this.appearanceSubmissions,
-      source===this.target?'target':source===this.history?'history':'antialias',
+      source===this.target?'target':'history',
       last===this.incomingFrame?'incoming':last===this.completedFrame?'completed':last===this.lastFrame?'history':'other',
       allowStaleAppearance,this.canvas.width,this.canvas.height].join('|');
     if(this.lastPresentedKey===presentationKey&&this.lastPresentedFrame===last&&
@@ -1662,12 +1450,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     this.screenHold?.destroy();this.screenHold=null;this.screenHoldValid=false;
     this.lastPresentedKey='';
     this.publicationEpoch++; this.historyValid=false; this.refValid=false; this.refSamples=null;
-    this.deferredBlaRetry=false;
     this.currentImageValid=false;this.completedFrame=null;
-    this.incomingFrame=null; this.appearanceHoldFrame=null; this.fieldComplete=false; this.lastPartialAt=0; this.pending.reset(0,0);
+    this.incomingFrame=null; this.appearanceHoldFrame=null; this.fieldComplete=false;  this.pending.reset(0,0);
     this.retainEndpoints=false;
     this.coverageFrame=null; this.coverageHistory?.destroy(); this.coverageHistory=null;
-    this.retainedAnchor=null; this.fieldView=null; this.sampleKey="";this.admittedSamples=null; this.fieldKey=""; this.cachedRequest="";this.antialiasFrame=null;
+    this.retainedAnchor=null; this.fieldView=null; this.sampleKey="";this.admittedSamples=null; this.fieldKey=""; this.cachedRequest="";
     this.capPresentationTarget=null;
     this.fieldStats=null;this.fieldDescriptor=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
     this.exactCompletedSamples=0;this.exactTotalSamples=0;this.referencePreparing=false;this.finalizing=false;
@@ -1687,32 +1474,32 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private fieldIdentity(request:RenderRequest,family:"mandelbrot"|"julia",constant:string,method:Method,grid:number,retainEndpoints:boolean,approximationLevels:number){
     return [family,constant,request.centerX.toString(),request.centerY.toString(),request.unitsPerPixel.toString(),request.angle??0,
       request.width,request.height,request.maxIterations,request.colors.mode,retainEndpoints,grid,method,
-      this.refLength,approximationLevels,exportIdentity(request),linearBlaPolicy(request,method,this.wantsQuadratic(request))].join("|");
+      this.refLength,approximationLevels,exportIdentity(request),linearBlaPolicy(request,method)].join("|");
   }
 
   private sampleIdentity(request:RenderRequest,family:"mandelbrot"|"julia",constant:string,method:Method,grid:number,limbs:number,approximationLevels:number){
     return [family,constant,request.maxIterations,request.colors.mode,grid,method,limbs,this.refLimbs,
-      !!approximationLevels,request.useApprox===true,exportIdentity(request),linearBlaPolicy(request,method,this.wantsQuadratic(request))].join("|");
+      !!approximationLevels,request.useApprox===true,exportIdentity(request),linearBlaPolicy(request,method)].join("|");
   }
 
   private sameBlaPolicy(a:RenderRequest|AppearanceFrameIdentity,b:RenderRequest|AppearanceFrameIdentity){
     const method=(value:RenderRequest|AppearanceFrameIdentity)=>'method' in value
-      ? value.method : value.forceMethod??methodForScale(value.unitsPerPixel,value.tuning);
-    return linearBlaPolicy(a,method(a),this.wantsQuadratic(a as RenderRequest))===
-      linearBlaPolicy(b,method(b),this.wantsQuadratic(b as RenderRequest));
+      ? value.method : methodForScale(value.unitsPerPixel,value.tuning);
+    return linearBlaPolicy(a,method(a))===
+      linearBlaPolicy(b,method(b));
   }
 
   private beginAppearanceHold(request:RenderRequest,method:Method,grid:number){
     if(this.appearanceHoldFrame&&this.historyValid&&this.appearanceHoldFrame===this.completedFrame&&
-        appearanceUpgradeCompatible(this.appearanceHoldFrame,request,method,grid,this.wantsQuadratic(request))&&
+        appearanceUpgradeCompatible(this.appearanceHoldFrame,request,method,grid)&&
         !this.samePresentation(this.appearanceHoldFrame,request))return true;
     const frame=this.completedFrame;
-    if(this.historyValid&&this.fieldComplete&&appearanceUpgradeCompatible(frame,request,method,grid,this.wantsQuadratic(request))&&
+    if(this.historyValid&&this.fieldComplete&&appearanceUpgradeCompatible(frame,request,method,grid)&&
         !this.samePresentation(frame,request)){
       this.appearanceHoldFrame=frame;
       return true;
     }
-    if(this.appearanceHoldFrame&&(!appearanceUpgradeCompatible(this.appearanceHoldFrame,request,method,grid,this.wantsQuadratic(request))||
+    if(this.appearanceHoldFrame&&(!appearanceUpgradeCompatible(this.appearanceHoldFrame,request,method,grid)||
         this.samePresentation(this.appearanceHoldFrame,request)))this.appearanceHoldFrame=null;
     return false;
   }
@@ -1720,9 +1507,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private appearanceHoldActive(request:RenderRequest){
     const frame=this.appearanceHoldFrame;
     request=this.workRequest(request);
-    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
+    const method=methodForScale(request.unitsPerPixel,request.tuning);
     const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
-    return this.historyValid&&frame===this.completedFrame&&appearanceUpgradeCompatible(frame,request,method,grid,this.wantsQuadratic(request))&&
+    return this.historyValid&&frame===this.completedFrame&&appearanceUpgradeCompatible(frame,request,method,grid)&&
       !this.samePresentation(frame,request);
   }
 
@@ -1733,11 +1520,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const frame=this.completedFrame;
     return this.fieldComplete && this.currentImageValid && !this.finalizing && !!frame && !frame.proxy &&
       this.sameView(frame,request) && frame.family===request.family && frame.maxIterations===request.maxIterations &&
-      frame.method===(request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning)) &&
+      frame.method===(methodForScale(request.unitsPerPixel,request.tuning)) &&
       frame.useApprox===(request.useApprox===true) &&
       this.sameBlaPolicy(frame,request) &&
       (request.family!=="julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
-      JSON.stringify(frame.colors)===JSON.stringify(request.colors) && (!request.colors.postAntialias||!!this.antialiasFrame);
+      JSON.stringify(frame.colors)===JSON.stringify(request.colors);
   }
   private samePresentation(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>): frame is NonNullable<WebGpuRenderer["lastFrame"]> {
     return !!frame && exportIdentity(frame)===exportIdentity(request) && frame.family === request.family && frame.maxIterations === request.maxIterations &&
@@ -1755,13 +1542,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       !this.currentImageValid||!this.fieldBuffer||!this.fieldView||!this.fieldKey||
       request.maxIterations<=frame.maxIterations)return null;
     const work=this.workRequest(request),family=request.family??'mandelbrot';
-    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
+    const method=methodForScale(request.unitsPerPixel,request.tuning);
     const constant=family==='julia'?`${request.juliaX},${request.juliaY}`:'';
     if(!this.sameView(frame,work)||!this.sameView(this.fieldView,work)||
       descriptor.maxIterations!==frame.maxIterations||descriptor.family!==family||descriptor.constant!==constant||
       descriptor.mode!==0||descriptor.grid!==1||descriptor.method!==method||descriptor.retainEndpoints||this.retainEndpoints||
       descriptor.useApprox!==(request.useApprox===true)||frame.method!==method||frame.useApprox!==(request.useApprox===true)||
-      request.colors.mode!==0||request.colors.supersample!==1||request.colors.postAntialias||
+      request.colors.mode!==0||request.colors.supersample!==1||
       (request.colors.capped??0)!==0||needsEndpoints(request.colors)||
       !this.samePresentation({...frame,maxIterations:request.maxIterations},work))return null;
     return frame;
@@ -1822,12 +1609,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     });
   }
 
-  private encodeShadePass(encoder:GPUCommandEncoder,bind:GPUBindGroup,width:number,height:number,timingSamples:(TimingSample|undefined)[]){
-    const sample=this.timing.begin("shade");
-    const pass=encoder.beginComputePass({label:"shade-region",timestampWrites:this.timing.writes(sample)});
+  private encodeShadePass(encoder:GPUCommandEncoder,bind:GPUBindGroup,width:number,height:number){
+    const pass=encoder.beginComputePass({label:"shade-region"});
     pass.setPipeline(this.shadePipeline!);pass.setBindGroup(0,bind);
     pass.dispatchWorkgroups(Math.ceil(width/8),Math.ceil(height/8));pass.end();
-    this.timing.resolve(encoder,sample);timingSamples.push(sample);
   }
 
   private appearanceCompatible(base:RenderRequest,latest:RenderRequest,method:Method,grid:number,retainEndpoints:boolean){
@@ -1837,7 +1622,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       (base.useApprox===true)===(latest.useApprox===true)&&
       (family!=="julia"||!!base.juliaX?.eq(latest.juliaX!)&&!!base.juliaY?.eq(latest.juliaY!))&&
       base.colors.mode===latest.colors.mode&&grid===this.affordableGrid(Math.max(1,Math.min(3,latest.colors.supersample)),latest.width,latest.height)&&
-      method===(latest.forceMethod??methodForScale(latest.unitsPerPixel,latest.tuning))&&(!needsEndpoints(latest.colors)||retainEndpoints)&&
+      method===(methodForScale(latest.unitsPerPixel,latest.tuning))&&(!needsEndpoints(latest.colors)||retainEndpoints)&&
       !((base.colors.capped??0)===0&&(latest.colors.capped??0)>0&&base.colors.mode===0);
   }
 
@@ -1846,9 +1631,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const constant=family==="julia"?`${request.juliaX},${request.juliaY}`:"";
     return !!(this.fieldComplete&&this.fieldUniforms&&this.fieldStats&&descriptor&&view&&this.target&&this.fieldBuffer&&this.endpointBuffer&&
       this.sameView(view,request)&&descriptor.family===family&&descriptor.constant===constant&&descriptor.maxIterations===request.maxIterations&&
-      descriptor.mode===request.colors.mode&&descriptor.grid===grid&&descriptor.method===method&&request.colors.mode!==2&&
+      descriptor.mode===request.colors.mode&&descriptor.grid===grid&&descriptor.method===method&&
       descriptor.useApprox===(request.useApprox===true)&&
-      descriptor.linearBlaEpsilon===linearBlaPolicy(request,method,this.wantsQuadratic(request))&&
+      descriptor.linearBlaEpsilon===linearBlaPolicy(request,method)&&
       (!needsEndpoints(request.colors)||descriptor.retainEndpoints)&&
       ((request.colors.capped??0)===0||descriptor.interiorEndpoints));
   }
@@ -1862,7 +1647,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         descriptor.mode!==1||!descriptor.retainEndpoints||!this.retainEndpoints||!this.sameView(view,request)||
         descriptor.family!==family||descriptor.constant!==constant||descriptor.maxIterations!==request.maxIterations||
         descriptor.grid!==grid||descriptor.method!==method||descriptor.useApprox!==(request.useApprox===true)||
-        descriptor.linearBlaEpsilon!==linearBlaPolicy(request,method,this.wantsQuadratic(request)))return false;
+        descriptor.linearBlaEpsilon!==linearBlaPolicy(request,method))return false;
     await this.ensureComputePipeline('distance');
     if(this.deviceLost||request.isCurrent&&!request.isCurrent())return false;
     const uniforms=this.fieldUniforms.slice(0),u32=new Uint32Array(uniforms);
@@ -1895,34 +1680,29 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const stops=this.fillAppearance(uniforms,colors,this.fieldDescriptor!.retainEndpoints),bind=this.createRenderBind();
     const frame={...request,colors,method,grid,useApprox:request.useApprox===true};
     const retained=this.snapshotFrame(frame);
-    let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined;
-    const timingSamples:(TimingSample|undefined)[]=[];
+    let candidate:GPUTexture|undefined;
     this.finalizing=true;
     try{
-      if(colors.postAntialias)await this.ensureRenderPipeline('antialias');
       if(this.deviceLost||request.isCurrent&&!request.isCurrent())return null;
       await checkedGpu(device,()=>{
         candidate=this.candidateTexture(retained.width,retained.height);
-        if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);
         device.queue.writeBuffer(this.stopsBuffer,0,stops);device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
         const encoder=device.createCommandEncoder({label:"recolour-complete"});
         this.currentImageValid=false;
-        this.encodeShadePass(encoder,bind,request.width,request.height,timingSamples);
+        this.encodeShadePass(encoder,bind,request.width,request.height);
         this.encodeCompletedSnapshot(encoder,frame,retained,candidate!);
-        if(candidateAa)this.encodeAntialias(encoder,this.target!,candidateAa,timingSamples);
-        device.queue.submit([encoder.finish()]);timingSamples.forEach(sample=>this.timing.collect(sample));
+        device.queue.submit([encoder.finish()]);
       });
       this.appearanceSubmissions++;
       const current=(!request.isCurrent||request.isCurrent())&&(!request.followView||!this.currentView||this.sameView(frame,this.workRequest(this.currentView))&&this.samePresentation(frame,this.currentView));
       if(!current||this.deviceLost){return {...this.fieldStats!,completed:false,computed:false,computedSamples:0,reusedSamples:0,renderMs:performance.now()-started};}
       this.commitHistory(retained,candidate!);candidate=undefined;this.lastFrame=retained;this.completedFrame=frame;this.currentImageValid=true;this.historyValid=true;this.incomingFrame=null;this.appearanceHoldFrame=null;
       this.capPresentationTarget=null;
-      if(candidateAa){this.spareAntialias?.destroy();this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
-      this.antialiasFrame=colors.postAntialias?frame:null;this.fieldUniforms=uniforms;this.lastPartialAt=performance.now();this.appearancePublications++;
+      this.fieldUniforms=uniforms;
       const result={...this.fieldStats!,completed:true,computed:false,computedSamples:0,reusedSamples:request.width*request.height,
         orbitMs:0,pipelineWaitMs:0,tableMs:0,renderMs:performance.now()-started,skippedIterations:0,plainIterations:0,approxSteps:0,rebases:0,skipRatio:0};
       this.cachedStats=result;this.cachedRequest=requestKey;return result;
-    }finally{candidate?.destroy();candidateAa?.destroy();this.finalizing=false;}
+    }finally{candidate?.destroy();this.finalizing=false;}
   }
 
   /** Recolours only channels already present after an explicit Stop. Never starts orbit or region work. */
@@ -1939,7 +1719,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       retained.unitsPerPixel.eq(request.unitsPerPixel)&&(retained.angle??0)===(request.angle??0)){
       request={...request,width:retained.width,height:retained.height,workView:true};
     }
-    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
+    const method=methodForScale(request.unitsPerPixel,request.tuning);
     const grid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
     if(!this.fieldSupportsAppearance(request,method,grid))await this.convertDistanceToIteration(request,method,grid);
     if(this.fieldSupportsAppearance(request,method,grid)){
@@ -1958,17 +1738,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const uniforms=base.slice(0),u32=new Uint32Array(uniforms);
     u32[26]=request.height;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;
     const stops=this.fillAppearance(uniforms,colors,this.retainEndpoints),bind=this.createRenderBind();
-    const timingSamples:(TimingSample|undefined)[]=[];
     await checkedGpu(device,()=>{
       device.queue.writeBuffer(this.stopsBuffer,0,stops);device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
       const encoder=device.createCommandEncoder({label:'recolour-stopped-partial'});
-      this.encodeShadePass(encoder,bind,request.width,request.height,timingSamples);
-      device.queue.submit([encoder.finish()]);timingSamples.forEach(sample=>this.timing.collect(sample));
+      this.encodeShadePass(encoder,bind,request.width,request.height);
+      device.queue.submit([encoder.finish()]);
     });
     this.appearanceSubmissions++;
     if(epoch!==this.publicationEpoch||request.isCurrent&&!request.isCurrent())return false;
     this.partialAppearanceUniforms=uniforms;this.incomingFrame={...frame,colors};
-    this.lastPartialAt=performance.now();this.appearancePublications++;
+
     this.reproject(visible,true);
     return true;
   }
@@ -2029,7 +1808,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
 
   private async readCompletedPixels(request:RenderRequest):Promise<{width:number;height:number;pixels:Uint8ClampedArray}> {
     if(!this.isComplete(request))throw new Error('The current image is not ready to save yet.');
-    const texture=request.colors.postAntialias?this.antialiasTexture:this.target;
+    const texture=this.target;
     if(!texture)throw new Error('The completed image is unavailable.');
     const {device}=this.ctx,{width,height}=request;
     const work=this.workRequest(request);
@@ -2092,7 +1871,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     if (this.pendingRetain) return false;
     if (this.currentView && !this.presentationCompatible(frame,this.currentView)) {
       this.incomingFrame=null;this.partialRegions=0;this.determined=new CoverageRegions();
-      this.determinedRegion=null;this.determinedSpacing=undefined;
+      this.determinedRegion=null;
       return false;
     }
     const { device } = this.ctx;
@@ -2149,7 +1928,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if(this.historyValid&&(this.lastFrame?.snapshotComplete||keepPriorCap||keepFiner)){
         this.coverageHistory?.destroy();this.coverageHistory=this.history;this.coverageFrame=this.lastFrame;
       }else this.history?.destroy();
-      this.history=snapshot!;snapshot=undefined;this.historySize={width:retained.width,height:retained.height};
+      this.history=snapshot!;snapshot=undefined;
       // encodeBlit already resolved any quality source in this composite.
       this.lastFrame={...retained,stationaryOversampling:false,proxy:true,covered,coveredSpacing:covered?.spacing,
         coveredRegions:retainedCoverage.rectangles.map(r=>({...r,spacing:retained.unitsPerPixel.times(r.spacing??1)}))};this.historyValid=true;
@@ -2174,15 +1953,13 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       drift.greaterThan(allowance);
   }
   private approximationPreparation(request:RenderRequest) {
-    const family=request.family??'mandelbrot',tuning=request.tuning??DEFAULT_TUNING;
+    const family=request.family??'mandelbrot';
     const requiredDelta=approximationDeltaBound(family,request,this.refX,this.refY);
     const narrowRetry=!this.laHasUsableMultiStep&&requiredDelta.lt(this.tableMaxDelta.times(1-1e-12));
-    const deferred=tuning.blaRebuildPercent<100&&this.isInteracting(request)&&narrowRetry&&
-      requiredDelta.gt(this.tableMaxDelta.times(tuning.blaRebuildPercent/100));
     const needed=request.useApprox===true&&approximationEligible(family,request.colors.mode)&&
-      (this.tableQuadratic!==this.wantsQuadratic(request)||this.tableEpsilonLog2!==blaTableEpsilon(request,this.wantsQuadratic(request))||
-       requiredDelta.gt(this.tableMaxDelta.times(1+1e-12))||narrowRetry&&!deferred);
-    return {requiredDelta,deferred,needed};
+      (this.tableEpsilonLog2!==blaTableEpsilon(request)||
+       requiredDelta.gt(this.tableMaxDelta.times(1+1e-12))||narrowRetry);
+    return {requiredDelta,needed};
   }
   /** Called once immediately before required preparation, against the old cap.
    * An updated cap may extend the reference budget; callers recheck that need. */
@@ -2206,8 +1983,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     // the outward preview as soon as the final native grid is requested.
     if(request.interacting&&(request.zoom??0)<0&&(live.zoom??0)===0&&!this.sameView(request,live))
       throw new LiveDemandChanged();
-    const method=request.forceMethod??methodForScale(request.unitsPerPixel,request.tuning);
-    const next=live.forceMethod??methodForScale(live.unitsPerPixel,live.tuning);
+    const method=methodForScale(request.unitsPerPixel,request.tuning);
+    const next=methodForScale(live.unitsPerPixel,live.tuning);
     const wide=request.family==='julia'||method!==Method.Direct;
     if(!!request.stationaryOversampling!==!!live.stationaryOversampling||method!==next||request.family!==live.family||request.useApprox!==live.useApprox||
       !this.sameBlaPolicy(request,live)||
@@ -2225,7 +2002,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
   }
   /** Plan numerical sampling independently of the visible camera and output. */
   methodForRequest(visible:RenderRequest):Method|null {
-    try{const work=this.workRequest(visible,false);return work.forceMethod??methodForScale(work.unitsPerPixel,work.tuning);}
+    try{const work=this.workRequest(visible,false);return methodForScale(work.unitsPerPixel,work.tuning);}
     catch{return null;}
   }
   private workRequest(visible:RenderRequest,commit=true):RenderRequest {
@@ -2233,7 +2010,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const stable=visible.followView&&visible.interacting&&(visible.zoom??0)!==0&&
       (visible.family??'mandelbrot')==='mandelbrot'&&!visible.angle&&!visible.exportDomain&&
       !visible.stationaryOversampling&&visible.colors.mode===0&&visible.colors.supersample===1&&
-      !visible.colors.postAntialias&&!needsEndpoints(visible.colors)&&(visible.colors.capped??0)===0;
+      !needsEndpoints(visible.colors)&&(visible.colors.capped??0)===0;
     if(stable) {
       const anchor=this.numericalAnchor??createSampleGridAnchor(visible);
       if(commit)this.numericalAnchor=anchor;
@@ -2272,7 +2049,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         return {...visible,...planned,overscanPixels:undefined,workView:true};
       }
     }
-    if(visible.stationaryOversampling&&!visible.exportDomain)return {...oversampledView(visible),colors:{...visible.colors,supersample:1,postAntialias:false},overscanPixels:undefined,workView:true};
+    if(visible.stationaryOversampling&&!visible.exportDomain)return {...oversampledView(visible),colors:{...visible.colors,supersample:1},overscanPixels:undefined,workView:true};
     const requested=visible.followView&&visible.zoom!==undefined&&visible.zoom<0 ? visible.overscanPixels : undefined;
     if(!requested?.x&&!requested?.y)return {...visible,workView:true};
     const limits=this.ctx.device.limits;
@@ -2296,13 +2073,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
   }
 
   private regionCoverage: {request:RenderRequest;last:WebGpuRenderer["lastFrame"];secondary:WebGpuRenderer["coverageFrame"];valid:boolean;capBase:WebGpuRenderer["lastFrame"];covered:Demand['covered']} | null = null;
-  private predictionAnchor: {x:Decimal;y:Decimal;focusX:number;focusY:number;rate:number;stable:number}|null=null;
-  private sizeCostModel=new SizeCostPredictor();
-  private sizeCostContext='';
-  private sizeCostReference:unknown;
-  private sizeCostTable:unknown;
-  private predictionCost={key:'',reference:null as unknown,table:null as unknown,msPerVisit:0,count:0};
-  private regionDemand(request: RenderRequest,completionMs=0): Demand {
+  private regionDemand(request: RenderRequest): Demand {
     const live = request.followView ? this.currentView ?? request : request;
     const m = reprojectionFor(request,live);
     const focus = live.focus ?? {x:.5,y:.5};
@@ -2327,24 +2098,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const xs=corners.map(p=>p.x*request.width),ys=corners.map(p=>p.y*request.height);
     const visible=corners.length?{x:Math.min(...xs),y:Math.min(...ys),
       width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)}:undefined;
-    let predicted:Demand['predicted'];
-    const predictionTuning=live.tuning??DEFAULT_TUNING;
-    if(predictionTuning.predictionLookahead>0&&live.heldInwardZoom&&live.interacting&&(live.zoom??0)>0&&
-        request.workView&&!live.angle&&Number.isFinite(live.zoomRate)&&(live.zoomRate??0)>0){
-      const D=Decimal.clone({precision:Math.max(Decimal.precision,live.centerX.sd()+32,live.centerY.sd()+32,
-        Math.max(0,live.centerX.e,live.centerY.e)-live.unitsPerPixel.e+48)});
-      const anchorX=new D(live.centerX).plus(new D(live.unitsPerPixel).times((focus.x-.5)*live.width));
-      const anchorY=new D(live.centerY).plus(new D(live.unitsPerPixel).times((.5-focus.y)*live.height));
-      const oldAnchor=this.predictionAnchor;
-      const stable=!!oldAnchor&&oldAnchor.rate===live.zoomRate&&
-        Math.hypot((focus.x-oldAnchor.focusX)*live.width,(focus.y-oldAnchor.focusY)*live.height)<=4&&
-        anchorX.minus(oldAnchor.x).abs().lte(new D(live.unitsPerPixel).times(4))&&
-        anchorY.minus(oldAnchor.y).abs().lte(new D(live.unitsPerPixel).times(4));
-      this.predictionAnchor={x:anchorX,y:anchorY,focusX:focus.x,focusY:focus.y,rate:live.zoomRate!,stable:stable?oldAnchor!.stable+1:0};
-      const forecast=stable&&completionMs>0?predictInwardView(live,focus,live.zoomRate!,completionMs,predictionTuning.predictionLookahead):null;
-      if(forecast)predicted=predictedGridDemand(request,forecast)??undefined;
-    }else this.predictionAnchor=null;
-    return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles,visible,...(predicted?{predicted}:{})};
+    return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles,visible};
   }
 
   render(request: RenderRequest): Promise<RenderStats> {
@@ -2392,10 +2146,6 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     catch(error){if(request.stationaryOversampling)throw new Error(`2x oversampling is unsupported at this viewport size: ${error instanceof Error?error.message:String(error)}`);throw error;}
     if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
     this.referencePreparing=false;this.finalizing=false;
-    // A supported-mode switch must not relabel cached samples from another map.
-    const numericalQuadratic=request.useApprox===true && this.wantsQuadratic(request);
-    if(this.numericalQuadratic!==null && this.numericalQuadratic!==numericalQuadratic)this.invalidateHistory();
-    this.numericalQuadratic=numericalQuadratic;
     const epoch = this.publicationEpoch;
     this.abortRequested=false;
     if(!Number.isInteger(request.maxIterations)||request.maxIterations<1||request.maxIterations>10_000_000)throw Error('Unsupported iteration limit (maximum 10000000).');
@@ -2406,8 +2156,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
 
     const keyFor=(value:RenderRequest)=>[value.centerX,value.centerY,value.unitsPerPixel,value.width,value.height,value.angle??0,
       value.family,value.juliaX,value.juliaY,value.maxIterations,
-      value.forceMethod??methodForScale(value.unitsPerPixel,value.tuning),value.useApprox===true,
-      JSON.stringify(value.colors),exportIdentity(value),linearBlaPolicy(value,value.forceMethod??methodForScale(value.unitsPerPixel,value.tuning),this.wantsQuadratic(value))].join("|");
+      methodForScale(value.unitsPerPixel,value.tuning),value.useApprox===true,
+      JSON.stringify(value.colors),exportIdentity(value),linearBlaPolicy(value,methodForScale(value.unitsPerPixel,value.tuning))].join("|");
     let requestKey=keyFor(request);
     if (requestKey === this.cachedRequest && this.cachedStats && this.isComplete(request) && request.isCurrent!()) {
       this.referencePreparing=false;this.exactTotalSamples=request.width*request.height;this.exactCompletedSamples=this.exactTotalSamples;
@@ -2419,7 +2169,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       throw new Error("WebGpuRenderer.init() was not awaited");
     }
 
-    const method = request.forceMethod ?? methodForScale(request.unitsPerPixel,request.tuning);
+    const method = methodForScale(request.unitsPerPixel,request.tuning);
     if(method===Method.Direct)this.perturbationActive=false;
     this.requireLiveMethod(request);
     const initialGrid=this.affordableGrid(Math.max(1,Math.min(3,request.colors.supersample)),request.width,request.height);
@@ -2474,9 +2224,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     // Reversal/overscan can need a larger delta domain without a new orbit.
     // Conversely, a table with no usable multi-step entry can become useful
     // when the same orbit is viewed through a narrower domain.
-    const {requiredDelta,deferred:deferNarrowRetry,needed:tableNeedsPreparation}=this.approximationPreparation(request);
-    this.deferredBlaRetry=method!==Method.Direct && request.useApprox===true &&
-      approximationEligible(family,request.colors.mode) && deferNarrowRetry;
+    const {requiredDelta,needed:tableNeedsPreparation}=this.approximationPreparation(request);
     if (method !== Method.Direct && tableNeedsPreparation) {
       await this.buildApproxTable(request);
     }
@@ -2493,9 +2241,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     this.requireLiveMethod(request);
     const approximationLevels =
       request.useApprox !== true || method === Method.Direct || !approximationEligible(family, request.colors.mode) ||
-      !this.laHasUsableMultiStep || this.tableEpsilonLog2!==blaTableEpsilon(request,this.wantsQuadratic(request)) ||
+      !this.laHasUsableMultiStep || this.tableEpsilonLog2!==blaTableEpsilon(request) ||
       requiredDelta.gt(this.tableMaxDelta.times(1 + 1e-12)) ? 0 : this.laLevels;
-    const pipelineKind=family==='julia'?approximationLevels>0?'juliaApprox':'julia':method===Method.Direct?'direct':approximationLevels>0?this.tableQuadratic?'quadratic':'approx':'plain';
+    const pipelineKind=family==='julia'?approximationLevels>0?'juliaApprox':'julia':method===Method.Direct?'direct':approximationLevels>0?'approx':'plain';
     // Table viability now fixes the exact variant. Prepare only that variant
     // while target/field resources are validated, then await residual work.
     const ordinarySpecialized=(pipelineKind==='plain'||pipelineKind==='approx')&&
@@ -2532,7 +2280,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const grid=initialGrid;
 
     let previewStride=1;
-    if(request.followView && !request.tileRows && colors.mode!==2 && grid===1) {
+    if(request.followView && grid===1) {
       while(Math.ceil(request.width/previewStride)*Math.ceil(request.height/previewStride)>MIN_BATCH_SAMPLES) previewStride*=2;
     }
 
@@ -2570,7 +2318,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     if(this.abortRequested||!request.isCurrent!())throw new DOMException('Superseded endpoints','AbortError');
     u32[8] = this.refLength;
     u32[20] = approximationLevels;
-    u32[21] = this.tableQuadratic ? 4 : BASE_STEP;
+    u32[21] = BASE_STEP;
     u32[35] = grid;
     u32[26] = request.height; u32[54]=1; u32[55]=previewStride;
     u32[37] = method;
@@ -2592,7 +2340,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     }
     const rotation=rotationBasis(request.angle??0);
     // Four-word coefficients preserve the CPU camera basis; no absolute deep
-    // coordinate is converted to f32 for rotation. Zero keeps the legacy path.
+    // coordinate is converted to f32 for rotation. Zero uses the unrotated path.
     f32.set(splitQuad(new Decimal(rotation.c)),92);f32.set(splitQuad(new Decimal(rotation.s)),96);
     const stopData=this.fillAppearance(uniforms,colors,this.retainEndpoints);
     device.queue.writeBuffer(this.stopsBuffer,0,stopData);
@@ -2605,7 +2353,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const fieldKey = this.fieldIdentity(request,family,constant,method,grid,this.retainEndpoints,u32[20]);
     const fieldStale = fieldKey !== this.fieldKey || this.aborted;
     const sampleKey = this.sampleIdentity(request,family,constant,method,grid,limbs,u32[20]);
-    const ordinary=colors.mode===0&&grid===1&&colors.supersample===1&&!colors.postAntialias&&
+    const ordinary=colors.mode===0&&grid===1&&colors.supersample===1&&
       (colors.capped??0)===0&&!this.retainEndpoints&&!needsEndpoints(colors);
     const admitted:AdmittedSamples={view:request,maxIterations:request.maxIterations,ordinary,
       policy:this.sampleIdentity({...request,maxIterations:0},family,constant,method,grid,limbs,u32[20]),
@@ -2630,7 +2378,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       // sample density: sparse and dense visits use the same numerical policy.
       // A partial upward upgrade can contain stamps from several caps. Even
       // a later same-cap remap must reopen the older unresolved stamps.
-      u32[41] = ordinary ? 2 : grid === 1 && colors.mode !== 2 ? 1 : 0;
+      u32[41] = ordinary ? 2 : grid === 1 ? 1 : 0;
       device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     } else if(inPlaceCapUpgrade) {
       // Keep the old field and visible target. Reopened regions will visit only
@@ -2670,15 +2418,13 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       followView:request.followView,interacting:request.interacting,zoom:request.zoom,
       method, grid,
     };
-    const progressive = colors.mode !== 2 && grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
+    const progressive = grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
     const continuationCapacity=continuationLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize));
-    const continuationSupported=!this.tableQuadratic && request.followView && colors.mode===0 && grid===1 &&
-      !request.tileRows && device.limits.maxStorageBuffersPerShaderStage>=8 && continuationCapacity>0;
-    let timingSamples: (TimingSample | undefined)[] = [];
-    const collectTimings = () => { timingSamples.forEach(s => this.timing.collect(s)); timingSamples = []; };
-    const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height,timingSamples);
+    const continuationSupported=request.followView && colors.mode===0 && grid===1 &&
+      device.limits.maxStorageBuffersPerShaderStage>=8 && continuationCapacity>0;
+    const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height);
     this.aborted = false;
-    this.partialRegions = 0; this.firstPartialAt = 0;
+    this.partialRegions = 0;
     let completed = true, cpuReused = 0, submittedVisits=0;
     let exactCoverage=fieldStale?0:request.width*request.height;
     u32[40] = 0; u32[42] = 0; u32[43] = request.width;
@@ -2689,10 +2435,10 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const init = device.createCommandEncoder({ label: "initialize-incoming" });
       shade(init, request.width, request.height);
       device.queue.submit([init.finish()]);
-      collectTimings();
+
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
-    const epsilonPolicy=linearBlaPolicy(request,method,this.wantsQuadratic(request));
+    const epsilonPolicy=linearBlaPolicy(request,method);
     const ordinaryCostKey=[family,method,pipelineKind,request.maxIterations,limbs,colors.mode,grid,epsilonPolicy].join("|");
     const gpuPolicy=[family,method,pipelineKind,limbs,colors.mode,grid,this.retainEndpoints,epsilonPolicy].join('|');
     if(this.gpuBatchPolicy!==gpuPolicy){this.gpuBatchPolicy=gpuPolicy;this.gpuBatchCost={msPerVisit:0};}
@@ -2723,7 +2469,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       // Settled ordinary views need one broad preview before exact refinement.
       // Motion keeps the full density ladder so new visible areas can catch up.
       this.pending.reset(request.width,request.height,previewStride,request.followView,singlePreview);
-      this.determined=new CoverageRegions(); this.determinedRegion=null; this.determinedSpacing=undefined; this.streamTargets++;
+      this.determined=new CoverageRegions(); this.determinedRegion=null;  this.streamTargets++;
     }
     const targetStarted=performance.now();
     const serviceAppearance=()=>{
@@ -2740,8 +2486,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       u32[26]=request.height;u32[40]=0;u32[42]=0;u32[43]=request.width;u32[54]=1;
       device.queue.writeBuffer(this.stopsBuffer,0,latestStops);device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
       const encoder=device.createCommandEncoder({label:"shade-latest-appearance"});shade(encoder,request.width,request.height);
-      device.queue.submit([encoder.finish()]);collectTimings();this.appearanceSubmissions++;
-      if(progressive){this.incomingFrame=frame;this.lastPartialAt=performance.now();this.reproject(latest);this.appearancePublications++;}
+      device.queue.submit([encoder.finish()]);this.appearanceSubmissions++;
+      if(progressive){this.incomingFrame=frame;this.reproject(latest);}
       return true;
     };
     let scratch:GPUBuffer|undefined,scratchBind:GPUBindGroup|undefined,scratchCapacity=0;
@@ -2755,29 +2501,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     if(!carryEligible)this.clearContinuationWork();
     let carriedRegion=carryEligible?this.pendingContinuation.claim(continuationIdentity,request,this.regionDemand(request).visible):undefined;
     if(carriedRegion){scratch=carriedRegion.scratch;scratchCapacity=carriedRegion.capacity;this.continuationCarried++;}
-    const deferredJobs:DeferredRegionWork[]=[];
-    const spareDeferred:Array<{scratch:GPUBuffer;capacity:number;bind?:GPUBindGroup}>=[];
-    let activeDeferred:DeferredRegionWork|undefined,deferredFreshTurns=0;
-    if(carryEligible)for(const slot of this.pendingDeferrals){
-      const saved=slot.claim(continuationIdentity,request,this.regionDemand(request).visible);
-      if(saved){
-        Object.assign(saved,{ownsExact:false,imported:true,activeMs:0,gpuMs:0,timingsExpected:0,timingsReceived:0,
-          missingTiming:false,finished:false,costApplied:false});
-        deferredJobs.push(saved);submittedVisits+=saved.unfinished;this.continuationCarried++;
-      }
-    }
-    // The 5217 ordinary wall estimator is independent of continuation feedback.
-    try { while (this.pending.size||carriedRegion||deferredJobs.length) {
+    // The ordinary wall estimator is independent of continuation feedback.
+    try { while (this.pending.size||carriedRegion) {
       this.requireLiveMethod(request);
       const carry=carriedRegion;carriedRegion=undefined;
       const batchTuning=this.currentView?.tuning??tuning;
-      // Two slots provide backpressure. A lone survivor also gets a turn after
-      // at most two fresh admissions, retaining its original region age.
-      const resumeDeferred=!carry&&deferredJobs.length&&(!this.pending.size||deferredJobs.length>=2||deferredFreshTurns>=2)
-        ?deferredJobs.shift():undefined;
-      activeDeferred=resumeDeferred;
-      if(resumeDeferred)deferredFreshTurns=0;
-      const electiveDeferral=continuationSupported&&batchTuning.hardPixelCutoff>0;
       if(ordinarySpecialized&&ordinaryShape!==batchTuning.workgroupShape){
         ordinaryShape=batchTuning.workgroupShape;
         calculatePipeline=await this.ensureComputePipeline(pipelineKind==='approx'?'ordinaryApprox':'ordinaryPlain',ordinaryShape);
@@ -2795,28 +2523,27 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const liveBatchView=this.currentView??request;
       const crossover=request.followView&&family==='mandelbrot'&&interacting&&zoom>0&&
         !this.perturbationActive&&liveBatchView.unitsPerPixel.times(liveBatchView.height).lte('2.8e-11');
-      // Restore the efficient historical inward incumbent without restoring a
-      // manual sizing control or changing outward/direct/stationary policy.
+      // Established inward perturbation uses a larger starting workload.
       const inwardIncumbent=!!request.followView&&interacting&&zoom>0&&family==='mandelbrot'&&ordinary&&
-        method!==Method.Direct&&batchTuning.hardPixelBudget===0&&!crossover;
+        method!==Method.Direct&&!crossover;
       const multiplier=crossover?Math.min(2,batchTuning.batchMultiplier):inwardIncumbent?32:batchTuning.batchMultiplier;
       const directionScale=request.followView?(!interacting?2:zoom<0?.5:1):1;
       // Apply the tested larger stationary floor only to this ordinary
       // perturbation path. Direct and expensive-pixel continuation stay unchanged.
       const stationaryEligible=!!request.followView&&!interacting&&family==='mandelbrot'&&
-        method!==Method.Direct&&colors.mode===0&&grid===1&&batchTuning.hardPixelBudget===0;
+        method!==Method.Direct&&colors.mode===0&&grid===1;
       const stationaryFactor=stationaryEligible?2:1;
       const minimum=startingBatchVisits(request.maxIterations,multiplier*directionScale*stationaryFactor);
       const allowanceMs=perturbationAllowanceMs(inwardIncumbent?batchTuning.inwardWorkTargetMs/1.5:batchTuning.navigationTargetMs,directionScale,!!crossover);
-      const automaticGuard=continuationSupported&&batchTuning.hardPixelBudget===0&&
+      const automaticGuard=continuationSupported&&
         request.maxIterations>COLD_CONTINUATION_OPERATIONS;
       const measuredOrdinary=automaticGuard&&continuationProbe?measuredContinuationBudget(this.batchMsPerSample,batchTuning.batchTargetMs):undefined;
       const ordinaryBudget=measuredOrdinary??(this.batchMsPerSample>0
         ? Math.max(minimum,batchTuning.batchTargetMs/this.batchMsPerSample) : minimum);
       // Off disables the optional override, not the first-work safeguard. A
       // cold high-cap region cannot establish its cost by first running to cap.
-      const sliceOperations=carry?.operations??(continuationSupported&&!electiveDeferral&&!resumeDeferred ? continuationOperations(request.maxIterations,
-        batchTuning.hardPixelBudget,this.batchMsPerSample,minimum,batchTuning.batchTargetMs) : 0);
+      const sliceOperations=carry?.operations??(continuationSupported ? continuationOperations(request.maxIterations,
+        this.batchMsPerSample,batchTuning.batchTargetMs) : 0);
       const costly=sliceOperations>0;
       syncFeedbackPolicy(sliceOperations);
       // Only the continuation route consults its separate, bounded feedback.
@@ -2826,7 +2553,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       // A direct-iteration wave can exceed the allowance even at minimum size;
       // shrinking it further loses occupancy without making it finish sooner.
       const gpuControlled=!!request.followView&&family==='mandelbrot'&&ordinary&&
-        method!==Method.Direct&&batchTuning.hardPixelBudget===0&&!costly;
+        method!==Method.Direct&&!costly;
       // Soften an expensive floor only after perturbation is established and
       // while zooming. Preserve the allowance, estimator and stationary policy.
       const navigationMinimum=!inwardIncumbent&&gpuControlled&&this.timing.supported&&interacting&&zoom!==0&&
@@ -2838,7 +2565,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const automaticCost=continuationProbe?.msPerVisit??
         (this.timing.supported&&gpuCost.msPerVisit>0?gpuCost.msPerVisit:this.batchMsPerSample);
       const measuredGpu=automaticGuard&&continuationProbe?measuredContinuationBudget(automaticCost,allowanceMs):undefined;
-      // Keep the base sample minimum without the historical multiplier-expanded
+      // Keep the base sample minimum independent of the multiplier-expanded
       // floor. Preserve measured growth, directional sizing and the cold fallback.
       const measuredInward=gpuControlled&&this.timing.supported&&inwardIncumbent&&this.perturbationActive
         ? measuredContinuationBudget(gpuCost.msPerVisit,allowanceMs):undefined;
@@ -2847,36 +2574,25 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const sizingActive=gpuControlled&&this.timing.supported&&interacting&&zoom!==0&&this.perturbationActive&&!crossover;
       const motionBudget=sizingActive?motionBatchBudget(gpuBudget,zoom>0):gpuBudget;
       const proposedVisits=gpuControlled?motionBudget:spatialBudget;
-      const requestedVisits=electiveDeferral?Math.min(proposedVisits,deferredLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))):proposedVisits;
-      const predictionKey=[ordinaryCostKey,ordinaryShape,batchTuning.publicationTargetMs,
-        batchTuning.minimumPassSamples,batchTuning.hardPixelCutoff,Math.sign(zoom),freshWork].join('|');
-      if(this.predictionCost.key!==predictionKey||this.predictionCost.reference!==this.refSamples||this.predictionCost.table!==this.laBuffer){
-        this.predictionCost={key:predictionKey,reference:this.refSamples,table:this.laBuffer,msPerVisit:0,count:0};
-        this.predictionAnchor=null;
-      }
-      const predictionCost=this.predictionCost;
-      const estimatedCompletionMs=sizingActive&&zoom>0&&predictionCost.count>=2
-        ?predictionCost.msPerVisit*Math.min(requestedVisits,request.width*request.height):0;
-      const region = carry?.region??resumeDeferred?.region??this.pending.take(requestedVisits,this.regionDemand(request,estimatedCompletionMs),request.tileRows,{
+      const requestedVisits=proposedVisits;
+      const region = carry?.region??this.pending.take(requestedVisits,this.regionDemand(request),undefined,{
         pointer:batchTuning.pointerWeight,distributed:batchTuning.distributedWeight,
         oldest:batchTuning.oldestWeight,pointerRadius:batchTuning.pointerRadius,pointerRefinement:batchTuning.pointerRefinement},
         gpuControlled&&interacting&&zoom!==0);
-      if(!region){if(deferredJobs.length)continue;break;}
-      if(!resumeDeferred&&!carry&&deferredJobs.length)deferredFreshTurns++;
-      const ownsExact=resumeDeferred?resumeDeferred.ownsExact:!carry;
+      if(!region)break;
+      const ownsExact=!carry;
       const width=region.width, rows=region.height;
-      this.latestRegion=region;
       const m = this.reuseMapping, old = this.reusableView;
       const fullyKnown = !capUpgrade && this.reusableComplete && m && old && m.denominator === 1 &&
         m.offsetX + region.x * m.step >= 0 && m.offsetY + region.y * m.step >= 0 &&
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
         m.offsetY + (region.y + rows - 1) * m.step < old.height;
-      if (!carry&&!resumeDeferred&&fullyKnown) { if(region.stride===1){cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;} continue; }
+      if (!carry&&fullyKnown) { if(region.stride===1){cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;} continue; }
       const visits=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride);
       const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
       // Fail closed if region selection ever exceeds the admitted capacity;
       // silently falling back here would undo the cold dispatch guard.
-      const shape=costly&&!resumeDeferred ? continuationRegion(width,rows,region.stride,limit) : null;
+      const shape=costly ? continuationRegion(width,rows,region.stride,limit) : null;
       let regionPipeline=calculatePipeline;
       if(shape){
         const preparing=performance.now();
@@ -2897,145 +2613,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         continuationReadback=device.createBuffer({label:'continuation-counter-readback',size:60,
           usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
       }
-      let batchStarted=0,regionDeferred=false,completedServiceMs=0;
-      const usedDeferral=!!resumeDeferred||electiveDeferral&&!carry;
-      if(usedDeferral){
-        const shape=resumeDeferred?.shape??deferredRegion(width,rows,region.stride,limit);
-        const workgroupShape=resumeDeferred?.workgroupShape??(ordinarySpecialized?ordinaryShape:'8x4');
-        const specialized=resumeDeferred?.specialized??ordinarySpecialized;
-        const preparing=performance.now();
-        const pipeline=await this.ensureDeferredPipeline(pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox',workgroupShape,specialized);
-        this.pipelineWaitMs+=performance.now()-preparing;
-        if(epoch!==this.publicationEpoch||!request.isCurrent!()||this.abortRequested||continuationOrbit!==this.orbitBuffer){
-          completed=false;this.aborted=true;break;
-        }
-        this.requireLiveMethod(request);
-        let job=resumeDeferred;
-        if(!job){
-          let spare=spareDeferred.pop();
-          if(spare&&spare.capacity<shape.bytes){spare.scratch.destroy();spare=undefined;}
-          const buffer=spare?.scratch??storageBuffer(device,shape.bytes/4,'deferred-region');
-          job={scratch:buffer,capacity:spare?.capacity??shape.bytes,bind:spare?.bind,shape,region,view:request,
-            identity:continuationIdentity,unfinished:visits,operations:COLD_CONTINUATION_OPERATIONS,
-            workgroupShape,specialized,initialized:false,deferred:false,firstWork:0,ownsExact:true,imported:false,
-            activeMs:0,gpuMs:0,timingsExpected:0,timingsReceived:0,missingTiming:false,finished:false,costApplied:false};
-          submittedVisits+=visits;
-        }
-        activeDeferred=job;
-        job.bind??=device.createBindGroup({layout:this.continuationLayout!,entries:[{binding:0,resource:{buffer:job.scratch}}]});
-        continuationReadback??=device.createBuffer({label:'continuation-counter-readback',size:60,
-          usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
-        const workgroup=deliveryWorkgroup(workgroupShape);
-        const passKey=[ordinaryCostKey,workgroupShape,specialized].join('|');
-        if(this.deferredPassEstimate.key!==passKey||this.deferredPassEstimate.reference!==this.refSamples||
-            this.deferredPassEstimate.table!==this.laBuffer){
-          this.deferredPassEstimate={key:passKey,reference:this.refSamples,table:this.laBuffer,
-            msPerOperation:batchTuning.publicationTargetMs/CONTINUATION_DISPATCH_OPERATIONS,
-            lastBudget:CONTINUATION_DISPATCH_OPERATIONS};
-        }
-        const passEstimate=this.deferredPassEstimate;
-        const learnDeferred=()=>{
-          if(!job!.finished||job!.costApplied||job!.imported||job!.missingTiming||job!.timingsReceived!==job!.timingsExpected||job!.gpuMs<=0)return;
-          job!.costApplied=true;
-          if(epoch!==this.publicationEpoch||this.abortRequested||!request.isCurrent!())return;
-          const cost=job!.gpuMs/visits;
-          gpuCost.msPerVisit=gpuCost.msPerVisit>0?.75*gpuCost.msPerVisit+.25*cost:cost;
-        };
-        do{
-          const sliceStarted=performance.now();
-          const cutoff=this.currentView?.tuning?.hardPixelCutoff??batchTuning.hardPixelCutoff;
-          if(cutoff<=0)job.deferred=true;
-          const passTarget=this.currentView?.tuning?.publicationTargetMs??batchTuning.publicationTargetMs;
-          const aggregateBudget=Math.max(1,Math.min(DEFERRED_MAX_DISPATCH_OPERATIONS,
-            passEstimate.lastBudget*2,passTarget/passEstimate.msPerOperation));
-          const operations=deferredContinuationOperations(cutoff,job.firstWork,job.unfinished,job.deferred,aggregateBudget);
-          const beforeUnfinished=job.unfinished;
-          const passObservation:{ms?:number;survivors?:number;learned:boolean}={learned:false};
-          const learnPass=()=>{
-            if(passObservation.learned||passObservation.ms===undefined||passObservation.survivors===undefined)return;
-            passObservation.learned=true;
-            if(epoch!==this.publicationEpoch||this.abortRequested||!request.isCurrent!())return;
-            // Surviving lanes consumed every granted loop body. Completed lanes
-            // cannot make an unfinished expensive lane appear artificially cheap.
-            passEstimate.msPerOperation=learnDeferredOperationCost(passEstimate.msPerOperation,
-              passObservation.ms,operations,beforeUnfinished,passObservation.survivors);
-            if(Number.isFinite(passObservation.ms)&&passObservation.ms>0&&beforeUnfinished>=4096&&passObservation.survivors>=beforeUnfinished/2)
-              passEstimate.lastBudget=operations*beforeUnfinished;
-          };
-          // Global counters include all admitted obligations, including parked
-          // regions. Only this dispatch can reduce its own survivor count.
-          const completedBefore=submittedVisits-beforeUnfinished-deferredJobs.reduce((n,p)=>n+p.unfinished,0);
-          this.requireLiveMethod(request);
-          const stops=this.fillAppearance(uniforms,colors,this.retainEndpoints);
-          device.queue.writeBuffer(this.stopsBuffer,0,stops);
-          u32[54]=region.stride;u32[26]=region.y+rows;u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+width;
-          device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
-          const control=new Uint32Array(job.initialized?4:DEFERRED_HEADER_BYTES/4);
-          control.set([operations,job.initialized?1:0,shape.columns,0]);
-          device.queue.writeBuffer(job.scratch,0,control);
-          device.queue.writeBuffer(this.statsBuffer,28,new Uint32Array(1));
-          const encoder=device.createCommandEncoder({label:'deferred-region'}),sample=this.timing.begin('calculate');
-          encoder.copyBufferToBuffer(this.statsBuffer,20,continuationReadback,56,4);
-          const pass=encoder.beginComputePass({label:'deferred-region',timestampWrites:this.timing.writes(sample)});
-          pass.setPipeline(pipeline);pass.setBindGroup(0,bind);pass.setBindGroup(1,job.bind);
-          pass.dispatchWorkgroups(Math.ceil(shape.columns/workgroup.x),Math.ceil(shape.rows/workgroup.y));pass.end();
-          this.timing.resolve(encoder,sample);
-          encoder.copyBufferToBuffer(this.statsBuffer,0,continuationReadback,0,56);
-          device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
-          if(sample){job.timingsExpected++;this.timing.collect(sample,ms=>{
-            job!.timingsReceived++;if(ms>0)job!.gpuMs+=ms;else job!.missingTiming=true;learnDeferred();
-            passObservation.ms=ms;learnPass();
-          },()=>{job!.timingsReceived++;job!.missingTiming=true;});}else job.missingTiming=true;
-          collectTimings();
-          await continuationReadback.mapAsync(GPUMapMode.READ);
-          let newlyCompleted:number,newlyComputed:number;
-          try{const counters=new Uint32Array(continuationReadback.getMappedRange());
-            newlyCompleted=counters[5]+counters[6]-completedBefore;job.unfinished=counters[7];
-            newlyComputed=counters[5]-counters[14];
-          }finally{continuationReadback.unmap();}
-          job.initialized=true;job.firstWork+=operations;
-          if(newlyCompleted<0||newlyCompleted+job.unfinished!==beforeUnfinished)throw Error('Deferred sample accounting did not match admitted work.');
-          if(epoch!==this.publicationEpoch||continuationOrbit!==this.orbitBuffer||!request.isCurrent!()||this.abortRequested){
-            completed=false;this.aborted=true;break;
-          }
-          passObservation.survivors=job.unfinished;learnPass();
-          if(progressive&&newlyComputed>0){
-            device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
-            const shadeEncoder=device.createCommandEncoder({label:'shade-deferred-completions'});shade(shadeEncoder,width,rows);
-            device.queue.submit([shadeEncoder.finish()]);collectTimings();
-            this.incomingFrame=frame;this.partialSerial++;this.partialRegions++;
-            this.lastPartialAt=performance.now();this.firstPartialAt||=this.lastPartialAt;
-            if(request.presentationOwner!=='animation')this.reproject(this.currentView??request);
-            await device.queue.onSubmittedWorkDone();
-          }
-          job.activeMs+=performance.now()-sliceStarted;
-          if(!job.unfinished)break;
-          await yieldToEvents();
-          if(epoch!==this.publicationEpoch||!request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
-          await request.betweenBatches?.();
-          if(epoch!==this.publicationEpoch||!request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
-          if(!serviceAppearance()){this.retarget=true;completed=false;break;}
-          const live=this.currentView;
-          if(request.followView&&live&&!this.sameView(request,this.workRequest(live))&&
-              performance.now()-targetStarted>=(live.tuning?.targetResidencyMs??tuning.targetResidencyMs)){
-            this.retarget=true;completed=false;break;
-          }
-          if(job.deferred||job.firstWork>=cutoff){job.deferred=true;break;}
-        }while(job.unfinished);
-        if(job.unfinished){deferredJobs.push(job);regionDeferred=true;activeDeferred=undefined;}
-        else if(completed&&epoch===this.publicationEpoch&&request.isCurrent!()&&!this.abortRequested){
-          job.finished=true;learnDeferred();
-          if(!job.imported){completedServiceMs=job.activeMs;const cost=job.activeMs/visits;
-            if(Number.isFinite(cost)&&cost>0)this.batchMsPerSample=this.batchMsPerSample?.75*this.batchMsPerSample+.25*cost:cost;
-          }
-          spareDeferred.push({scratch:job.scratch,capacity:job.capacity,bind:job.bind});activeDeferred=undefined;
-          this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:region.stride});
-          if(!this.determinedRegion||width*rows>=this.determinedRegion.width*this.determinedRegion.height){
-            this.determinedRegion={x:region.x,y:region.y,width,height:rows};this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
-          }
-        }
-        if(!completed)break;
-      }else if(shape){
+      let batchStarted=0;
+      if(shape){
         const measurement=carry?null:this.batchFeedback.submit(visits,region.stride,batchTuning.batchTargetMs);
         const learnBatch=(ms:number,kind:'gpu'|'fallback')=>{
           if(measurement)this.batchFeedback.observe(measurement,ms,kind);
@@ -3060,7 +2639,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           }
         };
         let resume=!!carry,unfinished=carry?.unfinished??0,
-          publishedCompleted=submittedVisits-deferredJobs.reduce((n,p)=>n+p.unfinished,0);
+          publishedCompleted=submittedVisits;
         if(carry)submittedVisits+=unfinished;
         do {
           this.requireLiveMethod(request);
@@ -3069,27 +2648,26 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
           const control=new Uint32Array(resume?4:CONTINUATION_HEADER_BYTES/4);
-          const liveSliceBudget=this.currentView?.tuning?.hardPixelBudget??batchTuning.hardPixelBudget;
-          const operations=resumedContinuationOperations(liveSliceBudget,sliceOperations,resume?unfinished:shape.lanes);
+          const operations=resumedContinuationOperations(sliceOperations,resume?unfinished:shape.lanes);
           control.set([operations,resume?1:0,shape.columns,0]);
           device.queue.writeBuffer(scratch!,0,control);
           device.queue.writeBuffer(this.statsBuffer,28,new Uint32Array(1));
           const encoder=device.createCommandEncoder({label:'calculate-region'});
-          const sample=this.timing.begin('calculate');
+          const sample=this.timing.begin();
           const pass=encoder.beginComputePass({label:'calculate-region',timestampWrites:this.timing.writes(sample)});
           pass.setPipeline(regionPipeline);pass.setBindGroup(0,bind);pass.setBindGroup(1,scratchBind!);
           pass.dispatchWorkgroups(Math.ceil(width/region.stride/8),Math.ceil(rows/region.stride/4));pass.end();
           this.timing.resolve(encoder,sample);
           // Read the existing survivor/completion counters in this submission.
           encoder.copyBufferToBuffer(this.statsBuffer,0,continuationReadback!,0,56);
-          device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
+          device.queue.submit([encoder.finish()]);
           if(!resume)submittedVisits+=visits;
           if(sample){
             sliceExpected++;
             this.timing.collect(sample,ms=>{sliceReported++;sliceGpuMs+=ms;learnRegion();},
               ()=>{sliceReported++;sliceUnavailable=true;learnRegion();});
           }else sliceUnavailable=true;
-          collectTimings();
+
           // Mapping the reusable copy fences this slice. Unmap before reuse.
           await continuationReadback!.mapAsync(GPUMapMode.READ);
           let completedSamples:number;
@@ -3106,17 +2684,17 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
             device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
             const shadeEncoder=device.createCommandEncoder({label:'shade-completed-continuation'});
             shade(shadeEncoder,width,rows);
-            device.queue.submit([shadeEncoder.finish()]);collectTimings();
+            device.queue.submit([shadeEncoder.finish()]);
             publishedCompleted=completedSamples;
             this.incomingFrame=frame;this.partialSerial++;this.partialRegions++;
             if(!unfinished){
               this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:region.stride});
               if(!this.determinedRegion||width*rows>=this.determinedRegion.width*this.determinedRegion.height){
                 this.determinedRegion={x:region.x,y:region.y,width,height:rows};
-                this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
+
               }
             }
-            this.lastPartialAt=performance.now();this.firstPartialAt||=this.lastPartialAt;
+
             if(request.presentationOwner!=='animation')this.reproject(this.currentView??request);
           }
           if(!unfinished)break;
@@ -3144,7 +2722,6 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         if(!completed)break;
         regionWallMs=performance.now()-regionStarted;
         if(!carry){probe.msPerVisit=regionWallMs/visits;continuationProbe=probe;}
-        if(!carry)completedServiceMs=regionWallMs;
         slicesFinished=true;learnRegion();
         // A bounded probe must provide an exit to ordinary bulk rendering for
         // cheap work. Include its fences, as the ordinary estimator does; do
@@ -3156,16 +2733,6 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         // Keep this scheduler selection intact. Only established inward motion
         // yields between aligned portions of the same logical region.
         const striped=sizingActive&&zoom>0&&progressive;
-        // Shadow model only: capture both predictions before observing this
-        // region. Replacements isolate delayed timing from a changed context.
-        const shadowContext=[ordinaryCostKey,ordinaryShape,Math.sign(zoom),region.stride,freshWork,
-          batchTuning.publicationTargetMs,batchTuning.minimumPassSamples,striped].join('|');
-        if(this.sizeCostContext!==shadowContext||this.sizeCostReference!==this.refSamples||this.sizeCostTable!==this.laBuffer){
-          this.sizeCostContext=shadowContext;this.sizeCostReference=this.refSamples;this.sizeCostTable=this.laBuffer;
-          this.sizeCostModel=new SizeCostPredictor();
-        }
-        const shadowModel=this.sizeCostModel;
-        const shadowPrediction=shadowModel.capture(visits,gpuCost.msPerVisit*visits);
         let stripeCost=gpuCost.msPerVisit>0?gpuCost.msPerVisit:allowanceMs/visits;
         let rowsDone=0,timingExpected=0,timingReported=0,regionGpuMs=0;
         let timingUnavailable=false,regionFinished=false,costLearned=false;
@@ -3174,7 +2741,6 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           if(costLearned||!regionFinished||timingUnavailable||timingReported!==timingExpected||regionGpuMs<=0||!gpuControlled)return;
           if(striped&&(epoch!==this.publicationEpoch||this.abortRequested||!request.isCurrent!()))return;
           costLearned=true;
-          shadowModel.observe(shadowPrediction,regionGpuMs);
           const cost=regionGpuMs/visits;
           gpuCost.msPerVisit=gpuCost.msPerVisit>0?.75*gpuCost.msPerVisit+.25*cost:cost;
         };
@@ -3188,19 +2754,18 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
             // Restore matching colours/stops as well as this stripe's bounds.
             const stops=this.fillAppearance(uniforms,colors,this.retainEndpoints);
             device.queue.writeBuffer(this.stopsBuffer,0,stops);
-            this.latestRegion={...region,y:stripeY,height:stripeRows};
           }
           u32[54]=region.stride;u32[26]=stripeY+stripeRows;
           u32[40]=stripeY;u32[42]=region.x;u32[43]=region.x+width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
           const encoder=device.createCommandEncoder({label:'calculate-region'});
-          const sample=gpuControlled||this.timing.enabled?this.timing.begin('calculate'):undefined;
+          const sample=gpuControlled?this.timing.begin():undefined;
           const pass=encoder.beginComputePass({label:'calculate-region',timestampWrites:this.timing.writes(sample)});
           pass.setPipeline(calculatePipeline);pass.setBindGroup(0,bind);
           pass.dispatchWorkgroups(Math.ceil(width/region.stride/calculateWorkgroupX),Math.ceil(stripeRows/region.stride/calculateWorkgroupY));pass.end();
           this.timing.resolve(encoder,sample);
           if(progressive)shade(encoder,width,stripeRows);
-          device.queue.submit([encoder.finish()]);this.calculationSubmissions++;
+          device.queue.submit([encoder.finish()]);
           submittedVisits+=stripeVisits*grid*grid;
           if(sample){
             timingExpected++;
@@ -3213,15 +2778,15 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
               learnRegion();
             },()=>{timingReported++;timingUnavailable=true;});
           }else timingUnavailable=true;
-          collectTimings();
+
           if(progressive&&request.isCurrent!()){
             this.incomingFrame=frame;this.partialSerial++;this.partialRegions++;
             this.determined.add({x:region.x,y:stripeY,width,height:stripeRows,spacing:region.stride});
             if(!this.determinedRegion||width*stripeRows>=this.determinedRegion.width*this.determinedRegion.height){
               this.determinedRegion={x:region.x,y:stripeY,width,height:stripeRows};
-              this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
+
             }
-            this.lastPartialAt=performance.now();this.firstPartialAt||=this.lastPartialAt;
+
             // The shared queue presents only this calculated and shaded stripe.
             if(request.presentationOwner!=='animation')this.reproject(this.currentView??request);
           }
@@ -3247,7 +2812,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:region.stride});
           if(!this.determinedRegion||width*rows>=this.determinedRegion.width*this.determinedRegion.height){
             this.determinedRegion={x:region.x,y:region.y,width,height:rows};
-            this.determinedSpacing=frame.unitsPerPixel.times(region.stride);
+
           }
         }
         continuationProbe=undefined;
@@ -3255,23 +2820,17 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       }
       // Preparation and one actual perturbation batch have finished. Restore
       // the selected multiplier on the very next batch, even during motion.
-      if(method!==Method.Direct&&!regionDeferred&&completed&&request.isCurrent!()&&!this.abortRequested)this.perturbationActive=true;
+      if(method!==Method.Direct&&completed&&request.isCurrent!()&&!this.abortRequested)this.perturbationActive=true;
       // PendingRegions still owns the carried rectangle's exact obligations.
       // Its later known-sample visit counts this area once, without duplicating it.
-      if(ownsExact&&!regionDeferred&&region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
-      if(!shape&&!usedDeferral){
+      if(ownsExact&&region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
+      if(!shape){
         const elapsed=performance.now()-batchStarted;
-        completedServiceMs=elapsed;
         if(request.interacting&&(request.zoom??0)<0)
           this.outwardBatchDelayMs=learnOutwardDelay(this.outwardBatchDelayMs,elapsed);
         const cost=elapsed/visits;
         this.batchMsPerSample=this.batchMsPerSample
           ? .75*this.batchMsPerSample+.25*cost : cost;
-      }
-      if(completed&&epoch===this.publicationEpoch&&request.isCurrent!()&&!this.abortRequested&&completedServiceMs>0){
-        const cost=completedServiceMs/visits;
-        predictionCost.msPerVisit=predictionCost.count?.75*predictionCost.msPerVisit+.25*cost:cost;
-        predictionCost.count++;
       }
       await yieldToEvents();
       if (!request.isCurrent!() || this.abortRequested) {
@@ -3289,25 +2848,12 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       // button changes neither this condition nor the outstanding queue.
       const live=this.currentView;
       if (request.followView && live && !this.sameView(request,this.workRequest(live)) &&
-          (performance.now()-targetStarted >= (live.tuning?.targetResidencyMs??tuning.targetResidencyMs) || !this.pending.size&&!deferredJobs.length)) {
+          (performance.now()-targetStarted >= (live.tuning?.targetResidencyMs??tuning.targetResidencyMs) || !this.pending.size)) {
         this.retarget=true; completed=false; break;
       }
     }
-      if(completed&&(deferredJobs.length||activeDeferred||carriedRegion))throw Error('Unfinished continuation at final coverage.');
+      if(completed&&carriedRegion)throw Error('Unfinished continuation at final coverage.');
     }finally{
-      if(this.retarget&&carryEligible&&epoch===this.publicationEpoch&&request.isCurrent!()&&!this.abortRequested&&this.currentView){
-        const next=this.workRequest(this.currentView),visible=this.regionDemand(next).visible;
-        let slot=0;
-        for(let i=0;i<deferredJobs.length;){
-          const job=deferredJobs[i];
-          if(slot<this.pendingDeferrals.length&&translatedContinuationRegion(job,next,visible)){
-            this.pendingDeferrals[slot++].park(job);deferredJobs.splice(i,1);this.continuationParked++;
-          }else i++;
-        }
-      }
-      activeDeferred?.scratch.destroy();
-      for(const job of deferredJobs)job.scratch.destroy();
-      for(const spare of spareDeferred)spare.scratch.destroy();
       scratch?.destroy();continuationReadback?.destroy();
     }
     if (!request.isCurrent!()||this.abortRequested) completed = false;
@@ -3315,22 +2861,19 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     if(completed&&(this.pending.size!==0||exactCoverage!==request.width*request.height))throw Error('Incomplete final sample coverage.');
     this.finalizing=completed;
     const retained=this.snapshotFrame(frame);
-    let candidate:GPUTexture|undefined,candidateAa:GPUTexture|undefined,published=false;
+    let candidate:GPUTexture|undefined,published=false;
     let counters:Uint32Array;
     try{
-      if(completed&&colors.postAntialias)await this.ensureRenderPipeline('antialias');
       if(this.abortRequested||!request.isCurrent!()||this.deviceLost)completed=false;
       counters=!completed&&(this.abortRequested||!request.isCurrent!()||this.deviceLost)?new Uint32Array(14):new Uint32Array(await checkedGpu(device,()=>{
         if(completed){
           candidate=this.candidateTexture(retained.width,retained.height);
-          if(colors.postAntialias)candidateAa=this.candidateTexture(request.width,request.height,true);
           const encoder=device.createCommandEncoder({label:'shade'});
           u32[26]=request.height;u32[54]=1;u32[40]=0;u32[42]=0;u32[43]=request.width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
           if(capUpgrade||!fieldStale||!progressive||colors.mode===1||(colors.effect??0)>=7&&(colors.effect??0)<=9)shade(encoder,request.width,request.height);
           this.encodeCompletedSnapshot(encoder,frame,retained,candidate);
-          if(candidateAa)this.encodeAntialias(encoder,this.target!,candidateAa,timingSamples);
-          device.queue.submit([encoder.finish()]);collectTimings();
+          device.queue.submit([encoder.finish()]);
         }
         // Existing map fences the final copy. Scopes are popped before it yields.
         return readBuffer(device,this.statsBuffer,56);
@@ -3339,7 +2882,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if(request.isCurrent!()&&!this.abortRequested&&completed){
         // Coarse and reused visits are not unique pixels. The region partition
         // supplies exact coverage separately; cached recolours have zero visits.
-        if(colors.mode!==2&&counters[5]+counters[6]!==submittedVisits)throw Error('GPU sample accounting did not match submitted work.');
+        if(counters[5]+counters[6]!==submittedVisits)throw Error('GPU sample accounting did not match submitted work.');
         this.fieldKey=fieldKey;this.fieldComplete=true;
         if(capUpgrade)this.sampleKey=sampleKey;
         const currentPresentation=(!presentationCurrent||presentationCurrent())&&
@@ -3348,8 +2891,6 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           this.commitHistory(retained,candidate!);candidate=undefined;
           this.lastFrame=retained;this.completedFrame=frame;this.currentImageValid=true;this.appearanceHoldFrame=null;published=true;
           this.capPresentationTarget=null;
-          if(candidateAa){this.spareAntialias?.destroy();this.spareAntialias=this.antialiasTexture;this.antialiasTexture=candidateAa;candidateAa=undefined;this.antialiasSize={width:request.width,height:request.height};}
-          this.antialiasFrame=colors.postAntialias?frame:null;
         }else if(this.currentView&&this.presentationCompatible(frame,this.currentView)&&
             reprojectionFor(frame,this.currentView,true,true)){
           // A newer automatic cap does not make these finished pixels cease
@@ -3362,7 +2903,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         if(epoch===this.publicationEpoch){this.fieldKey='';this.fieldComplete=false;}
       }
     }finally{
-      candidate?.destroy();candidateAa?.destroy();
+      candidate?.destroy();
       if(epoch===this.publicationEpoch)this.finalizing=false;
     }
     const renderMs=performance.now()-started;
@@ -3395,7 +2936,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     };
     if(completed&&this.fieldComplete){
       this.fieldDescriptor={family,constant,maxIterations:request.maxIterations,mode:colors.mode,grid,method,useApprox:request.useApprox===true,retainEndpoints:this.retainEndpoints,
-        interiorEndpoints:colors.mode!==0||(colors.capped??0)>0,linearBlaEpsilon:linearBlaPolicy(request,method,this.wantsQuadratic(request))};
+        interiorEndpoints:colors.mode!==0||(colors.capped??0)>0,linearBlaEpsilon:linearBlaPolicy(request,method)};
       this.fieldUniforms=uniforms.slice(0);this.fieldStats=result;this.partialAppearanceUniforms=null;
     }
     if (completed && request.isCurrent!() && published) {
@@ -3405,5 +2946,3 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     return result;
   }
 }
-
-

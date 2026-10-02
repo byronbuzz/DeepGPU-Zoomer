@@ -8,9 +8,7 @@ export interface TuningSettings {
   publicationTargetMs: number;
   minimumLogicalSamples: number;
   minimumPassSamples: number;
-  /** Zero disables elective deferral; cold-work protection is independent. */
-  hardPixelCutoff: number;
-  predictionLookahead: number;
+
   targetResidencyMs: number;
   pointerRefinement: boolean;
   workgroupShape: WorkgroupShape;
@@ -19,22 +17,20 @@ export interface TuningSettings {
   navigationTargetMs: number;
   /** Internal starting scale; measured motion costs select the operating size. */
   batchMultiplier: number;
-  motionPreference: number;
-  hardPixelBudget: number;
+
   overscanBase: number;
   overscanMax: number;
   dynamicDepthGain: number;
 
   /** Fixed, user-selected rendering policy, retained in requests for clarity. */
   directExponent: number;
-  hdrExponent: number;
+
   pointerPriority: number;
   pointerWeight: number;
   distributedWeight: number;
   oldestWeight: number;
   pointerRadius: number;
-  blaRebuildPercent: number;
-  blaChunkMs: number;
+
   /** Mandelbrot linear BLA local tolerance; other approximation policies are fixed. */
   blaPrecisionLog2: number;
 }
@@ -56,42 +52,20 @@ export const DEFAULT_TUNING: Readonly<TuningSettings> = Object.freeze({
   publicationTargetMs: DELIVERY_BASE.publicationTargetMs*DEFAULT_PRESET.workScale,
   minimumLogicalSamples: DELIVERY_BASE.minimumLogicalSamples*DEFAULT_PRESET.workScale,
   minimumPassSamples: DELIVERY_BASE.minimumPassSamples*DEFAULT_PRESET.workScale,
-  hardPixelCutoff: 0, predictionLookahead: 0, targetResidencyMs: DEFAULT_PRESET.targetResidencyMs,
+  targetResidencyMs: DEFAULT_PRESET.targetResidencyMs,
   pointerRefinement: false, workgroupShape: '16x4',
-  motionPreference: 50, batchMultiplier: 16, navigationTargetMs: 16, hardPixelBudget: 0,
+  batchMultiplier: 16, navigationTargetMs: 16,
   overscanBase: 64, overscanMax: 128,
   dynamicDepthGain: 3000,
-  // Preserve 5345's qualified Direct crossover and its deep-transition batching.
-  directExponent: 14.75, hdrExponent: 25, batchTargetMs: 8,
+  // Fixed crossover into perturbation rendering.
+  directExponent: 14.75, batchTargetMs: 8,
   pointerPriority: 1, pointerWeight: 2, distributedWeight: 1, oldestWeight: 1,
-  pointerRadius: 32, blaRebuildPercent: 100, blaChunkMs: 0, blaPrecisionLog2: -14,
+  pointerRadius: 32, blaPrecisionLog2: -14,
 });
 
 export const TUNING_STORAGE_KEY = 'gpu-zoomer-navigation-tuning-v4';
-export const HARD_PIXEL_BUDGETS = [0, 128, 256, 512, 1024, 2048, 4096, 8192, 16384] as const;
-export const HARD_PIXEL_CUTOFFS = [0, 128, 256, 512, 1024, 2048, 4096, 8192,
-  16384, 32768, 65536, 131072, 262144, 524288, 1048576] as const;
 export const WORKGROUP_SHAPES = ['8x4', '16x4', '8x8', '24x4', '32x4', '64x4'] as const;
 export type WorkgroupShape = typeof WORKGROUP_SHAPES[number];
-/** Four power-of-two stops, evenly spaced along each slider. */
-export const TUNING_SLIDER_RANGES = {
-  inwardWorkScale: {min:.5,max:4,step:0},
-  targetResidencyMs: {min:32,max:256,step:0},
-} as const;
-export type GraduatedTuningKey = keyof typeof TUNING_SLIDER_RANGES;
-export function tuningSliderPosition(key:GraduatedTuningKey,value:number):number {
-  const {min,max}=TUNING_SLIDER_RANGES[key];
-  const bounded=Number.isFinite(value)?Math.max(min,Math.min(max,value)):DEFAULT_TUNING[key];
-  return Math.log(bounded/min)/Math.log(max/min);
-}
-export function tuningSliderValue(key:GraduatedTuningKey,position:number):number {
-  const {min,max}=TUNING_SLIDER_RANGES[key];
-  if(!Number.isFinite(position))return DEFAULT_TUNING[key];
-  if(position<=0)return min;
-  if(position>=1)return max;
-  const value=min*Math.pow(max/min,Math.max(0,Math.min(1,position)));
-  return 2**Math.round(Math.log2(value));
-}
 export const EDITABLE_TUNING_KEYS = [
   'throughput', 'pointerRefinement',
   'dynamicDepthGain',
@@ -148,16 +122,13 @@ export function normalizeTuning(value: unknown): TuningSettings {
     publicationTargetMs: DELIVERY_BASE.publicationTargetMs*gpuPassScale,
     minimumLogicalSamples: DELIVERY_BASE.minimumLogicalSamples*inwardWorkScale,
     minimumPassSamples: DELIVERY_BASE.minimumPassSamples*gpuPassScale,
-    hardPixelCutoff: 0, predictionLookahead: 0,
     targetResidencyMs: preset.targetResidencyMs,
     pointerRefinement: typeof input.pointerRefinement==='boolean'?input.pointerRefinement:DEFAULT_TUNING.pointerRefinement,
     workgroupShape: DEFAULT_TUNING.workgroupShape,
-    motionPreference: stepped(input.motionPreference, DEFAULT_TUNING.motionPreference, 0, 100, 1),
     batchTargetMs: DEFAULT_TUNING.batchTargetMs,
     navigationTargetMs: DEFAULT_TUNING.navigationTargetMs,
     batchMultiplier: DEFAULT_TUNING.batchMultiplier,
     // These are fixed policy, including when reading obsolete stored controls.
-    hardPixelBudget: 0,
     overscanBase: 64,
     overscanMax: 128,
     dynamicDepthGain: stepped(input.dynamicDepthGain, DEFAULT_TUNING.dynamicDepthGain, 0, 30000, 50),
@@ -179,7 +150,7 @@ export function startingBatchVisits(iterations: number, multiplier: number): num
   return Math.max(64, Math.floor(16_384 * multiplier * Math.min(1, 10_000 / iterations) / 64) * 64);
 }
 
-/** Bounded navigation experiment: soften only the floor, never the time allowance.
+/** Soften the navigation floor while preserving the time allowance.
  * The existing measured cost drives this rule; it does not infer GPU occupancy.
  * Call only for established, timed perturbation work during actual zoom input.
  */

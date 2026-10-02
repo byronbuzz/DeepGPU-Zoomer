@@ -2,16 +2,6 @@
 
 DeepGPU Zoomer is licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).
 
-The retained completed-image antialias shader in
-`src/render/antialias.wgsl` is a WGSL adaptation of the FXAA v2 shader in
-[mattdesl/glsl-fxaa](https://github.com/mattdesl/glsl-fxaa/blob/6cf589554e182fc50ef8ec962e4550184cf4c940/fxaa.glsl),
-revision 6cf589554e182fc50ef8ec962e4550184cf4c940. The repository is Copyright
-(c) 2014 Matt DesLauriers under the MIT License; the adapted shader carries
-Copyright (c) 2011 Armin Ronacher under the BSD 3-Clause License. See
-[licenses/glsl-fxaa-MIT.md](licenses/glsl-fxaa-MIT.md) and
-[licenses/glsl-fxaa-BSD-3-Clause.txt](licenses/glsl-fxaa-BSD-3-Clause.txt).
-The current application exposes oversampling rather than this post-process filter.
-
 The stable sample reuse design follows the coordinate-preserving sample
 movement and selective calculation inspected in
 [XaoSjs](https://github.com/xaos-project/XaoSjs/blob/c82013cbf428948d01f5345d82471632a1cb6ac4/js/xaos.js)
@@ -40,7 +30,7 @@ data distributed by Matplotlib 3.10.6. See
 [Matplotlib 3.10.6 source](https://github.com/matplotlib/matplotlib/tree/v3.10.6/lib/matplotlib)
 and the [Matplotlib licence](https://matplotlib.org/3.10.6/project/license.html).
 
-The arithmetic, original GPU reference-orbit implementation, perturbation
+The arithmetic, perturbation
 renderer, BLA, reprojection and colour settings are adapted from
 [Desarso/mandelbrot-webgpu](https://github.com/Desarso/mandelbrot-webgpu),
 revision 6f03eb2adb2461e3481cbd0ae4403f376c53a455, GPL-3.0-or-later.

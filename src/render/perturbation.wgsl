@@ -1,11 +1,8 @@
-// Per-pixel perturbation rendering against a GPU-generated reference orbit.
+// Per-pixel perturbation rendering against a CPU-generated reference orbit.
 //
-// The reference samples X_n are O(1) and fit in f32 directly. The per-pixel
-// delta does not: at a zoom of 1e-60 it starts around 1e-60 and grows to O(1)
-// before escaping, a dynamic range no f32 can hold. So the delta is carried as
-// an explicit mantissa/exponent pair ("Hdr" below) and renormalised every
-// iteration. That, not the orbit, is what sets the depth limit of the old
-// WebGL path -- its f32 deltas simply underflow to zero.
+// A per-pixel delta can start around 1e-60 and grow to O(1) before escaping.
+// Reference samples and deltas retain four-component mantissas with explicit
+// exponents in the shared Wide recurrence. Unscaled f32 deltas would underflow.
 
 struct Uniforms {
     resolution: vec2<f32>,
@@ -359,10 +356,6 @@ struct Sample {
     skipped: u32,
     skips: u32,
     rebases: u32,
-    /// log2 |delta| when the loop ended, for diagnostics.
-    dzLog2: f32,
-    /// Final reference index, for diagnostics.
-    refIter: u32,
     /// Why recurrence stopped; never infer mathematical interior from n < cap.
     termination: u32,
 };
@@ -402,7 +395,7 @@ fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
 }
 
 fn emptySample() -> Sample {
-    return Sample(false, 0u, vec2<f32>(0.0), 0.0, 0.0, 0u, 0u, 0u, 0.0, 0u, SAMPLE_ANALYTIC_INTERIOR);
+    return Sample(false, 0u, vec2<f32>(0.0), 0.0, 0.0, 0u, 0u, 0u, SAMPLE_ANALYTIC_INTERIOR);
 }
 
 fn sameHdrBits(a: Hdr, b: Hdr) -> bool {
@@ -442,8 +435,7 @@ fn iterateDirect(c0: Hdr, wantDerivative: bool, detectCycle: bool) -> Sample {
             }
         }
     }
-    return Sample(escaped,n,hdrValue(z),z2,hdrLog2(deriv),0u,0u,0u,hdrLog2(z),0u,
-                  select(termination, SAMPLE_ESCAPE, escaped));
+    return Sample(escaped, n, hdrValue(z), z2, hdrLog2(deriv), 0u, 0u, 0u, select(termination, SAMPLE_ESCAPE, escaped));
 }
 fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     if (JULIA) { return iterateWide(pixel, wantDerivative); }
@@ -454,7 +446,7 @@ fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
         }
         let c = hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset);
         // Exterior formulas may retain endpoints; solid interior colour never
-        // reads them. Only distance/diagnostic or patterned interiors need the
+        // reads them. Only distance lighting or patterned interiors need the
         // full interior orbit.
         let allowInteriorShortcut = !JULIA && sampleMode() == 0u && sampleCappedPattern() == 0u;
         if (allowInteriorShortcut &&
@@ -722,19 +714,6 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (!s.escaped) { capped = capped + 1u; }
             if (s.termination == SAMPLE_LIMIT) { limitHits = limitHits + 1u; }
             if (s.termination == SAMPLE_NUMERICAL_PERIODIC) { numericalPeriodic += 1u; }
-
-            // mode 2 is a diagnostic view: red = iterations used, green =
-            // escaped, blue = log2 of the final delta, alpha = rebases. It
-            // wants more than the field carries, so it writes straight out.
-            if (sampleMode() == 2u) {
-                textureStore(output, vec2<i32>(i32(col), i32(row)), vec4<f32>(
-                    f32(s.n) / f32(max(u.maxIterations, 1u)),
-                    select(0.0, 1.0, s.escaped),
-                    clamp((s.dzLog2 + 300.0) / 344.0, 0.0, 1.0),
-                    clamp(f32(s.rebases) / 255.0, 0.0, 1.0)
-                ));
-                return;
-            }
 
             var entry = vec2<f32>(0.0);
             if (distanceMode) {

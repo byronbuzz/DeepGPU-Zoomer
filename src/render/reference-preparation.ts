@@ -4,15 +4,6 @@ import { referenceIdentity, referenceSampleWords, REFERENCE_FORMAT_VERSION,
 /** Keeps any one main-thread copy or upload at 4 MiB. */
 export const REFERENCE_TRANSFER_FLOATS = 1_048_576;
 
-export interface ReferencePreparationTimings {
-  generationWallMs: number;
-  concatAllocationMs: number;
-  concatWallMs: number;
-  concatCpuMs: number;
-  concatMaxSliceMs: number;
-  concatSlices: number;
-}
-
 export interface PreparedReference {
   samples: Float32Array<ArrayBuffer>;
   formatVersion: typeof REFERENCE_FORMAT_VERSION;
@@ -20,8 +11,6 @@ export interface PreparedReference {
   terminal: ReferenceResumeState;
   length: number;
   escaped: boolean;
-  iterationsComputed: number;
-  timings: ReferencePreparationTimings;
 }
 
 /** Assemble bounded worker suffixes without re-running or rounding the prefix.
@@ -33,7 +22,6 @@ export async function prepareReference(
   previous?: Pick<PreparedReference, 'samples' | 'terminal' | 'formatVersion' | 'sampleWords'>,
   yieldForCopy?: () => Promise<void>,
 ): Promise<PreparedReference> {
-  const started = performance.now();
   const identity = referenceIdentity(input);
   const sampleWords = referenceSampleWords(input.family);
   const reusable = previous?.terminal.identity === identity &&
@@ -42,7 +30,6 @@ export async function prepareReference(
     previous.samples.length === (previous.terminal.iteration + 1) * sampleWords;
   let terminal = reusable ? previous!.terminal : undefined;
   let length = terminal ? terminal.iteration + 1 : 0;
-  let iterationsComputed = 0;
   const chunks: Float32Array<ArrayBuffer>[] = reusable ? [previous!.samples] : [];
   while (!terminal || !terminal.escaped && terminal.iteration < input.maxIterations) {
     checkCurrent();
@@ -60,16 +47,10 @@ export async function prepareReference(
     }
     chunks.push(chunk);
     length = result.length; terminal = result.terminal;
-    iterationsComputed += result.iterationsComputed;
+
   }
   checkCurrent();
-  const generationEnded = performance.now();
   const samples = chunks.length === 1 ? chunks[0] : new Float32Array(length * sampleWords);
-  const allocated = performance.now();
-  const timings: ReferencePreparationTimings = {
-    generationWallMs: generationEnded - started, concatAllocationMs: allocated - generationEnded,
-    concatWallMs: 0, concatCpuMs: 0, concatMaxSliceMs: 0, concatSlices: 0,
-  };
   if (chunks.length !== 1) {
     let offset = 0;
     for (const chunk of chunks) {
@@ -78,21 +59,17 @@ export async function prepareReference(
       for (let start = 0; start < chunk.length; start += REFERENCE_TRANSFER_FLOATS) {
         checkCurrent();
         const end = Math.min(chunk.length, start + REFERENCE_TRANSFER_FLOATS);
-        const copyStarted = performance.now();
         samples.set(chunk.subarray(start, end), offset + start);
-        const elapsed = performance.now() - copyStarted;
-        timings.concatCpuMs += elapsed;
-        timings.concatMaxSliceMs = Math.max(timings.concatMaxSliceMs, elapsed);
-        timings.concatSlices++;
+
         if (offset + end < samples.length) await yieldForCopy?.();
       }
       offset += chunk.length;
     }
   }
   checkCurrent();
-  timings.concatWallMs = performance.now() - generationEnded;
+
   return { samples, formatVersion: REFERENCE_FORMAT_VERSION, sampleWords,
-    terminal: terminal!, length, escaped: terminal!.escaped, iterationsComputed, timings };
+    terminal: terminal!, length, escaped: terminal!.escaped };
 }
 
 /** Two-dimensional dispatch keeps long references within per-axis GPU limits. */

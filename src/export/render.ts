@@ -34,13 +34,13 @@ export function snapshotExportRequest(request:RenderRequest):RenderRequest {
   const clone=(value:Decimal|undefined)=>value===undefined?undefined:new Decimal(value);
   return {...request,centerX:new Decimal(request.centerX),centerY:new Decimal(request.centerY),
     unitsPerPixel:new Decimal(request.unitsPerPixel),juliaX:clone(request.juliaX),juliaY:clone(request.juliaY),
-    colors:{...request.colors,postAntialias:false,supersample:request.colors.oversampling?1:request.colors.supersample,stops:[...request.colors.stops],positions:request.colors.positions?.slice(),locks:request.colors.locks?.slice()},
+    colors:{...request.colors,supersample:request.colors.oversampling?1:request.colors.supersample,stops:[...request.colors.stops],positions:request.colors.positions?.slice(),locks:request.colors.locks?.slice()},
     // Tiled export uses the ordinary complete-sample path. Continuation's local
     // coordinate scratch protocol is deliberately outside this export port.
-    tuning:{...(request.tuning??DEFAULT_TUNING),hardPixelBudget:0},
+    tuning:{...(request.tuning??DEFAULT_TUNING)},
     followView:false,publishPartial:false,dynamicIterations:false,provisionalNavigationCap:false,
     betweenBatches:undefined,beforePreparation:undefined,isCurrent:undefined,isCalculationCurrent:undefined,focus:undefined,zoom:0,
-    interacting:false,stationaryOversampling:false,overscanPixels:undefined,workView:undefined,exportDomain:undefined,tileRows:undefined};
+    interacting:false,stationaryOversampling:false,overscanPixels:undefined,workView:undefined,exportDomain:undefined};
 }
 
 /** One private renderer, one full-output reference domain, sequential bounded strips. */
@@ -53,7 +53,7 @@ export async function renderPng(ctx:GpuContext,snapshot:RenderRequest,choice:Exp
   const plan=planExport(choice.width,choice.height,{
     limits:ctx.device.limits,sampleGrid:colors.supersample,
     endpointBytesPerSample:needsEndpoints(colors)||colors.mode===1?16:0,
-    halo:colors.postAntialias?6:1,
+    halo:1,
   });
   const unitsPerPixel=frameForExport(snapshot,choice.width,choice.height);
   const surface=document.createElement('canvas');

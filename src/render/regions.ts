@@ -8,7 +8,6 @@ export interface Demand {
   /** Visible area inside an overscanned work field; deficits here take priority. */
   visible?: {x:number;y:number;width:number;height:number};
   /** Forecast changes ranking only; current coverage and sample ownership remain authoritative. */
-  predicted?: {x:number;y:number;width:number;height:number;spacing:number};
 }
 export interface RegionTuning {
   pointer: number;
@@ -62,10 +61,6 @@ function disjointDeficit(r:Region,covered:Demand['covered']){
   for(const c of covered){const width=Math.min(r.x+r.width,c.x+c.width)-Math.max(r.x,c.x),height=Math.min(r.y+r.height,c.y+c.height)-Math.max(r.y,c.y);
     if(width>0&&height>0)area+=width*height*Math.min(1,r.stride/(c.spacing??1));}
   return Math.max(0,1-area/(r.width*r.height));
-}
-/** Integrate the finest density over a rectangle union. Overlaps never add area. */
-export function coverageDeficit(r:Region,covered:Demand['covered']){
-  return disjointDeficit(r,disjointCoverage(covered));
 }
 export function schedulerService(turn:number,distributed:boolean,rows=false,tuning?:RegionTuning):'pointer'|'distributed'|'oldest'{
   // Keep two pointer selections between evenly spaced oldest/distributed turns.
@@ -132,7 +127,7 @@ export class PendingRegions {
   settle(previewStride:number) {
     this.pending=this.pending.filter(r=>r.stride===1||r.stride===previewStride);
   }
-  private deficit(r: Region, d: Demand) {
+  private deficit(r: Region) {
     let value=this.deficits.get(r);
     if(value===undefined){value=disjointDeficit(r,this.coverage);this.deficits.set(r,value);}
     return value;
@@ -140,22 +135,16 @@ export class PendingRegions {
   private score(r: Region, d: Demand, pointerRadius=64) {
     const dx = Math.max(r.x - d.x, 0, d.x - r.x - r.width + 1);
     const dy = Math.max(r.y - d.y, 0, d.y - r.y - r.height + 1);
-    const deficit=this.deficit(r,d);
+    const deficit=this.deficit(r);
     const v=d.visible;
     const visibleArea=v?Math.max(0,Math.min(r.x+r.width,v.x+v.width)-Math.max(r.x,v.x))*
       Math.max(0,Math.min(r.y+r.height,v.y+v.height)-Math.max(r.y,v.y)):0;
     const visiblePriority=deficit>0?8*visibleArea/(r.width*r.height):0;
-    const p=d.predicted;
-    const px=p?Math.max(r.x,p.x):0,py=p?Math.max(r.y,p.y):0;
-    const pw=p?Math.max(0,Math.min(r.x+r.width,p.x+p.width)-px):0;
-    const ph=p?Math.max(0,Math.min(r.y+r.height,p.y+p.height)-py):0;
-    const predictedPriority=pw*ph>0?8*pw*ph/(r.width*r.height)*disjointDeficit(
-      {...r,x:px,y:py,width:pw,height:ph,stride:Math.max(1,p!.spacing)},this.coverage):0;
     // Sparse samples cover stride squared pixels per calculation, but only
     // improve linear resolution by stride. Use that conservative cost benefit.
-    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + visiblePriority + predictedPriority + .5 / (1 + Math.hypot(dx,dy) / pointerRadius);
+    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + visiblePriority + .5 / (1 + Math.hypot(dx,dy) / pointerRadius);
     const focusWeight=this.distributed&&this.turns%2===1?4:1;
-    return deficit * 4 + visiblePriority + predictedPriority + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
+    return deficit * 4 + visiblePriority + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
   }
   /** Only changes density inside the selected region; never chooses its priority. */
   private nextStride(r:Region,d:Demand,levels:number):number {
@@ -181,7 +170,7 @@ export class PendingRegions {
   take(budget: number, demand: Demand, rows?: number, tuning?: RegionTuning, gradual=false): Region | undefined {
     this.deficits.clear();
     this.coverage=disjointCoverage(demand.covered);
-    this.pending=this.pending.filter(r=>r.stride===1 || this.deficit(r,demand)>0);
+    this.pending=this.pending.filter(r=>r.stride===1 || this.deficit(r)>0);
     if (!this.pending.length) return;
     // Two oldest turns per eight prevent a moving focus from starving gaps.
     const service=schedulerService(++this.turns,this.distributed,!!rows,tuning);

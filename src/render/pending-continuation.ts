@@ -21,7 +21,6 @@ export function translatedContinuationRegion(pending:PendingContinuation,next:Fr
 /** One explicit owner. A claimed buffer belongs to the caller's local finally. */
 export class PendingContinuationSlot<T extends PendingContinuation=PendingContinuation> {
   private value:T|undefined;
-  get size(){return this.value?1:0;}
   park(value:T){if(this.value?.scratch!==value.scratch)this.clear();this.value=value;}
   clear(){const value=this.value;this.value=undefined;value?.scratch.destroy();}
   claim(identity:ContinuationIdentity,next:FrameView,visible?:Rectangle):T|undefined {

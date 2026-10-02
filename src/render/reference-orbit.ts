@@ -1,4 +1,4 @@
-import { subFixed, type FixedComplex } from "../arithmetic/cpu-oracle";
+import { subFixed, type FixedComplex } from "../arithmetic/fixed-complex";
 import { createReferenceStep } from "./reference-step";
 import { fromLimbs, parseFixed } from "../arithmetic/types";
 
@@ -10,7 +10,6 @@ const QUAD_SCALES = [2 ** -23, 2 ** -47, 2 ** -71, 2 ** -95] as const;
 export const MAX_REFERENCE_ITERATIONS = 10_000_000;
 /** Bounds one worker allocation and leaves cancellation opportunities between suffixes. */
 export const REFERENCE_CHUNK_ITERATIONS = 65_536;
-export type ReferenceStage = "generation" | "packing";
 
 export interface ReferenceOrbitInput {
   family: "mandelbrot" | "julia";
@@ -74,18 +73,6 @@ function packingContext(limbs: number): PackingContext {
   };
 }
 
-function gpuApproximation(words: Uint32Array, limbs: number): number {
-  const high = Math.fround(words[limbs - 1] | 0);
-  const low = Math.fround(Math.fround(words[limbs - 2] >>> 0) * Math.fround(2 ** -32));
-  return Math.fround(high + low);
-}
-
-/** Mirrors the f32 reference-bailout predicate in orbit.wgsl. */
-export function gpuReferenceEscaped(x: Uint32Array, y: Uint32Array, limbs: number): boolean {
-  const ax = gpuApproximation(x, limbs), ay = gpuApproximation(y, limbs);
-  return Math.fround(Math.fround(ax * ax) + Math.fround(ay * ay)) > 256;
-}
-
 function gpuApproximationFixed(value: bigint, context: PackingContext): number {
   const high = Number((value >> context.highWordShift) & WORD_MASK) | 0;
   const low = Number((value >> context.lowWordShift) & WORD_MASK) >>> 0;
@@ -126,13 +113,6 @@ function writeComponent(target: Float32Array, offset: number, value: bigint, con
   target[offset + 4] = bits - 1 - context.fractionalBits;
 }
 
-/** Test-facing wrapper around the allocation-free production packer. */
-export function fixedBigIntToQuad(value: bigint, limbs: number): Float32Array {
-  const packed = new Float32Array(5);
-  writeComponent(packed, 0, value, packingContext(limbs));
-  return packed;
-}
-
 function writeSample(
   target: Float32Array,
   index: number,
@@ -157,7 +137,6 @@ function writeSample(
  */
 export function generatePackedReference(
   input: ReferenceOrbitInput,
-  onStage?: (stage: ReferenceStage) => void,
   resume?: ReferenceResumeState,
   iterationBudget?: number,
 ): PackedReferenceOrbit {
@@ -215,9 +194,7 @@ export function generatePackedReference(
   let z = resume ? { x: resume.x, y: resume.y } : initial;
   let iteration = initialIteration, length = initialIteration + 1;
   let escaped = resume?.escaped ?? false, escapeIndex = resume?.escapeIndex ?? 0;
-  let reportedGeneration = false, reportedPacking = false;
   while (iteration < targetIteration && !escaped) {
-    if (!reportedGeneration) { reportedGeneration = true; onStage?.("generation"); }
     iteration++;
     z = step(z, constant);
     // Preserve the emitted sample and the GPU bailout predicate ordering.
@@ -229,7 +206,6 @@ export function generatePackedReference(
         escaped = true; escapeIndex = iteration;
       }
     }
-    if (!reportedPacking) { reportedPacking = true; onStage?.("packing"); }
     // Julia relative samples keep the ORIGINAL initial point across suffixes.
     writeSample(packed, iteration - startIndex, z, initial, context, sampleWords);
     length = iteration + 1;
@@ -241,4 +217,3 @@ export function generatePackedReference(
     complete: escaped || iteration === input.maxIterations,
     terminal: { identity, iteration, x: z.x, y: z.y, escaped, escapeIndex } };
 }
-

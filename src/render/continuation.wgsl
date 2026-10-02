@@ -85,11 +85,10 @@ fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
                 n,cyclePower,cycleLength,0u,0u,0u,0u,0u,0u,0u,hdrValue(z),z2,0u);
             atomicOr(&continuation.pendingBits[stateIndex / 32u],1u << (stateIndex % 32u));
             atomicAdd(&stats[7],1u);
-            return Sample(false,n,hdrValue(z),-1.0,0.0,0u,0u,0u,0.0,0u,SAMPLE_PENDING);
+            return Sample(false, n, hdrValue(z), -1.0, 0.0, 0u, 0u, 0u, SAMPLE_PENDING);
         }
     }
-    return Sample(escaped,n,hdrValue(z),z2,0.0,0u,0u,0u,hdrLog2(z),0u,
-                  select(termination, SAMPLE_ESCAPE, escaped));
+    return Sample(escaped, n, hdrValue(z), z2, 0.0, 0u, 0u, 0u, select(termination, SAMPLE_ESCAPE, escaped));
 }
 fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     if (DIRECT) { return iterateDirectContinued(pixel,stateIndex); }
@@ -224,9 +223,8 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
             atomicOr(&continuation.pendingBits[stateIndex / 32u], 1u << (stateIndex % 32u));
             atomicAdd(&stats[7], 1u);
             // Negative z2 means unresolved. compute must not publish a field or counters.
-            return Sample(false, n, zValue, -1.0, 0.0, skipped, skips, rebases, 0.0, referenceIndex, SAMPLE_PENDING);
+            return Sample(false, n, zValue, -1.0, 0.0, skipped, skips, rebases, SAMPLE_PENDING);
         }
     }
-    return Sample(escaped, n, zValue, z2, hdrLog2(derivative), skipped, skips, rebases,
-                  wideLog(delta), referenceIndex, select(termination, SAMPLE_ESCAPE, escaped));
+    return Sample(escaped, n, zValue, z2, hdrLog2(derivative), skipped, skips, rebases, select(termination, SAMPLE_ESCAPE, escaped));
 }

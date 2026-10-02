@@ -1,7 +1,7 @@
 import './style.css';
 import Decimal from 'decimal.js';
 import { acquireGpu, backingSize, type GpuContext } from './gpu/device';
-import { WebGpuRenderer, Method, type RenderRequest, type RenderStats } from './render/webgpu-renderer';
+import { WebGpuRenderer, Method, type RenderRequest } from './render/webgpu-renderer';
 import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './logic/colorSettings';
 import { Camera, HOME, MAX_ITERATIONS, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { PLACES } from './places';
@@ -35,16 +35,16 @@ let qualitySizeError=false;
 let stopped=false, refreshPending=false, refreshHolding=false, stoppedAppearancePending=false;
 let retainedRequest:RenderRequest|null=null;
 let stopSnapshotPending=false,retainedPartialCaptured=false;
-let fields=0, recolours=0, stats:RenderStats|undefined, completedQuality=0, preparingColourData=false, colourDataTarget=0;
+let completedQuality=0, preparingColourData=false, colourDataTarget=0;
 let pointer={x:innerWidth/2,y:innerHeight/2}, direction=0, wheelDirection=0, dragging=false, speed=1, previousTime=0, statusTime=0;
 let rotating=false,rotationSliderHeld=false,controlDown=false,rotationPointerAngle:number|null=null,activePointer:number|null=null;
 const rotationKeys=new Set<string>();
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
 
-let previewEnabled=false, selecting=false, previewBusy=false, previewPending=false, previewEpoch=0, previewRenderedEpoch=-1;
+let previewEnabled=false, selecting=false, previewBusy=false, previewPending=false, previewEpoch=0;
 let selectedJulia:{x:string;y:string}|null=null;
-let displayedJulia:{x:string;y:string}|null=null,previewLifetime=0;
+let previewLifetime=0;
 const previewCanvas=el<HTMLCanvasElement>('julia-preview-canvas');
 let previewSize={width:previewCanvas.width,height:previewCanvas.height};
 let previewIterationLimit=HOME.iterations;
@@ -57,7 +57,6 @@ let saved: {name:string;view:SavedView}[]=[];
 type LocationChoice={kind:'place'|'saved';index:number;name:string};
 let selectedLocation:LocationChoice|null=null;
 let linkedView:SavedView|null=null;
-let frameTimes:number[]=[], frameCount=0, sessionStart=performance.now();
 const refinementTime=new RefinementTimer(performance.now());
 const refiningStatus=new RefiningStatus();
 const freshness=el('freshness'),depth=el('depth');
@@ -76,7 +75,7 @@ function message(text:string,transient=true){
   },3000);
 }
 function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString(),angle:camera.angle,appearance:validateColors(colors)};}
-function colourPreparationLabel(progress=engine?.debugProgress()){
+function colourPreparationLabel(progress=engine?.progress()){
   const started=progress&&progress.targets>colourDataTarget&&progress.exactTotalSamples>0&&
     (progress.pending>0||progress.finalizing||progress.exactCompletedSamples<progress.exactTotalSamples);
   return `Refined · 100% · Preparing colour data${started&&progress?.percentage!==null?` · ${progress?.percentage}%`:''}`;
@@ -84,7 +83,7 @@ function colourPreparationLabel(progress=engine?.debugProgress()){
 function setText(target:HTMLElement,value:string){if(target.textContent!==value)target.textContent=value;}
 function preparing(time=performance.now()){
   const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
-  const progress=engine?.debugProgress();
+  const progress=engine?.progress();
   const actual=numericalPending?(dirty&&!busy?0:progress?.percentage??0):100;
   const state=error?'Rendering stopped':stopped?'Stopped':preparingColourData?colourPreparationLabel(progress):refiningStatus.text(time,actual);
   setText(freshness,`${state} · ${refinementTime.text(time)}`);
@@ -128,7 +127,7 @@ function changeTuning(key:EditableTuningKey,value:TuningSettings[EditableTuningK
   if((key==='blaPrecisionLog2')&&view.family==='mandelbrot'){
     // Let the renderer retire only the affected numerical policy at its next
     // boundary; changing tolerance does not invalidate the reference orbit.
-    completedQuality=0;lastRevision=-1;stats=undefined;dirty=true;
+    completedQuality=0;lastRevision=-1;dirty=true;
     engine?.reproject(request());
     refinementTime.demand(performance.now());preparing();
   }
@@ -147,7 +146,7 @@ function changeEffectiveLimit(limit:number,atBatchBoundary=false){
   if(next===view.iterations)return;
   view={...view,iterations:next};
   if(!atBatchBoundary){provisionalNavigationCap=false;generation++;engine?.abort();}
-  dirty=true;completedQuality=0;lastRevision=-1;stats=undefined;
+  dirty=true;completedQuality=0;lastRevision=-1;
   refinementTime.demand(performance.now());syncIterationLabel();syncTuningLabels();preparing();
 }
 function setManualBase(limit:number,beforeRefresh=false){
@@ -307,8 +306,7 @@ async function computeJuliaPreview(){
     if(current()&&result.completed){
       if(previewCanvas.width!==size.width)previewCanvas.width=size.width;
       if(previewCanvas.height!==size.height)previewCanvas.height=size.height;
-      previewEngine.reproject(req);previewRenderedEpoch=epoch;
-      displayedJulia=selected;
+      previewEngine.reproject(req);
       el('julia-preview-status').textContent='';
       el('julia-preview').setAttribute('aria-busy','false');
     }
@@ -330,19 +328,17 @@ function request():RenderRequest{
   const width=Math.max(8,canvas.width),height=Math.max(8,canvas.height);const g=generation;
   const interacting=moving();
   const heldZoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
-  const heldInwardZoom=heldZoom>0&&!dragging&&!rotating&&!rotationSliderHeld&&!selecting&&rotationKeys.size===0&&
-    !['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].some(key=>keys.has(key));
   const zoom=heldZoom||(performance.now()-lastInteraction<180?wheelDirection:0);
   const margin=zoom<0?overscanCssPx(speed,tuning.overscanBase,tuning.overscanMax):0;
   const overscanPixels={x:Math.floor(margin*width/Math.max(1,innerWidth)/2)*2,
     y:Math.floor(margin*height/Math.max(1,innerHeight)/2)*2};
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.unitsPerPixel(height),width,height,maxIterations:view.iterations,colors:{...renderColors(colors),postAntialias:false,...(colors.oversampling&&!interacting?{supersample:1}:{})},stationaryOversampling:colors.oversampling===true&&!interacting,family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting,followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,heldInwardZoom,zoomRate:speed,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,beforePreparation:()=>g===generation?updateDynamicBeforePreparation():null,tuning:normalizeTuning({...tuning,throughput:interacting?tuning.throughput:2}),isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.unitsPerPixel(height),width,height,maxIterations:view.iterations,colors:{...renderColors(colors),...(colors.oversampling&&!interacting?{supersample:1}:{})},stationaryOversampling:colors.oversampling===true&&!interacting,family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting,followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,zoomRate:speed,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,beforePreparation:()=>g===generation?updateDynamicBeforePreparation():null,tuning:normalizeTuning({...tuning,throughput:interacting?tuning.throughput:2}),isCurrent:()=>generation===g};
 }
 async function compute(){
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
   try{
     const result=await engine.render(request());
-    if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;stats=result;if(result.computed)fields++;else recolours++;
+    if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
       provisionalNavigationCap=false;
       if(numericalWasPending)refinementTime.complete(performance.now());
@@ -360,7 +356,6 @@ async function recolorStopped(){
 function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;if(resetTimer){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;}preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());syncTuningLabels();preparing();return true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
-  if(dt>0){frameTimes.push(dt);if(frameTimes.length>300)frameTimes.shift();}frameCount++;
   if(!document.hidden){
     if(controlDown&&rotationKeys.size&&dt){const turn=(rotationKeys.has('ArrowRight')?1:0)-(rotationKeys.has('ArrowLeft')?1:0);if(turn)setRotation(camera.angle+turn*dt*.06);}
     const zoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
@@ -368,7 +363,6 @@ function tick(time:number){
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
     if(dx||dy){camera.pan(dx,dy,innerHeight);refinementTime.heldCameraChange();changed();}
     if(engine){
-      if(!stopped&&!refreshPending&&!error&&tuning.blaRebuildPercent<100&&!moving()&&engine.consumeSettledBlaRetry())refresh();
       if(refreshPending&&!busy)void refreshCalculation();
       engine.reproject(request(),stopped||refreshHolding);
       if(!busy&&!dirty&&!stopped&&!refreshPending&&completedQuality===1&&!engine.isComplete(request())){
@@ -376,7 +370,7 @@ function tick(time:number){
       }
       // Give the latest preview one turn between main jobs, without awaiting it.
       // Both renderers keep at most one bounded numerical region in the queue.
-      const referenceWorkerWaiting=busy&&engine.debugProgress().referenceWorkerActive;
+      const referenceWorkerWaiting=busy&&engine.progress().referenceWorkerActive;
       if(!stopped&&(!busy||referenceWorkerWaiting)&&!previewBusy&&previewPending)void computeJuliaPreview();
       if(stopped&&stoppedAppearancePending&&!busy)void recolorStopped();
       if(dirty&&!busy&&!stopped&&!refreshPending)void compute();
@@ -462,7 +456,7 @@ el<HTMLInputElement>('tuning-pointer-refinement').onchange=event=>changeTuning('
 el('tuning-reset').onclick=()=>{
   if(!modifiedTuningCount(tuning))return;
   tuning={...DEFAULT_TUNING};
-  
+
   if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
   syncTuningLabels();refresh();
 };
@@ -542,7 +536,7 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
     }else{
       if(stopped||previous.oversampling!==c.oversampling){stopped=false;refinementTime.demand(performance.now());}
       if(numericalChange){
-        const wasPreparing=preparingColourData,previousTarget=colourDataTarget,currentTarget=engine?.debugProgress().targets??0;
+        const wasPreparing=preparingColourData,previousTarget=colourDataTarget,currentTarget=engine?.progress().targets??0;
         const resized=resize(false);
         preparingColourData=completedBefore&&!resized&&missingData&&previous.supersample===c.supersample&&previous.oversampling===c.oversampling;
         if(preparingColourData)colourDataTarget=wasPreparing&&previous.mode===c.mode?previousTarget:currentTarget;
@@ -559,17 +553,16 @@ setupRangeControls();
 el('save-defaults').onclick=()=>{
   if(baseEditing){const raw=baseInput.value.trim();if(!/^\d+$/.test(raw)){message('Base iterations must be a positive whole number.');return;}if(!setManualBase(Number(raw)))return;}
   const next:SavedDefaults={appearance:validateColors(colors),tuning:{...tuning},speed,baseIterations,dynamicEnabled,
-    profilingEnabled:false,randomStyle:'unrestricted',panels:panelController.snapshot()};
+    panels:panelController.snapshot()};
   const result=saveDefaults(next);
   if(result.error){message(result.error);return;}
   savedDefaults=next;message('Defaults saved. Camera position and saved locations were kept separate.',true);
 };
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(baseEditTimer);baseEditing=false;clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
-  stop();setPreview(false);previewEngine?.abort();selectedJulia=null;displayedJulia=null;juliaReturn=null;linkedView=null;
+  stop();setPreview(false);previewEngine?.abort();selectedJulia=null;juliaReturn=null;linkedView=null;
   speed=1;el<HTMLInputElement>('speed').value='1';el('speed-value').textContent='1.0×';
   selectedLocation=null;locationEntry.value='';dismissReplacement();closeLocationOptions();
-  engine?.setProfiling(false);
   tuning={...DEFAULT_TUNING};saveTuning(tuning);syncTuningLabels();
   dynamicEnabled=true;try{localStorage.setItem(DYNAMIC_STORAGE_KEY,'on');}catch{}
   savedDefaults=null;
@@ -579,7 +572,7 @@ el('full-reset').onclick=()=>{
   pngExportPanel.reset();panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message(resetStorageFailed?'Factory settings restored for this session, but stored defaults could not be cleared.':'Defaults restored. Saved locations were kept.',!resetStorageFailed);
 };
 const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,viewport:()=>({width:canvas.width,height:canvas.height}),captureQuality:(snapshot,width,height)=>engine?.captureMatchingQuality(snapshot,width,height)??null});
-export const ready=(async()=>{
+void (async()=>{
   try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}
   let rememberedAppearance=savedDefaults?.appearance??DEFAULT_COLORS;
   if(!savedDefaults&&!defaultsRead.error)try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
@@ -589,16 +582,6 @@ export const ready=(async()=>{
   load({...HOME,iterations:savedDefaults?.baseIterations??HOME.iterations,appearance:validateColors(rememberedAppearance)},false);
   el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');else if(defaultsRead.error)message(defaultsRead.error);
   resize();requestAnimationFrame(tick);
-  try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerEngine?:WebGpuRenderer}).__gpuZoomerEngine=renderer;engine.setProfiling(false);dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});return ctx.capabilities;}
+  try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});}
   catch(e){error=String(e);message(error);throw e;}
 })();
-// Development-only access exercises the displayed app and its real field.
-export const testing = import.meta.env.DEV ? {
-  load, snapshot, camera, get engine(){return engine;},
-  capture:()=>engine.capturePixels(request()),
-  selectPreview(x:number,y:number){pointer={x,y};selectJuliaAtPointer();},
-  juliaPreview:()=>({enabled:previewEnabled,busy:previewBusy,pending:previewPending,epoch:previewEpoch,renderedEpoch:previewRenderedEpoch,size:{...previewSize},selected:selectedJulia?{...selectedJulia}:null,displayed:displayedJulia?{...displayedJulia}:null,returnView:juliaReturn?{...juliaReturn}:null,work:previewEngine?.debugProgress()}),
-  status:()=>({busy,dirty,stopped,refreshPending,refreshHolding,stoppedAppearancePending,error,fields,recolours,effectiveLimit:view.iterations,lastRevision,revision:camera.revision,quality:completedQuality,stats,progress:engine?.debugProgress(),frameCount,frameTimes:[...frameTimes],elapsed:performance.now()-sessionStart}),
-  resetTiming(){frameTimes=[];frameCount=0;sessionStart=performance.now();},
-} : undefined;
-if(import.meta.env.DEV)(window as typeof window&{__gpuZoomerTesting?:typeof testing}).__gpuZoomerTesting=testing;

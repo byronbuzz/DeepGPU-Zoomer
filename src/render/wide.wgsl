@@ -27,7 +27,6 @@ struct Wide { x: vec4<f32>, y: vec4<f32>, e: i32 };
 // One Wide per Mandelbrot sample; Julia retains adjacent absolute/relative
 // Wides. Each Wide has the same 48-byte layout as either half of the old pair.
 @group(0) @binding(9) var<storage, read_write> decodedOrbit: array<Wide>;
-@group(0) @binding(10) var<storage, read_write> decodeMismatches: atomic<u32>;
 
 fn wideNorm(a: Wide) -> Wide {
     let magnitude = max(abs(a.x.x), abs(a.y.x));
@@ -145,18 +144,6 @@ fn decodeReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(
 fn sameWideBits(a: Wide, b: Wide) -> bool {
     return all(bitcast<vec4<u32>>(a.x) == bitcast<vec4<u32>>(b.x)) &&
         all(bitcast<vec4<u32>>(a.y) == bitcast<vec4<u32>>(b.y)) && a.e == b.e;
-}
-
-// Development validation compares stored entries with the incumbent decoder
-// on the GPU, avoiding a second arithmetic implementation on the CPU.
-@compute @workgroup_size(64)
-fn verifyDecodedReferenceOrbit(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>) {
-    let index = gid.x + gid.y * groups.x * 64u;
-    if (index >= arrayLength(&decodedOrbit)) { return; }
-    let decoded = decodedOrbit[index];
-    if (!sameWideBits(decoded, decodeRawReference(index))) {
-        atomicAdd(&decodeMismatches, 1u);
-    }
 }
 
 fn wideFromHdr(a: Hdr) -> Wide {
@@ -282,6 +269,5 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
             }
         }
     }
-    return Sample(escaped, n, zValue, z2, hdrLog2(derivative), skipped, skips, rebases,
-                  wideLog(delta), referenceIndex, select(termination, SAMPLE_ESCAPE, escaped));
+    return Sample(escaped, n, zValue, z2, hdrLog2(derivative), skipped, skips, rebases, select(termination, SAMPLE_ESCAPE, escaped));
 }

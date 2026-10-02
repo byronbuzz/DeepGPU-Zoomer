@@ -53,7 +53,6 @@ export class Camera {
       y:this.y.plus(u.times(new Decimal(dx).times(s).plus(new Decimal(dy).times(c))))};
   }
   setAngle(angle:number){if(!Number.isFinite(angle))throw Error('Invalid rotation');while(angle>180)angle-=360;while(angle< -180)angle+=360;if(angle!==this.angle){this.angle=angle;this.revision++;}}
-  rotate(delta:number){this.setAngle(this.angle+delta);}
   zoom(logFactor:number,px:number,py:number,width:number,height:number) {
     this.precision();const next=this.span.times(Math.exp(logFactor));if(next.gt(8))return;
     const before=this.point(px,py,width,height);this.span=next;

@@ -37,8 +37,6 @@ export function mapUv(m: Reprojection, x: number, y: number) {
     y: (m.crossY??0)*x+m.scaleY*y+m.offsetY };
 }
 
-export const IDENTITY: Reprojection = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 };
-
 /**
  * Past this much magnification there is more stretched pixel than picture, and
  * zooming out far enough leaves the old frame a speck in the middle.
@@ -84,7 +82,7 @@ export function reprojectionFor(
       (presentationOnly || scale <= MAX_MAGNIFY))) return null;
 
   if ((last.angle??0)===(next.angle??0)) {
-    // Same orientation, including the legacy zero-angle identity path.
+    // Same orientation, including the zero-angle identity path.
     const {c,s}=rotationBasis(last.angle??0);
     const dxWorld=next.centerX.minus(last.centerX),dyWorld=next.centerY.minus(last.centerY);
     const dx=(last.angle??0)===0?dxWorld.div(lastSpanX).toNumber():dxWorld.times(c).plus(dyWorld.times(s)).div(lastSpanX).toNumber();

@@ -10,8 +10,6 @@ export interface SavedDefaults {
   speed:number;
   baseIterations:number;
   dynamicEnabled:boolean;
-  profilingEnabled:boolean;
-  randomStyle:'harmonious'|'unrestricted';
   panels:PanelSettings;
 }
 const object=(value:unknown):value is Record<string,unknown>=>!!value&&typeof value==='object'&&!Array.isArray(value);
@@ -19,11 +17,9 @@ export function validateDefaults(value:unknown):SavedDefaults {
   if(!object(value)||!object(value.appearance)||!object(value.tuning)||!object(value.panels)||
     typeof value.speed!=='number'||!Number.isFinite(value.speed)||value.speed<.2||value.speed>3||
     typeof value.baseIterations!=='number'||!Number.isInteger(value.baseIterations)||value.baseIterations<1||value.baseIterations>10_000_000||
-    typeof value.dynamicEnabled!=='boolean'||typeof value.profilingEnabled!=='boolean'||
-    (value.randomStyle!=='harmonious'&&value.randomStyle!=='unrestricted'))throw new Error('Saved defaults are invalid.');
+    typeof value.dynamicEnabled!=='boolean')throw new Error('Saved defaults are invalid.');
   return {appearance:validateColors(value.appearance),tuning:normalizeTuning(value.tuning),speed:value.speed,
-    baseIterations:value.baseIterations,dynamicEnabled:value.dynamicEnabled,profilingEnabled:value.profilingEnabled,
-    randomStyle:'unrestricted',panels:normalizePanelSettings(value.panels)};
+    baseIterations:value.baseIterations,dynamicEnabled:value.dynamicEnabled,panels:normalizePanelSettings(value.panels)};
 }
 export function readDefaults(storage?:Pick<Storage,'getItem'>):{value:SavedDefaults|null;error:string|null}{
   try{

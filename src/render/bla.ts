@@ -80,12 +80,9 @@ export function compose(first: Step, second: Step): Pick<Step, "a" | "b"> {
 }
 
 export interface BuildOptions {
-  maxLevels?: number;
   epsilonLog2?: number;
-  /** Legacy reduced samples or the renderer's four-word reference samples. */
-  sampleWords?: 6 | 10 | 20;
-  /** GPU lookup uses spans >= 2; retain level numbering but omit one-step storage. */
-  omitSingleStep?: boolean;
+  /** Four-word reference samples, with Julia relative components. */
+  sampleWords: 10 | 20;
 }
 
 /** Preserve ordinary binary64 bounds, but never narrow a deep Decimal to zero. */
@@ -107,15 +104,14 @@ function* buildBlaSteps(
   orbit: Float32Array,
   length: number,
   maxDelta: number | Decimal,
-  options: BuildOptions = {},
-  shouldYield?: () => boolean,
+  options: BuildOptions,
 ): Generator<void, BlaTable> {
   // Reference index zero has X=0, so its perturbation step contains only the
   // nonlinear w^2 term plus d and cannot be represented by a linear BLA.
   // Store entries for reference indices 1..length-2; the shader uses the same
   // index-1 alignment at every merged level.
   const count = Math.max(0, length - 2);
-  const counts = [count], maxLevels = options.maxLevels ?? 21;
+  const counts = [count], maxLevels = 21;
   for (let level = 1; level < maxLevels; level++) {
     const nextCount = Math.floor(counts[level - 1] / 2);
     if (nextCount < 1) break;
@@ -124,7 +120,7 @@ function* buildBlaSteps(
   const levelOffsets: number[] = [], levelCounts: number[] = [];
   let entryCount = 0;
   for (let level = 0; level < counts.length; level++) {
-    const storedCount = options.omitSingleStep && level === 0 ? 0 : counts[level];
+    const storedCount = level === 0 ? 0 : counts[level];
     levelOffsets.push(entryCount); levelCounts.push(storedCount); entryCount += storedCount;
   }
   const data = new Float32Array(Math.max(1, entryCount) * ENTRY_FLOATS);
@@ -145,17 +141,10 @@ function* buildBlaSteps(
   };
   const maxDeltaLog2 = deltaBoundLog2(maxDelta);
   for (let i = 0; i < count; i++) {
-    if (i % 4096 === 0 || shouldYield?.()) yield;
-    let x: number, y: number;
-    if (options.sampleWords === 10 || options.sampleWords === 20) {
-      const at = (i + 1) * options.sampleWords;
-      x = (orbit[at] + orbit[at + 1] + orbit[at + 2] + orbit[at + 3]) * 2 ** orbit[at + 4];
-      y = (orbit[at + 5] + orbit[at + 6] + orbit[at + 7] + orbit[at + 8]) * 2 ** orbit[at + 9];
-    } else {
-      const at = (i + 1) * 6;
-      x = (orbit[at] + orbit[at + 1]) * 2 ** orbit[at + 2];
-      y = (orbit[at + 3] + orbit[at + 4]) * 2 ** orbit[at + 5];
-    }
+    if (i % 4096 === 0) yield;
+    const at = (i + 1) * options.sampleWords;
+    const x = (orbit[at] + orbit[at + 1] + orbit[at + 2] + orbit[at + 3]) * 2 ** orbit[at + 4];
+    const y = (orbit[at + 5] + orbit[at + 6] + orbit[at + 7] + orbit[at + 8]) * 2 ** orbit[at + 9];
     const a = normalise(2 * x, 2 * y, 0);
     const magnitude = log2Magnitude(a);
     store(current, i, a, ONE, Number.isFinite(magnitude) ? magnitude + (options.epsilonLog2 ?? EPSILON_LOG2) : NEVER);
@@ -168,7 +157,7 @@ function* buildBlaSteps(
     // The omitted base level is still retained in binary64 for its first merge.
     const offset = levelOffsets[levelIndex];
     for (let index = 0; index < levelCounts[levelIndex]; index++) {
-      if (index % 4096 === 0 || shouldYield?.()) yield;
+      if (index % 4096 === 0) yield;
       const target = (offset + index) * ENTRY_FLOATS, source = index * STEP_DOUBLES;
       for (let slot = 0; slot < 2; slot++) {
         const at = source + slot * 3, to = target + slot * 5;
@@ -183,7 +172,7 @@ function* buildBlaSteps(
     if (levelIndex + 1 === counts.length) break;
     const mergedCount = counts[levelIndex + 1], merged = new Float64Array(mergedCount * STEP_DOUBLES);
     for (let i = 0; i < mergedCount; i++) {
-      if (i % 2048 === 0 || shouldYield?.()) yield;
+      if (i % 2048 === 0) yield;
       load(current, 2 * i, first); load(current, 2 * i + 1, second);
       const injectedLog2 = log2Magnitude(first.b) + maxDeltaLog2;
       let radiusLog2 = NEVER;
@@ -200,49 +189,17 @@ function* buildBlaSteps(
   return { data, levelOffsets, levelCounts, levels: counts.length, entryCount, hasUsableMultiStep };
 }
 
-export function buildBla(orbit: Float32Array, length: number, maxDelta: number | Decimal, options: BuildOptions = {}): BlaTable {
-  const steps = buildBlaSteps(orbit, length, maxDelta, options);
-  for (;;) { const next = steps.next(); if (next.done) return next.value; }
-}
-
 export async function buildBlaAsync(
   orbit: Float32Array,
   length: number,
   maxDelta: number | Decimal,
   checkpoint: () => Promise<void>,
-  options: BuildOptions = {},
-  interactionChunkMs?: () => number,
+  options: BuildOptions,
 ): Promise<BlaTable> {
-  let lastCheckpointAt = interactionChunkMs ? performance.now() : 0;
-  const shouldYield = interactionChunkMs ? () => {
-    const chunkMs = interactionChunkMs();
-    return chunkMs > 0 && performance.now() - lastCheckpointAt >= chunkMs;
-  } : undefined;
-  const steps = buildBlaSteps(orbit, length, maxDelta, options, shouldYield);
+  const steps = buildBlaSteps(orbit, length, maxDelta, options);
   for (;;) {
     const next = steps.next();
     if (next.done) return next.value;
     await checkpoint();
-    if (shouldYield) lastCheckpointAt = performance.now();
   }
-}
-
-export function readStep(table: BlaTable, level: number, index: number): Step {
-  if(!Number.isInteger(level)||!Number.isInteger(index)||index < 0 || index >= (table.levelCounts[level] ?? 0))throw new RangeError('BLA entry is not stored');
-  const base = (table.levelOffsets[level] + index) * ENTRY_FLOATS;
-  const get = (slot: number): Scaled => ({
-    x: table.data[base + slot * 5] + table.data[base + slot * 5 + 1],
-    y: table.data[base + slot * 5 + 2] + table.data[base + slot * 5 + 3],
-    e: table.data[base + slot * 5 + 4],
-  });
-  return { a: get(0), b: get(1), radiusLog2: table.data[base + 10] };
-}
-
-export function applyStep(step: Step, w: Scaled, delta: Scaled): Scaled {
-  return add(multiply(step.a, w), multiply(step.b, delta));
-}
-
-export function stepRadiusLog2(table: BlaTable, level: number, index: number): number {
-  if(!Number.isInteger(level)||!Number.isInteger(index)||index < 0 || index >= (table.levelCounts[level] ?? 0))throw new RangeError('BLA entry is not stored');
-  return table.data[(table.levelOffsets[level] + index) * ENTRY_FLOATS + 10];
 }

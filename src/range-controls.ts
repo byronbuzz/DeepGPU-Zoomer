@@ -1,6 +1,6 @@
 import { DEFAULT_COLORS, cycleToSlider } from './logic/colorSettings';
 import { HOME, iterationToSlider } from './state';
-import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS } from './tuning';
+import { DEFAULT_TUNING } from './tuning';
 
 /** Values in each range's own coordinate system, sourced from app defaults. */
 export const RANGE_DEFAULTS: Record<string, number> = {
@@ -17,9 +17,6 @@ export const RANGE_DEFAULTS: Record<string, number> = {
   'specular-strength': DEFAULT_COLORS.specularStrength,
   'panel-opacity': 0.8,
   'tuning-throughput': DEFAULT_TUNING.throughput,
-  'tuning-hard-budget': HARD_PIXEL_BUDGETS.indexOf(DEFAULT_TUNING.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number]),
-  'tuning-overscan-base': DEFAULT_TUNING.overscanBase,
-  'tuning-overscan-max': DEFAULT_TUNING.overscanMax,
   'tuning-depth-gain': DEFAULT_TUNING.dynamicDepthGain,
   'tuning-bla-epsilon': -DEFAULT_TUNING.blaPrecisionLog2,
   'tuning-pointer-priority': DEFAULT_TUNING.pointerPriority,

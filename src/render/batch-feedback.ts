@@ -19,8 +19,6 @@ export class BatchFeedback {
   private wallSample: {visits:number; stride:number; ms:number} | undefined;
   private wallOverhead = 0;
 
-  get msPerVisit(): number { return this.cost; }
-
   /** Retire callbacks on every target; only incompatible/fresh work loses its estimate. */
   enterTarget(reseed = false): void {
     this.epoch++; this.serial = 0; this.accepted = 0;

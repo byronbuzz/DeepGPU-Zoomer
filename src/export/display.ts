@@ -50,5 +50,4 @@ export class DisplayDimensions {
       this.reason='permission/detection needed';this.refresh();
     }catch{this.denied=true;this.reason='permission/detection needed; use Custom';this.detach();this.changed();}
   }
-  dispose(){this.detach();this.permission?.removeEventListener('change',this.permissionChanged);this.permission=null;}
 }

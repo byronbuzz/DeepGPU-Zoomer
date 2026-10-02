@@ -1,4 +1,4 @@
-import type { FixedComplex } from "../arithmetic/cpu-oracle";
+import type { FixedComplex } from "../arithmetic/fixed-complex";
 
 /** Fixed-width recurrence for the worker; the independent oracle is unchanged. */
 export function createReferenceStep(limbs: number): (z: FixedComplex, c: FixedComplex) => FixedComplex {

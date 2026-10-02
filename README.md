@@ -242,7 +242,6 @@ There is no application analytics client, remote rendering call or automatic upl
 - **[Web Workers](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API)** — background reference computation.
 - **[decimal.js](https://mikemcl.github.io/decimal.js/), [TypeScript](https://www.typescriptlang.org/), [Vite 5 documentation](https://v5.vite.dev/guide/) and [WebGPU types](https://github.com/gpuweb/types)** — application dependencies and build tooling.
 - **[Matplotlib 3.10.6 colormaps](https://matplotlib.org/3.10.6/users/explain/colors/colormaps.html)** — the source of the sampled scientific colour presets.
-- **[glsl-fxaa](https://github.com/mattdesl/glsl-fxaa)** — source of the retained WGSL antialias shader adaptation; the current interface uses the oversampling controls described above.
 - **[PNG specification](https://www.w3.org/TR/png-3/) and [Compression Streams](https://developer.mozilla.org/en-US/docs/Web/API/Compression_Streams_API)** — the image format and browser compression used for export.
 
 <a id="acknowledgements"></a>
@@ -255,7 +254,7 @@ Thank you to **[Desarso](https://github.com/Desarso/mandelbrot-webgpu)** for pub
 
 Thank you to **K. I. Martin** for perturbation, **Zhuoran** for rebasing and bilinear-approximation work, and **[Claude Heiland-Allen](https://mathr.co.uk/web/deep-zoom.html)** for the explanations and research resources that make these methods accessible. Thanks also to **[Timofei Amosov](https://github.com/Timmor77/FractalFlow)** for FractalFlow and its Julia rendering techniques.
 
-We are grateful to **Jan Hubička, Thomas Marsh, and the [XaoS](https://github.com/xaos-project/XaoS) and [XaoSjs](https://github.com/xaos-project/XaoSjs) contributors** for interactive zooming and colouring ideas; to **Yozo Hida, Xiaoye S. Li, David H. Bailey and the [QD contributors](https://github.com/BL-highprecision/QD)** for multi-component arithmetic; to **Matt DesLauriers and Armin Ronacher** for the [antialias shader sources](https://github.com/mattdesl/glsl-fxaa); and to the **[Matplotlib contributors and colormap authors](https://matplotlib.org/3.10.6/users/explain/colors/colormaps.html)** for the colour resources.
+We are grateful to **Jan Hubička, Thomas Marsh, and the [XaoS](https://github.com/xaos-project/XaoS) and [XaoSjs](https://github.com/xaos-project/XaoSjs) contributors** for interactive zooming and colouring ideas; to **Yozo Hida, Xiaoye S. Li, David H. Bailey and the [QD contributors](https://github.com/BL-highprecision/QD)** for multi-component arithmetic; and to the **[Matplotlib contributors and colormap authors](https://matplotlib.org/3.10.6/users/explain/colors/colormaps.html)** for the colour resources.
 
 Finally, thank you to the **decimal.js, TypeScript, Vite, WebGPU and browser communities** for the tools and platform that make this application possible.
 

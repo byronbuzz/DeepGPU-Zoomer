@@ -3,22 +3,6 @@ export const MAX_STOPS = 8;
 
 export const PALETTE_CUSTOM = 5;
 
-export const MAPPINGS = ["linear", "sqrt", "log"] as const;
-export type Mapping = (typeof MAPPINGS)[number];
-
-/**
- * Colouring modes.
- *
- * `iteration` is the classic escape-count banding. `distance` is analytic
- * distance estimation: the orbit carries its derivative, and on escape
- * `0.5 * |z| * log|z| / |dz|` gives the distance to the set, which normalised
- * against the size of a screen pixel stays meaningful at any zoom depth. That
- * field is what the slope lighting shades, and what makes the bands flow and
- * fold as you zoom rather than sliding rigidly.
- */
-export const COLOR_MODES = ["iteration", "distance"] as const;
-export type ColorMode = (typeof COLOR_MODES)[number];
-
 export interface ColorSettings {
   mode: number;
   palette: number;
@@ -35,8 +19,6 @@ export interface ColorSettings {
   formula?: number;
   effect?: number;
   capped?: number;
-  /** Completed-image presentation filter. Never changes the numerical field. */
-  postAntialias?: boolean;
   /** Four spatial samples per displayed pixel, only while stationary. */
   oversampling?: boolean;
 
@@ -92,7 +74,6 @@ export const DEFAULT_COLORS: ColorSettings = {
   supersample: 1,
   gamma: 2.2,
   hueRotation: 0,
-  postAntialias: false,
   oversampling: false,
 };
 
@@ -156,9 +137,9 @@ export function validateColors(value:unknown):ColorSettings {
   if(positions.length!==c.stops.length||positions.some((p,i)=>!Number.isFinite(p)||p<0||p>1||i>0&&p<positions[i-1]))throw Error('Invalid palette positions');
   c.positions=[...positions];c.locks=c.stops.map((_,i)=>v.locks?.[i]===true);c.repeating=v.repeating!==false;
   for(const [key,max] of [['formula',FORMULAS.length-1],['effect',EFFECTS.length-1],['capped',CAPPED.length-1]] as const){const n=v[key]??0;if(!Number.isInteger(n)||n<0||n>max)throw Error(`Invalid ${key}`);c[key]=n;}
-  if(![0,1,2].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.slopeDepth<0||c.slopeDepth>80||c.gamma<1||c.gamma>4||c.hueRotation<0||c.hueRotation>360||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
-  // Legacy cheap-AA choices never opt into the new numerical quality target.
-  c.postAntialias=false;
+  // Saved diagnostic appearances fall back to ordinary iteration colouring.
+  if(c.mode===2)c.mode=0;
+  if(![0,1].includes(c.mode)||!Number.isInteger(c.palette)||c.palette<0||c.palette>5||c.cycle<1||c.cycle>1000000||c.slopeDepth<0||c.slopeDepth>80||c.gamma<1||c.gamma>4||c.hueRotation<0||c.hueRotation>360||![1,2,3].includes(c.supersample))throw Error('Invalid colouring settings');
   return c;
 }
 
@@ -204,102 +185,3 @@ export const PRESETS: Preset[] = [
   { name: "Coolwarm", stops: ["#3b4cc0", "#8db0fe", "#dddcdc", "#f4987a", "#b40426"] },
   { name: "Cubehelix", stops: ["#000000", "#1a354c", "#a07949", "#d3c1d9", "#ffffff"] },
 ];
-
-const clamp = (value: number, low: number, high: number) =>
-  Math.min(high, Math.max(low, value));
-
-/**
- * Serialises to a dot-separated record. Fields are positional and appended
- * only at the end, so older links keep decoding: anything missing falls back
- * to the default.
- */
-export function encodeColors(settings: ColorSettings): string {
-  const fields: (string | number)[] = [
-    settings.palette,
-    Math.round(settings.cycle),
-    Math.round(settings.offset * 1000),
-    settings.smooth ? 1 : 0,
-    settings.mapping,
-    settings.mirror ? 1 : 0,
-    settings.interior.slice(1),
-    settings.stops.map((stop) => stop.slice(1)).join(""),
-    settings.mode,
-    Math.round(settings.colorDensity * 1000),
-    Math.round(settings.colorPhase * 1000),
-    Math.round(settings.slopeDepth * 100),
-    Math.round(settings.lightAngle),
-    Math.round(settings.lightElevation),
-    Math.round(settings.ambientLight * 100),
-    Math.round(settings.diffuseStrength * 100),
-    Math.round(settings.specularStrength * 100),
-    settings.slopeLighting ? 1 : 0,
-    settings.supersample,
-    Math.round(settings.gamma * 100),
-    stopPositions(settings).map(position=>Math.round(position*1_000_000)).join(','),
-    (settings.locks??[]).map(locked=>locked?'1':'0').join(''),
-    settings.repeating===false?0:1,
-    settings.formula??0,
-    settings.effect??0,
-    settings.capped??0,
-    0, // Reserved legacy postprocess AA slot.
-    Math.round(settings.hueRotation),
-    settings.oversampling?1:0,
-  ];
-  return fields.join(".");
-}
-
-export function decodeColors(code: string): ColorSettings | null {
-  const parts = code.split(".");
-  if (parts.length < 7) return null;
-
-  const number = (text: string | undefined, fallback: number) => {
-    if (text === undefined) return fallback;
-    const value = Number.parseInt(text, 10);
-    return Number.isFinite(value) ? value : fallback;
-  };
-  const color = (text: string | undefined, fallback: string) =>
-    text && HEX.test(`#${text}`) ? `#${text}` : fallback;
-
-  const packedStops = parts[7] ?? "";
-  const stops: string[] = [];
-  for (let i = 0; i + 6 <= packedStops.length && stops.length < MAX_STOPS; i += 6) {
-    stops.push(color(packedStops.slice(i, i + 6), "#000000"));
-  }
-
-  const d = DEFAULT_COLORS;
-  const decodedStops=stops.length ? stops : d.stops;
-  const positions=(parts[20]??'').split(',').map(Number).filter(Number.isFinite).map(v=>v/1_000_000);
-  const locks=(parts[21]??'').split('').map(v=>v==='1');
-  return validateColors({
-    palette: clamp(number(parts[0], d.palette), 0, 5),
-    cycle: clamp(number(parts[1], d.cycle), 8, 65536),
-    offset: clamp(number(parts[2], 0) / 1000, 0, 1),
-    smooth: parts[3] !== "0",
-    mapping: clamp(number(parts[4], 0), 0, 2),
-    mirror: parts[5] === "1",
-    interior: color(parts[6], d.interior),
-    stops: decodedStops,
-
-    mode: clamp(number(parts[8], d.mode), 0, COLOR_MODES.length - 1),
-    colorDensity: clamp(number(parts[9], d.colorDensity * 1000) / 1000, 0.01, 8),
-    colorPhase: clamp(number(parts[10], 0) / 1000, 0, 1),
-    slopeDepth: clamp(number(parts[11], d.slopeDepth * 100) / 100, 0, 80),
-    lightAngle: number(parts[12], d.lightAngle) % 360,
-    lightElevation: clamp(number(parts[13], d.lightElevation), 0, 90),
-    ambientLight: clamp(number(parts[14], d.ambientLight * 100) / 100, 0, 2),
-    diffuseStrength: clamp(number(parts[15], d.diffuseStrength * 100) / 100, 0, 3),
-    specularStrength: clamp(number(parts[16], d.specularStrength * 100) / 100, 0, 3),
-    slopeLighting: parts[17] === undefined ? d.slopeLighting : parts[17] === "1",
-    supersample: clamp(number(parts[18], d.supersample), 1, 3),
-    gamma: clamp(number(parts[19], d.gamma * 100) / 100, 1, 4),
-    positions:positions.length===decodedStops.length?positions:undefined,
-    locks:locks.length===decodedStops.length?locks:undefined,
-    repeating:parts[22]===undefined?d.repeating:parts[22]!=='0',
-    formula:clamp(number(parts[23],d.formula??0),0,FORMULAS.length-1),
-    effect:clamp(number(parts[24],d.effect??0),0,EFFECTS.length-1),
-    capped:clamp(number(parts[25],d.capped??0),0,CAPPED.length-1),
-    postAntialias:false,
-    hueRotation:clamp(number(parts[27],d.hueRotation),0,360),
-    oversampling:parts[28]==='1',
-  });
-}

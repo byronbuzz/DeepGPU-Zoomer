@@ -1,8 +1,7 @@
 import { REFERENCE_CHUNK_ITERATIONS,
-  type PackedReferenceOrbit, type ReferenceOrbitInput, type ReferenceResumeState, type ReferenceStage } from "./reference-orbit";
+  type PackedReferenceOrbit, type ReferenceOrbitInput, type ReferenceResumeState } from "./reference-orbit";
 
 type WorkerResponse =
-  | { id: number; stage: ReferenceStage }
   | ({ id: number; ok: true } & PackedReferenceOrbit)
   | { id: number; ok: false; name: string; message: string };
 
@@ -18,8 +17,6 @@ export class ReferenceWorkerClient {
   private activeJob: ActiveJob | null = null;
   private nextId = 1;
 
-  constructor(private readonly onStage?: (stage: ReferenceStage) => void) {}
-
   get active() { return this.activeJob !== null; }
 
   private ensureWorker(): Worker {
@@ -28,7 +25,6 @@ export class ReferenceWorkerClient {
     this.worker = worker;
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       if (this.worker !== worker || !this.activeJob || event.data.id !== this.activeJob.id) return;
-      if ("stage" in event.data) { this.onStage?.(event.data.stage); return; }
       const job = this.activeJob; this.activeJob = null;
       if (event.data.ok) job.resolve(event.data);
       else {
@@ -51,13 +47,13 @@ export class ReferenceWorkerClient {
   }
 
   /** Returns one bounded suffix; the owner admits it before requesting the next. */
-  generate(input: ReferenceOrbitInput, diagnosticStages = false, resume?: ReferenceResumeState,
+  generate(input: ReferenceOrbitInput, resume?: ReferenceResumeState,
     iterationBudget = REFERENCE_CHUNK_ITERATIONS): Promise<PackedReferenceOrbit> {
     if (this.activeJob) throw new Error("Reference worker already has an active job");
     const id = this.nextId++, worker = this.ensureWorker();
     return new Promise((resolve, reject) => {
       this.activeJob = { id, resolve, reject };
-      try { worker.postMessage({ id, input, diagnosticStages, resume, iterationBudget }); }
+      try { worker.postMessage({ id, input, resume, iterationBudget }); }
       catch (error) {
         this.activeJob = null; this.worker = null; worker.terminate(); reject(error);
       }

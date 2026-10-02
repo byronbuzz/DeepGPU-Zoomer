@@ -1,27 +1,15 @@
-/** Optional pass timings. Readbacks never gate rendering and the pool is bounded. */
+/** Calculation timings feed batch sizing without gating rendering. */
 type Slot = { query: GPUQuerySet; resolve: GPUBuffer; read: GPUBuffer; busy: boolean };
-export type TimingSample = { slot: Slot; phase: string; generation: number };
+export type TimingSample = { slot: Slot };
 export class GpuTiming {
   private slots: Slot[] = [];
-  private generation = 0;
-  private values = new Map<string, number[]>();
-  private invalid = 0;
-  private missed = 0;
   private disposed = false;
-  enabled = false;
   readonly supported: boolean;
   constructor(private device: GPUDevice) {
     this.supported = device.features.has("timestamp-query");
   }
-  setEnabled(enabled: boolean) {
-    this.enabled = enabled && this.supported && !this.disposed; this.generation++;
-    this.values.clear(); this.invalid = 0; this.missed = 0;
-  }
-  begin(phase: string): TimingSample | undefined {
-    if(this.disposed)return;
-    // Calculation timings also drive the batch controller when the optional
-    // profiling display is off.
-    if (!this.supported || (!this.enabled && phase !== 'calculate')) return;
+  begin(): TimingSample | undefined {
+    if(this.disposed || !this.supported)return;
     let slot = this.slots.find(s => !s.busy);
     if (!slot && this.slots.length < 6) {
       slot = {
@@ -31,9 +19,9 @@ export class GpuTiming {
       };
       this.slots.push(slot);
     }
-    if (!slot) { this.missed++; return; }
+    if (!slot) return;
     slot.busy = true;
-    return { slot, phase, generation: this.generation };
+    return { slot };
   }
   writes(sample: TimingSample | undefined): GPUComputePassTimestampWrites | GPURenderPassTimestampWrites | undefined {
     return sample && { querySet: sample.slot.query, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 };
@@ -50,34 +38,19 @@ export class GpuTiming {
       const data = new BigUint64Array(slot.read.getMappedRange());
       const elapsed = Number(data[1] - data[0]) / 1e6;
       if (data[1] < data[0] || !Number.isFinite(elapsed) || elapsed < 0) {
-        if(this.enabled&&sample.generation===this.generation)this.invalid++;
         onUnavailable?.();
       } else {
         onElapsed?.(elapsed);
-        if (this.enabled&&sample.generation===this.generation) {
-          const values = this.values.get(sample.phase) ?? [];
-          values.push(elapsed); if (values.length > 120) values.shift();
-          this.values.set(sample.phase, values);
-        }
       }
       slot.read.unmap();
     }).catch(() => {
-      if (this.enabled && sample.generation === this.generation) this.invalid++;
       onUnavailable?.();
     }).finally(() => { slot.busy = false; });
   }
   dispose() {
     if(this.disposed)return;
-    this.disposed=true;this.setEnabled(false);
+    this.disposed=true;
     for(const slot of this.slots){slot.query.destroy();slot.resolve.destroy();slot.read.destroy();}
     this.slots=[];
-  }
-  snapshot() {
-    return { enabled: this.enabled, supported: this.supported, invalid: this.invalid, missed: this.missed,
-      phases: Object.fromEntries([...this.values].map(([name, values]) => {
-        const sorted = [...values].sort((a,b) => a-b);
-        return [name, { count: values.length, meanMs: values.reduce((a,b) => a+b,0)/values.length,
-          p95Ms: sorted[Math.floor((sorted.length-1)*.95)], maxMs: sorted.at(-1)! }];
-      })) };
   }
 }
