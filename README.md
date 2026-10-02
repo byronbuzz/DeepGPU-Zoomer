@@ -2,7 +2,7 @@
 
 # DeepGPU Zoomer
 
-**Explore Mandelbrot and Julia worlds, from the whole set to intricate deep-zoom detail.**
+**The fastest, deepest and smoothest WebGPU Fractal Zoomer in the world! (probably)... Explore Mandelbrot and Julia sets in real-time - in your browser - to depths of 10^-400 and beyond.**
 
 [![WebGPU](https://img.shields.io/badge/Rendering-WebGPU-E5A344?style=flat-square)](https://www.w3.org/TR/webgpu/) [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square)](https://www.typescriptlang.org/) [![WGSL](https://img.shields.io/badge/Shaders-WGSL-8758C7?style=flat-square)](https://www.w3.org/TR/WGSL/) [![Local computation](https://img.shields.io/badge/Compute-In_your_browser-249B83?style=flat-square)](#introduction) [![GPL](https://img.shields.io/badge/License-GPL--3.0--or--later-B8476B?style=flat-square)](LICENSE)
 
@@ -16,7 +16,7 @@
 
 ## ✨ Introduction
 
-DeepGPU Zoomer is an interactive fractal explorer built for the browser. Hold to zoom, steer with the pointer, rotate the view, and discover how a point in the Mandelbrot set shapes an entire Julia set. Shape the image with editable palettes, colour formulas, effects and lighting, then save a location, copy an exact view link, or export a high-resolution PNG.
+Dive into a dazzling universe of Mandelbrot and Julia fractals, where every zoom reveals another world of spirals, filaments and miniature sets. Put your GPU to work and follow your curiosity into extraordinary depths, right in your browser. Steer, pan and rotate through the detail, bring it alive with colour and lighting, then capture your discoveries as exact view links or high-resolution PNGs.
 
 WebGPU handles parallel pixel calculation and presentation. At deeper scales, an arbitrary-precision reference orbit runs in a background worker, while GPU perturbation methods calculate the surrounding detail. Coordinates retain their decimal digits throughout navigation and saved views.
 
