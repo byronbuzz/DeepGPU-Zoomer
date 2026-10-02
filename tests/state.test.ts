@@ -67,7 +67,7 @@ describe('exact view state',()=>{
   });
   it('maps colour spacing exponentially without losing endpoints',()=>{
     expect(DEFAULT_COLORS.cycle).toBe(64);
-    for(const value of [8,32,64,256,512,1024,4096,16384]){
+    for(const value of [8,32,64,256,512,1024,4096,16384,65536]){
       expect(cycleFromSlider(cycleToSlider(value))).toBeCloseTo(value,10);
       expect(decodeColors(encodeColors({...DEFAULT_COLORS,cycle:value}))?.cycle).toBe(value);
     }

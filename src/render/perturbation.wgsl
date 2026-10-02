@@ -122,6 +122,8 @@ override JULIA: bool = false;
 override DIRECT: bool = false;
 // Keep approximation coefficients and operations out of unaccelerated kernels.
 override APPROX: bool = false;
+override SAMPLE_WORKGROUP_X: u32 = 8u;
+override SAMPLE_WORKGROUP_Y: u32 = 4u;
 
 // ------------------------------------------------------- mantissa/exponent pair
 
@@ -454,7 +456,7 @@ fn iterateAny(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
         // Exterior formulas may retain endpoints; solid interior colour never
         // reads them. Only distance/diagnostic or patterned interiors need the
         // full interior orbit.
-        let allowInteriorShortcut = !JULIA && u.mode == 0u && u.cappedPattern == 0u;
+        let allowInteriorShortcut = !JULIA && sampleMode() == 0u && sampleCappedPattern() == 0u;
         if (allowInteriorShortcut &&
             analyticMandelbrotInterior(wideFromHdr(c))) {
             return emptySample();
@@ -567,26 +569,26 @@ fn effectColour(p:f32,angle:f32,gradient:vec2<f32>)->vec3<f32>{
     return col;
 }
 fn cappedColour(z2:f32,z:vec2<f32>)->vec3<f32>{
-    if(u.cappedPattern==0u){return u.interior;}
-    if(u.cappedPattern==1u){return palette(wrapCoordinate((atan2(z.x,z.y)/TAU+.75)*78.125/u.colorCycle+u.colorOffset));}
-    if(u.cappedPattern==2u){return palette(wrapCoordinate((z2*f32(u.maxIterations/2u)+1.0)/u.colorCycle+u.colorOffset));}
+    if(sampleCappedPattern()==0u){return u.interior;}
+    if(sampleCappedPattern()==1u){return palette(wrapCoordinate((atan2(z.x,z.y)/TAU+.75)*78.125/u.colorCycle+u.colorOffset));}
+    if(sampleCappedPattern()==2u){return palette(wrapCoordinate((z2*f32(u.maxIterations/2u)+1.0)/u.colorCycle+u.colorOffset));}
     // 3–7 are inexpensive endpoint adaptations of XaoS incolouring ideas;
     // 8–12 are local endpoint mappings. They consume the already-retained
     // final z and never add an orbit pass or iteration.
     let angle=atan2(z.y,z.x)/TAU;
     let radius=sqrt(max(z2,0.0));
     var t=0.0;
-    if(u.cappedPattern==3u){t=abs(z.x)/(abs(z.y)+0.000001);}
-    if(u.cappedPattern==4u){t=z2*cos(z.x*z.x)*3.0;}
-    if(u.cappedPattern==5u){t=sin(z.x*z.x-z.y*z.y)*4.0;}
-    if(u.cappedPattern==6u){t=atan(z.x*z.y)*5.0;}
-    if(u.cappedPattern==7u){let checker=(i32(floor((z.x+2.0)*6.0))+i32(floor((z.y+2.0)*6.0)))&1;t=select(angle*9.0,angle*17.0,checker!=0);}
-    if(u.cappedPattern==8u){t=sin(z.x*12.0)+cos(z.y*12.0);}
-    if(u.cappedPattern==9u){t=radius*18.0;}
-    if(u.cappedPattern==10u){t=angle*12.0+sin(radius*8.0);}
-    if(u.cappedPattern==11u){t=(abs(z.x)+abs(z.y))*14.0;}
-    if(u.cappedPattern==12u){t=1.0-exp(-radius*5.0);}
-    if(u.cappedPattern>=3u){return palette(wrapCoordinate(t*78.125/u.colorCycle+u.colorOffset));}
+    if(sampleCappedPattern()==3u){t=abs(z.x)/(abs(z.y)+0.000001);}
+    if(sampleCappedPattern()==4u){t=z2*cos(z.x*z.x)*3.0;}
+    if(sampleCappedPattern()==5u){t=sin(z.x*z.x-z.y*z.y)*4.0;}
+    if(sampleCappedPattern()==6u){t=atan(z.x*z.y)*5.0;}
+    if(sampleCappedPattern()==7u){let checker=(i32(floor((z.x+2.0)*6.0))+i32(floor((z.y+2.0)*6.0)))&1;t=select(angle*9.0,angle*17.0,checker!=0);}
+    if(sampleCappedPattern()==8u){t=sin(z.x*12.0)+cos(z.y*12.0);}
+    if(sampleCappedPattern()==9u){t=radius*18.0;}
+    if(sampleCappedPattern()==10u){t=angle*12.0+sin(radius*8.0);}
+    if(sampleCappedPattern()==11u){t=(abs(z.x)+abs(z.y))*14.0;}
+    if(sampleCappedPattern()==12u){t=1.0-exp(-radius*5.0);}
+    if(sampleCappedPattern()>=3u){return palette(wrapCoordinate(t*78.125/u.colorCycle+u.colorOffset));}
     return u.interior;
 }
 
@@ -649,7 +651,7 @@ fn shade(baseColour: vec3<f32>, hCentre: f32, hRight: f32, hUp: f32) -> vec3<f32
 
 /** Sub-samples across one screen row. */
 fn sampleStride() -> u32 {
-    return u32(u.resolution.x) * max(u.supersample, 1u);
+    return u32(u.resolution.x) * sampleGrid();
 }
 
 fn fieldIndex(col: u32, rowIdx: u32) -> u32 {
@@ -657,18 +659,20 @@ fn fieldIndex(col: u32, rowIdx: u32) -> u32 {
 }
 
 /// Iterates every sub-sample and stores what the colouring will need.
-@compute @workgroup_size(8, 4)
+@compute @workgroup_size(SAMPLE_WORKGROUP_X, SAMPLE_WORKGROUP_Y)
 fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
     let stride = max(u.sampleStep, 1u);
     let columns = (min(size.x, u.columnLimit) - u.columnOffset + stride - 1u) / stride;
     let rows = (min(size.y, u.rowLimit) - u.rowOffset + stride - 1u) / stride;
     var position = gid.xy;
-    // Bijective parity grouping only inside complete 16x8 sample rectangles.
-    // Partial edge rectangles keep their original coordinates and dispatch.
-    if (u.mode == 0u && max(u.supersample, 1u) == 1u && u.reuseField != 0u && (gid.x / 16u + 1u) * 16u <= columns && (gid.y / 8u + 1u) * 8u <= rows) {
-        position = vec2<u32>((gid.x / 16u) * 16u + (gid.x % 8u) * 2u + (gid.x % 16u) / 8u,
-                            (gid.y / 8u) * 8u + (gid.y % 4u) * 2u + (gid.y % 8u) / 4u);
+    // Bijective parity grouping inside complete two-by-two workgroup blocks.
+    // Each complete workgroup has one parity; partial edge blocks stay linear.
+    let blockX = SAMPLE_WORKGROUP_X * 2u;
+    let blockY = SAMPLE_WORKGROUP_Y * 2u;
+    if (sampleMode() == 0u && sampleGrid() == 1u && u.reuseField != 0u && (gid.x / blockX + 1u) * blockX <= columns && (gid.y / blockY + 1u) * blockY <= rows) {
+        position = vec2<u32>((gid.x / blockX) * blockX + (gid.x % SAMPLE_WORKGROUP_X) * 2u + (gid.x % blockX) / SAMPLE_WORKGROUP_X,
+                            (gid.y / blockY) * blockY + (gid.y % SAMPLE_WORKGROUP_Y) * 2u + (gid.y % blockY) / SAMPLE_WORKGROUP_Y);
     }
     let row = position.y * stride + u.rowOffset;
     let col = position.x * stride + u.columnOffset;
@@ -689,8 +693,8 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let distanceMode = u.mode == 1u;
-    let grid = max(u.supersample, 1u);
+    let distanceMode = sampleMode() == 1u;
+    let grid = sampleGrid();
     let step = 1.0 / f32(grid);
 
     var skipped: u32 = 0u;
@@ -722,7 +726,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
             // mode 2 is a diagnostic view: red = iterations used, green =
             // escaped, blue = log2 of the final delta, alpha = rebases. It
             // wants more than the field carries, so it writes straight out.
-            if (u.mode == 2u) {
+            if (sampleMode() == 2u) {
                 textureStore(output, vec2<i32>(i32(col), i32(row)), vec4<f32>(
                     f32(s.n) / f32(max(u.maxIterations, 1u)),
                     select(0.0, 1.0, s.escaped),
@@ -743,7 +747,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
                     select(s.z2, f32(u.maxIterations), s.termination == SAMPLE_NUMERICAL_PERIODIC));
             }
             field[fieldIndex(col * grid + sx, row * grid + sy)] = entry;
-            if(u.retainEndpoints!=0u){endpoints[fieldIndex(col*grid+sx,row*grid+sy)]=vec4<f32>(s.z,f32(s.n),s.z2);}
+            if(sampleRetainEndpoints()){endpoints[fieldIndex(col*grid+sx,row*grid+sy)]=vec4<f32>(s.z,f32(s.n),s.z2);}
         }
     }
 
@@ -770,7 +774,7 @@ fn compute(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn distanceToIterationField(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(u32(u.resolution.x), u32(u.resolution.y));
     if (gid.x >= size.x || gid.y >= size.y) { return; }
-    let grid = max(u.supersample, 1u);
+    let grid = sampleGrid();
     for (var sy: u32 = 0u; sy < grid; sy = sy + 1u) {
         for (var sx: u32 = 0u; sx < grid; sx = sx + 1u) {
             let at = fieldIndex(gid.x * grid + sx, gid.y * grid + sy);
@@ -788,8 +792,8 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pixel = gid.xy + vec2<u32>(u.columnOffset, u.rowOffset);
     if (pixel.x >= min(size.x, u.columnLimit) || pixel.y >= min(size.y, u.rowLimit)) { return; }
 
-    let distanceMode = u.mode == 1u;
-    let grid = max(u.supersample, 1u);
+    let distanceMode = sampleMode() == 1u;
+    let grid = sampleGrid();
     let stride = sampleStride();
     let lastCol = stride - 1u;
     let lastRow = size.y * grid - 1u;
@@ -820,7 +824,7 @@ fn shadePass(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             if (!distanceMode) {
                 var z=vec2<f32>(0.0);
-                if(u.retainEndpoints!=0u){z=endpoints[fieldIndex(anchor.x,anchor.y)].xy;}
+                if(sampleRetainEndpoints()){z=endpoints[fieldIndex(anchor.x,anchor.y)].xy;}
                 if (entry.x < 0.0) {
                     accumulated = accumulated + toLinear(cappedColour(entry.y,z));
                 } else {

@@ -3,6 +3,8 @@ import {createContext,runInContext} from 'node:vm';
 import ts from 'typescript';
 import {describe,expect,it,vi} from 'vitest';
 import {Camera,HOME} from '../src/state';
+import {DEFAULT_TUNING,normalizeTuning,overscanCssPx} from '../src/tuning';
+import Decimal from 'decimal.js';
 import {DEFAULT_COLORS} from '../src/logic/colorSettings';
 import {WebGpuRenderer} from '../src/render/webgpu-renderer';
 
@@ -28,7 +30,7 @@ function inputHarness(){
     engine:undefined,requestAnimationFrame(){},changed(){},persist:vi.fn(),currentFieldComplete:()=>false,
     refinementTime:{heldCameraChange(){},stopHeld:vi.fn()},refiningStatus:{finish:vi.fn()},
     setRotation:(angle:number)=>camera.setAngle(angle),releasePointer(){},
-    toggleJuliaPreview(){},switchJuliaView(){},message(){}});
+    toggleJuliaPreview(){},switchJuliaView(){},updateDynamicForZoom(){},message(){}});
   run(['keyIdentity','stop','finishRotation','tick'].map(fn).join('\n'),box);
   run(source.slice(source.indexOf("canvas.addEventListener('keydown'"),source.indexOf("window.addEventListener('blur'")),box);
   const send=(name:string,type:string,key='',properties={})=>{
@@ -95,11 +97,11 @@ function pipelineHarness(){
   let rejectOld!:(reason:Error)=>void;
   const factory=vi.fn().mockImplementationOnce(()=>new Promise((_,reject)=>{rejectOld=reject;})).mockResolvedValue({});
   const renderer:any=Object.create(WebGpuRenderer.prototype);
-  Object.assign(renderer,{ctx:{device:{createComputePipelineAsync:factory}},pendingPipelines:new Map(),renderModule:{},pipelineLayout:{},
+  Object.assign(renderer,{ctx:{device:{createComputePipelineAsync:factory}},pendingPipelines:new Map(),activeOperations:new Set(),clearContinuationWork(){},renderModule:{},pipelineLayout:{},
     isComplete:()=>true,renderTarget:async()=>{await renderer.ensureComputePipeline('plain');return {completed:true,computed:true};}});
   const box:any=createContext({engine:renderer,busy:false,dirty:true,error:'',stopped:false,refreshPending:false,generation:1,
     camera:{revision:2},lastRevision:1,completedQuality:0,fields:0,recolours:0,stats:undefined,
-    preparingColourData:false,refreshHolding:false,DOMException,performance,request:()=>({colors:DEFAULT_COLORS}),
+    preparingColourData:false,refreshHolding:false,provisionalNavigationCap:false,qualitySizeError:false,DOMException,performance,request:()=>({colors:DEFAULT_COLORS}),
     message:vi.fn(),captureStoppedPartial(){},refinementTime:{complete:vi.fn()}});
   run(fn('compute'),box);
   return {box,factory,reject:(error:Error)=>rejectOld(error)};
@@ -164,5 +166,51 @@ describe('main retained validation lifecycle',()=>{
   it('skips a redundant refresh capture after an already validated stopped snapshot',async()=>{
     const {box}=retentionHarness();box.retainedPartialCaptured=true;await box.refreshCalculation();
     expect(box.engine.retainDisplayedPartial).not.toHaveBeenCalled();expect(box.engine.restartCalculation).toHaveBeenCalledOnce();
+  });
+});
+
+describe('Julia preview follows the displayed iteration limit',()=>{
+  it('queues a new preview when the main limit changes, including dynamic updates',()=>{
+    const nodes:Record<string,any>={};const queuePreview=vi.fn();
+    const box:any=createContext({view:{iterations:28000},previewIterationLimit:1000,previewEnabled:true,selectedJulia:{x:'0',y:'0'},
+      queuePreview,baseEditing:false,baseIterations:1000,dynamicEnabled:true,iterationToSlider:(n:number)=>n,
+      el:(id:string)=>nodes[id]??=( {value:'',textContent:'',setAttribute:vi.fn()} )});
+    run(fn('syncIterationLabel'),box);box.syncIterationLabel();
+    expect(queuePreview).toHaveBeenCalledTimes(1);expect(nodes['iteration-value'].textContent).toBe((28000).toLocaleString());
+    box.syncIterationLabel();expect(queuePreview).toHaveBeenCalledTimes(1);
+    box.view.iterations=29000;box.syncIterationLabel();expect(queuePreview).toHaveBeenCalledTimes(2);
+  });
+  it('renders at the main limit and rejects a result superseded by a limit change',async()=>{
+    let finish!:(value:any)=>void;let requested:any;
+    const renderer={render:(request:any)=>{requested=request;return new Promise(resolve=>{finish=resolve;});},reproject:vi.fn()};
+    const box:any=createContext({stopped:false,previewBusy:false,previewPending:true,previewEnabled:true,selectedJulia:{x:'0',y:'0'},
+      gpuContext:{},previewEpoch:1,previewLifetime:0,previewSize:{width:320,height:180},view:{family:'mandelbrot',iterations:5000},
+      previewEngine:renderer,previewCanvas:{width:320,height:180},previewRenderedEpoch:0,displayedJulia:null,colors:DEFAULT_COLORS,
+      renderColors:(c:any)=>c,needsEndpoints:()=>false,Decimal:class {constructor(public value:any){} div(){return this;}},
+      el:()=>({setAttribute(){},textContent:''})});
+    run(fn('computeJuliaPreview'),box);const pending=box.computeJuliaPreview();
+    expect(requested.maxIterations).toBe(5000);expect(requested.isCurrent()).toBe(true);
+    box.view.iterations=6000;expect(requested.isCurrent()).toBe(false);finish({completed:true});await pending;
+    expect(renderer.reproject).not.toHaveBeenCalled();expect(box.previewBusy).toBe(false);
+  });
+});
+
+
+describe('selected motion throughput and stationary refinement',()=>{
+  it.each([0,1,2])('uses Detailed after movement stops and restores selected preset %s',throughput=>{
+    const camera=new Camera();camera.load(HOME);
+    const chosen=normalizeTuning({...DEFAULT_TUNING,throughput,pointerRefinement:true,pointerPriority:4,blaPrecisionLog2:-22});
+    const box:any=createContext({canvas:{width:800,height:600},camera,generation:1,view:HOME,colors:DEFAULT_COLORS,tuning:chosen,
+      direction:1,keys:new Set(),dragging:false,rotating:false,rotationSliderHeld:false,selecting:false,rotationKeys:new Set(),
+      performance:{now:()=>1000},lastInteraction:0,wheelDirection:0,speed:1,innerWidth:800,innerHeight:600,pointer:{x:400,y:300},
+      moving:()=>box.direction!==0,overscanCssPx,normalizeTuning,Decimal,renderColors:(c:any)=>c,refreshHolding:false,
+      dynamicEnabled:true,provisionalNavigationCap:false,computeJuliaPreview(){},updateDynamicBeforePreparation(){}});
+    run(fn('request'),box);
+    expect(box.request().tuning).toEqual(chosen);
+    box.direction=0;
+    const stationary=box.request();expect(stationary.interacting).toBe(false);
+    expect(stationary.tuning).toEqual(normalizeTuning({...chosen,throughput:2}));
+    expect(box.tuning).toEqual(chosen);
+    box.direction=-1;expect(box.request().tuning).toEqual(chosen);
   });
 });

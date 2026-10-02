@@ -19,6 +19,14 @@ export interface SampleGridRemap {
 export const RETAINED_WIDTH = 2560;
 export const RETAINED_HEIGHT = 1440;
 
+/** Cheap tier estimate only. Callers must retain their exact Decimal checks.
+ * Separate decimal exponents keep deep scales outside Number's range usable. */
+export function estimateBinaryRatio(numerator: Decimal, denominator: Decimal): number {
+  const leading = (value: Decimal) => Number(value.toExponential(15, Decimal.ROUND_DOWN).split('e')[0]);
+  return Math.log2(leading(numerator) / leading(denominator)) +
+    (numerator.e - denominator.e) * Math.LOG2E * Math.LN10;
+}
+
 /** History only: never used to size the numerical field or the main image. */
 export function retainedLimits(deviceLimit = Infinity) {
   const width = Math.min(RETAINED_WIDTH, Math.floor(deviceLimit));
@@ -93,8 +101,7 @@ export function planRetainedView(
       view.unitsPerPixel.lte(0) || anchor.unitsPerPixel.lte(0)) {
     throw new Error("Invalid sample grid geometry");
   }
-  const ratio = view.unitsPerPixel.div(anchor.unitsPerPixel);
-  let level = ratio.log(2).floor().toNumber();
+  let level = Math.floor(estimateBinaryRatio(view.unitsPerPixel, anchor.unitsPerPixel));
   const D = coordinateDecimal([view.centerX, view.centerY, view.unitsPerPixel,
     anchor.originX, anchor.originY, anchor.unitsPerPixel], Math.abs(level));
   const base = new D(anchor.unitsPerPixel);
@@ -138,7 +145,7 @@ export function sampleGridRemap(previous: FrameView, next: FrameView): SampleGri
   const D = coordinateDecimal([previous.centerX, previous.centerY, previous.unitsPerPixel,
     next.centerX, next.centerY, next.unitsPerPixel]);
   const ratio = new D(next.unitsPerPixel).div(previous.unitsPerPixel);
-  const level = ratio.log(2).toNearest(1).toNumber();
+  const level = Math.round(estimateBinaryRatio(next.unitsPerPixel, previous.unitsPerPixel));
   // Positive signed i32 numerators are passed to the remap shader.
   if (!Number.isSafeInteger(level) || Math.abs(level) > 30 || !new D(2).pow(level).eq(ratio)) return null;
   const denominator = 2 ** Math.max(0, -level);

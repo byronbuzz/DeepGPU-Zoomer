@@ -40,6 +40,8 @@ describe("reference viewport radius", () => {
     expect(approximationEligible("julia", 2)).toBe(false);
     expect(approximationEligible("mandelbrot", 1)).toBe(true);
     expect(approximationEligible("mandelbrot", 2)).toBe(false);
-    expect(wideShader).toContain("APPROX && (!JULIA || u.mode == 0u)");
+    expect(wideShader).toContain("APPROX && (!JULIA || sampleMode() == 0u)");
+    expect(wideShader).toContain("override ORDINARY: bool = false;");
+    expect(wideShader).toMatch(/fn sampleMode\(\) -> u32 \{\s*if \(ORDINARY\) \{ return 0u; \}\s*return u\.mode;\s*\}/);
   });
 });

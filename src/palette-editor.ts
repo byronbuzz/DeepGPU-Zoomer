@@ -1,4 +1,5 @@
 import { DEFAULT_COLORS, PRESETS, FORMULAS, EFFECTS, CAPPED, validateColors, stopPositions, cycleFromSlider, cycleToSlider, type ColorSettings } from './logic/colorSettings';
+import { setupColourPicker } from './colour-picker';
 
 type Stop={position:number;color:string;locked:boolean};
 export function paletteStops(c:ColorSettings):Stop[]{return c.stops.map((color,i)=>({color,position:stopPositions(c)[i],locked:c.locks?.[i]??false}));}
@@ -35,8 +36,15 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   const commit=(c:ColorSettings,record=true)=>{if(record)remember();change(validateColors(c));sync();};
   const update=(mutate:(s:Stop[])=>Stop[],selectAfter=selected)=>{remember();const next=withSelectedStop(get(),mutate(paletteStops(get())),selectAfter);selected=next.selected;commit(next.colors,false);};
   const popover=el('stop-colour-popover');
-  const closePicker=()=>{popover.hidden=true;};
-  const openPicker=(rect:DOMRect)=>{colourEditRemembered=false;popover.hidden=false;const width=180;const beside=rect.right+8+width<=innerWidth?rect.right+8:rect.left-width-8;popover.style.left=Math.max(8,Math.min(innerWidth-width-8,beside))+'px';popover.style.top=Math.max(8,Math.min(innerHeight-150,rect.top-20))+'px';syncFields();el<HTMLInputElement>('stop-color').focus();};
+  const closePicker=()=>{popover.hidden=true;for(const stop of Array.from(el('palette-strip').children))stop.setAttribute('aria-expanded','false');};
+  const openPicker=(rect:DOMRect)=>{
+    colourEditRemembered=false;popover.hidden=false;syncFields();
+    const width=popover.offsetWidth,height=popover.offsetHeight,beside=rect.right+8+width<=innerWidth?rect.right+8:rect.left-width-8;
+    popover.style.left=Math.max(8,Math.min(innerWidth-width-8,beside))+'px';popover.style.top=Math.max(8,Math.min(innerHeight-height-8,rect.top-20))+'px';
+    el('palette-strip').children[selected]?.setAttribute('aria-expanded','true');
+    const hex=el<HTMLInputElement>('stop-color');hex.focus();hex.select();
+  };
+  popover.setAttribute('role','dialog');popover.setAttribute('aria-label','Edit stop colour');
   el<HTMLSelectElement>('palette').add(new Option('Custom',''));
   PRESETS.forEach((p,i)=>el<HTMLSelectElement>('palette').add(new Option(p.name,String(i))));
   FORMULAS.forEach((p,i)=>el<HTMLSelectElement>('color-formula').add(new Option(p,String(i))));
@@ -53,12 +61,12 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     const strip=el('palette-strip');const grad=stops.map(s=>`${s.color} ${s.position*100}%`);
     if(c.repeating!==false){const a=stops[0],b=stops.at(-1)!;const t=(1-b.position)/(1-b.position+a.position||1);const rgb=(s:string)=>[1,3,5].map(i=>parseInt(s.slice(i,i+2),16));const x=rgb(b.color),y=rgb(a.color);const seam='#'+x.map((v,i)=>Math.round(v+(y[i]-v)*t).toString(16).padStart(2,'0')).join('');grad.unshift(`${seam} 0%`);grad.push(`${seam} 100%`);}
     strip.style.background=`linear-gradient(to right,${grad.join(',')})`;strip.replaceChildren();
-    stops.forEach((s,i)=>{const b=document.createElement('button');b.type='button';b.className='palette-stop';b.style.left=s.position*100+'%';b.style.background=s.color;b.setAttribute('aria-label',`Stop ${i+1}: ${s.color} at ${s.position.toFixed(3)}. Drag or use arrow keys to move; press Enter to edit colour.`);b.setAttribute('aria-pressed',String(i===selected));
+    stops.forEach((s,i)=>{const b=document.createElement('button');b.type='button';b.className='palette-stop';b.style.left=s.position*100+'%';b.style.background=s.color;b.setAttribute('aria-label',`Stop ${i+1}: ${s.color} at ${s.position.toFixed(3)}. Drag or use arrow keys to move; press Enter to edit colour.`);b.setAttribute('aria-pressed',String(i===selected));b.setAttribute('aria-haspopup','dialog');b.setAttribute('aria-controls','stop-colour-popover');b.setAttribute('aria-expanded',String(!popover.hidden&&i===selected));
       let startX=0,startY=0;
-      b.onpointerdown=e=>{e.stopPropagation();selected=i;dragging=true;dragDistance=0;dragRemembered=false;startX=e.clientX;startY=e.clientY;b.setPointerCapture(e.pointerId);b.focus();syncFields();};
+      b.onpointerdown=e=>{if(e.button!==0)return;e.stopPropagation();closePicker();selected=i;dragging=true;dragDistance=0;dragRemembered=false;startX=e.clientX;startY=e.clientY;b.setPointerCapture(e.pointerId);b.focus();syncFields();};
       b.onpointermove=e=>{if(!b.hasPointerCapture(e.pointerId))return;dragDistance=Math.max(dragDistance,Math.hypot(e.clientX-startX,e.clientY-startY));if(dragDistance<3)return;if(!dragRemembered){remember();dragRemembered=true;}const r=strip.getBoundingClientRect();const s=paletteStops(get());s[selected].position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));
         const next=withSelectedStop(get(),s,selected);selected=next.selected;change(next.colors);b.style.left=stopPositions(next.colors)[selected]*100+'%';syncFields();};
-      b.onpointerup=()=>{const rect=b.getBoundingClientRect(),clicked=dragDistance<3;dragging=false;sync();if(clicked)openPicker(rect);};b.onpointercancel=()=>{dragging=false;sync();};b.onlostpointercapture=()=>{if(dragging){dragging=false;sync();}};
+      b.onpointerup=e=>{if(!dragging||e.button!==0)return;const rect=b.getBoundingClientRect(),clicked=dragDistance<3;dragging=false;sync();if(clicked)openPicker(rect);};b.onpointercancel=()=>{dragging=false;sync();};b.onlostpointercapture=()=>{if(dragging){dragging=false;sync();}};
       b.onkeydown=e=>{if(e.key==='Delete'){selected=i;el('stop-delete').click();return;}if(e.key==='Enter'||e.key===' '){e.preventDefault();selected=i;openPicker(b.getBoundingClientRect());return;}if(!['ArrowLeft','ArrowRight'].includes(e.key))return;e.preventDefault();selected=i;update(s=>{s[i].position=Math.max(0,Math.min(1,s[i].position+(e.key==='ArrowLeft'?-.01:.01)));return s;});};strip.append(b);});
     syncFields();
     if(restoreFocus)(strip.children[selected] as HTMLElement)?.focus();
@@ -70,19 +78,18 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).value=String(c[key]);
     el<HTMLInputElement>('oversampling').checked=c.oversampling===true;
   }
-  function syncFields(){const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));const s=stops[selected];el<HTMLInputElement>('stop-color').value=s.color;el<HTMLInputElement>('stop-color-swatch').value=s.color;el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
+  function syncFields(){const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));const s=stops[selected];colourPicker.sync(s.color);el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
   el('palette-strip').onpointerdown=e=>{if(e.target!==el('palette-strip')||get().stops.length>=8)return;const r=el('palette-strip').getBoundingClientRect();const position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));update(s=>[...s,{position,color:s[selected].color,locked:false}],get().stops.length);};
   const liveColour=(value:string)=>{if(!/^#[0-9a-f]{6}$/i.test(value))return;if(!colourEditRemembered){remember();colourEditRemembered=true;}const stops=paletteStops(get());stops[selected].color=value;const next=withSelectedStop(get(),stops,selected);selected=next.selected;change(next.colors);sync();};
-  el<HTMLInputElement>('stop-color').oninput=e=>liveColour((e.target as HTMLInputElement).value);
-  el<HTMLInputElement>('stop-color-swatch').oninput=e=>liveColour((e.target as HTMLInputElement).value);
+  const colourPicker=setupColourPicker(el('stop-color-swatch'),el<HTMLInputElement>('stop-color'),liveColour);
   popover.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closePicker();(el('palette-strip').children[selected] as HTMLElement)?.focus();}};
   document.addEventListener('pointerdown',e=>{if(!popover.hidden&&!popover.contains(e.target as Node)&&!(e.target as HTMLElement).classList.contains('palette-stop'))closePicker();},true);
   el<HTMLInputElement>('stop-lock').onchange=e=>update(s=>{s[selected].locked=(e.target as HTMLInputElement).checked;return s;});
-  el('stop-delete').onclick=()=>{if(get().stops.length>2)update(s=>s.filter((_,i)=>i!==selected));};
+  el('stop-delete').onclick=()=>{if(get().stops.length>2){closePicker();update(s=>s.filter((_,i)=>i!==selected));(el('palette-strip').children[selected] as HTMLElement)?.focus();}};
   el('palette-reverse').onclick=()=>update(s=>s.map(v=>({...v,position:1-v.position})));
   el('palette-even').onclick=()=>update(s=>s.map((v,i)=>({...v,position:i/s.length})));
   el<HTMLSelectElement>('palette').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value==='')return;const p=PRESETS[Number(value)];commit({...get(),palette:5,repeating:true,stops:[...p.stops],positions:undefined,locks:undefined,hueRotation:0});};
-  for(const [id,all] of [['random-colors',false],['random-palette',true]] as const)el(id).onclick=()=>commit(randomizePalette(get(),all,el<HTMLSelectElement>('random-style').value==='harmonious'));
+  el('random-palette').onclick=()=>{closePicker();commit(randomizePalette(get(),true,false));};
   el('palette-undo').onclick=()=>{const c=undo.pop();if(c){redo.push(validateColors(get()));commit(c,false);}};
   el('palette-redo').onclick=()=>{const c=redo.pop();if(c){undo.push(validateColors(get()));commit(c,false);}};
   for(const [id,key] of [['color-formula','formula'],['color-effect','effect'],['capped-mode','capped']] as const)el<HTMLSelectElement>(id).onchange=e=>commit({...get(),[key]:Number((e.target as HTMLSelectElement).value)});

@@ -34,7 +34,7 @@ describe('explicit durable defaults',()=>{
     expect(normalizePanelSettings({positions:{controls:{x:NaN,y:8},'png-export':{x:20,y:30,width:500},unexpected:{x:0,y:0}},
       opacity:8,accent:'url(evil)',activeTab:'unknown',details:{lighting:true,unexpected:true},controlsHidden:'true'}))
       .toEqual({positions:{'png-export':{x:20,y:30}},opacity:1,accent:'#eba046',activeTab:'tab-main',
-        details:{'edit-palette':false,lighting:true},controlsHidden:false});
+        details:{'edit-palette':false,lighting:true},controlsHidden:false,hideStatusWithMenu:false});
   });
   it('preserves both resizable panels and bounds malformed saved dimensions',()=>{
     const positions=normalizePanelSettings({positions:{

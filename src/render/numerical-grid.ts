@@ -1,6 +1,6 @@
 import Decimal from 'decimal.js';
 import type { FrameView } from './reprojection';
-import type { SampleGridAnchor } from './sample-grid';
+import { estimateBinaryRatio, type SampleGridAnchor } from './sample-grid';
 
 /** Use an existing completed-batch wall time; no extra GPU queries. Follow a
  * slow batch immediately, but shed a transient peak over subsequent batches. */
@@ -57,7 +57,7 @@ export function planNumericalView(
       view.unitsPerPixel.lte(0) || anchor.unitsPerPixel.lte(0) ||
       ![view.width, view.height, limits.maxDimension, limits.maxSamples]
         .every(value => Number.isSafeInteger(value) && value > 0)) return null;
-  const level = view.unitsPerPixel.div(anchor.unitsPerPixel).log(2).floor().toNumber()+(outwardPreview?1:0);
+  const level = Math.floor(estimateBinaryRatio(view.unitsPerPixel, anchor.unitsPerPixel))+(outwardPreview?1:0);
   if (!Number.isSafeInteger(level)) return null;
   // Exact finite-decimal sums must survive cancellation at arbitrarily deep views.
   const nonzero = values.filter(value => !value.isZero());

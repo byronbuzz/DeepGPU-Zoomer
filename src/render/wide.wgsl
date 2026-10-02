@@ -1,3 +1,23 @@
+// Ordinary scalar Mandelbrot variants fix only these appearance-independent
+// calculation choices. Existing variants retain the uniform-controlled path.
+override ORDINARY: bool = false;
+fn sampleMode() -> u32 {
+    if (ORDINARY) { return 0u; }
+    return u.mode;
+}
+fn sampleGrid() -> u32 {
+    if (ORDINARY) { return 1u; }
+    return max(u.supersample, 1u);
+}
+fn sampleCappedPattern() -> u32 {
+    if (ORDINARY) { return 0u; }
+    return u.cappedPattern;
+}
+fn sampleRetainEndpoints() -> bool {
+    if (ORDINARY) { return false; }
+    return u.retainEndpoints != 0u;
+}
+
 // Shared QD-derived transport and recurrence for sensitive perturbation orbits.
 // Coordinates, reference samples and rebased deltas retain all four words.
 struct Wide { x: vec4<f32>, y: vec4<f32>, e: i32 };
@@ -158,7 +178,7 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var delta = injection;
     if (!JULIA) { delta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     var z = wideAdd(wideNorm(Wide(u.wideCentreX, u.wideCentreY, 0)), pixelDelta);
-    if (!JULIA && u.mode == 0u && u.cappedPattern == 0u &&
+    if (!JULIA && sampleMode() == 0u && sampleCappedPattern() == 0u &&
         analyticMandelbrotInterior(z)) {
         // The caller already represents a determined capped sample as (-1,0).
         // n=0 records that no recurrence iterations were executed.
@@ -182,8 +202,8 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     var escaped = z2 > ESCAPE_R2;
     // The ordinary no-skip path can terminate on an exact repeated numerical
     // state. Check sparsely; approximation depends on the remaining budget.
-    let detectPeriodic = !APPROX && u.mode == 0u &&
-        u.cappedPattern == 0u && !wantDerivative;
+    let detectPeriodic = !APPROX && sampleMode() == 0u &&
+        sampleCappedPattern() == 0u && !wantDerivative;
     var checkpointZ = z;
     var checkpointDelta = delta;
     var checkpointReference = referenceIndex;
@@ -194,7 +214,7 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
 
     while (n < u.maxIterations && !escaped) {
         var span = 0u;
-        if (APPROX && (!JULIA || u.mode == 0u) && !direct && referenceIndex > 0u &&
+        if (APPROX && (!JULIA || sampleMode() == 0u) && !direct && referenceIndex > 0u &&
             ((referenceIndex - 1u) % u.laBaseStep) == 0u &&
             referenceIndex + u.laBaseStep < u.refLength &&
             n + u.laBaseStep <= u.maxIterations) {

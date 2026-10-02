@@ -4,7 +4,7 @@ import { RefiningStatus } from '../src/refining-status';
 import { RANGE_DEFAULTS, wheelRangeValue } from '../src/range-controls';
 import { DEFAULT_COLORS, cycleFromSlider } from '../src/logic/colorSettings';
 import { HOME, iterationFromSlider } from '../src/state';
-import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS } from '../src/tuning';
+import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS, tuningSliderValue } from '../src/tuning';
 
 const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
 
@@ -37,29 +37,41 @@ describe('stable refinement display', () => {
   it('does not alter the separate timer or approved stopped and colour-data state', () => {
     const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
     expect(main).toContain("stopped?'Stopped':preparingColourData?colourPreparationLabel(progress)");
-    expect(main).toContain('refinementTime.wheelCameraChange(performance.now())');
+    expect(main).toContain('refinementTime.wheelCameraChange(now)');
     expect(main).toContain('refinementTime.complete(performance.now())');
   });
 });
 
 describe('range defaults and hover wheel', () => {
-  it('covers every existing range with its actual factory value', () => {
+  it('covers every main-panel range with its actual factory coordinate', () => {
     const ids = [...html.matchAll(/<input\b[^>]*id="([^"]+)"[^>]*type="range"/g)].map(match => match[1]).sort();
-    expect(Object.keys(RANGE_DEFAULTS).sort()).toEqual(ids);
+    // Export has its own panel reset; these retired entries are inert without
+    // matching inputs. Keep both exceptions explicit so new omissions fail.
+    const retired=['tuning-hard-budget','tuning-overscan-base','tuning-overscan-max'];
+    expect(Object.keys(RANGE_DEFAULTS).filter(id=>!retired.includes(id)).sort())
+      .toEqual(ids.filter(id=>id!=='png-resolution'));
     expect(iterationFromSlider(RANGE_DEFAULTS['iteration-slider'])).toBe(HOME.iterations);
     expect(cycleFromSlider(RANGE_DEFAULTS.cycle)).toBeCloseTo(DEFAULT_COLORS.cycle);
     expect(RANGE_DEFAULTS.rotation).toBe(0);
-    expect(RANGE_DEFAULTS.speed).toBe(0.7);
+    expect(RANGE_DEFAULTS.speed).toBe(1);
     expect(RANGE_DEFAULTS['panel-opacity']).toBe(0.8);
-    expect(RANGE_DEFAULTS['tuning-batch-target']).toBe(DEFAULT_TUNING.batchTargetMs);
-    expect(RANGE_DEFAULTS['tuning-batch-multiplier']).toBe(DEFAULT_TUNING.batchMultiplier);
+    expect(RANGE_DEFAULTS['tuning-throughput']).toBe(DEFAULT_TUNING.throughput);
+    expect(RANGE_DEFAULTS['tuning-pointer-priority']).toBe(DEFAULT_TUNING.pointerPriority);
+    expect(RANGE_DEFAULTS['tuning-bla-epsilon']).toBe(-DEFAULT_TUNING.blaPrecisionLog2);
     expect(HARD_PIXEL_BUDGETS[RANGE_DEFAULTS['tuning-hard-budget']]).toBe(DEFAULT_TUNING.hardPixelBudget);
     expect(RANGE_DEFAULTS['tuning-overscan-base']).toBe(DEFAULT_TUNING.overscanBase);
     expect(RANGE_DEFAULTS['tuning-overscan-max']).toBe(DEFAULT_TUNING.overscanMax);
     expect(RANGE_DEFAULTS['tuning-depth-gain']).toBe(DEFAULT_TUNING.dynamicDepthGain);
-    expect(RANGE_DEFAULTS['tuning-cap-gain']).toBe(DEFAULT_TUNING.dynamicCapGain);
     for (const [id, key] of [['color-offset','offset'],['hue-rotation','hueRotation'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)
       expect(RANGE_DEFAULTS[id]).toBe(DEFAULT_COLORS[key]);
+  });
+  it('keeps only the approved ordered rendering controls',()=>{
+    const panel=html.match(/<section id="tuning"[\s\S]*?<\/section>/)![0];
+    const controls=[...panel.matchAll(/<input\b[^>]*id="([^"]+)"/g)].map(match=>match[1]);
+    expect(controls).toEqual(['tuning-pointer-refinement','tuning-pointer-priority','tuning-throughput','tuning-depth-gain','tuning-bla-epsilon']);
+    expect(panel).not.toContain('<h2');
+    expect(panel).not.toContain('tuning-help');
+    expect(RANGE_DEFAULTS['tuning-throughput']).toBe(0);
   });
   it('moves one native step, clamps, and avoids fractional drift', () => {
     expect(wheelRangeValue(0.8,0.2,3,'0.1',-100)).toBe(0.9);

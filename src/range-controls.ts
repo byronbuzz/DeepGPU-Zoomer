@@ -4,7 +4,7 @@ import { DEFAULT_TUNING, HARD_PIXEL_BUDGETS } from './tuning';
 
 /** Values in each range's own coordinate system, sourced from app defaults. */
 export const RANGE_DEFAULTS: Record<string, number> = {
-  speed: 0.7,
+  speed: 1,
   'iteration-slider': iterationToSlider(HOME.iterations),
   rotation: HOME.angle ?? 0,
   cycle: cycleToSlider(DEFAULT_COLORS.cycle),
@@ -16,6 +16,7 @@ export const RANGE_DEFAULTS: Record<string, number> = {
   'ambient-light': DEFAULT_COLORS.ambientLight,
   'specular-strength': DEFAULT_COLORS.specularStrength,
   'panel-opacity': 0.8,
+  'tuning-throughput': DEFAULT_TUNING.throughput,
   'tuning-hard-budget': HARD_PIXEL_BUDGETS.indexOf(DEFAULT_TUNING.hardPixelBudget as typeof HARD_PIXEL_BUDGETS[number]),
   'tuning-overscan-base': DEFAULT_TUNING.overscanBase,
   'tuning-overscan-max': DEFAULT_TUNING.overscanMax,

@@ -1,0 +1,9 @@
+.colour-picker{display:grid;gap:10px;min-width:0}
+.colour-picker-preview{height:30px;border:1px solid var(--line);border-radius:4px}
+.colour-picker .colour-picker-channel{display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px;margin:0}
+.colour-picker-channel output{float:none;font-variant-numeric:tabular-nums;color:var(--muted);font-size:11px}
+.colour-picker input[type=range]{grid-column:1/-1;appearance:none;width:100%;height:16px;border:1px solid var(--line);border-radius:8px;margin:3px 0;cursor:pointer}
+.colour-picker input[type=range]::-webkit-slider-thumb{appearance:none;width:16px;height:20px;border:2px solid white;border-radius:4px;background:transparent;box-shadow:0 0 2px #000}
+.colour-picker input[type=range]::-moz-range-thumb{width:12px;height:16px;border:2px solid white;border-radius:4px;background:transparent;box-shadow:0 0 2px #000}
+.colour-picker .colour-picker-h{background:linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)}
+.colour-picker-error{display:block;margin-top:5px;color:#ffb6ad;font-size:11px;line-height:1.4}

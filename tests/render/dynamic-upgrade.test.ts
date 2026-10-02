@@ -8,8 +8,9 @@ describe('incremental Dynamic integration',()=>{
   it('keeps the continuation entry aligned with the ordinary field skip gate',()=>{
     const continued=continuationEntry(shader);
     expect(continued).toContain('if (continuation.resume == 0u && skipKnown) {');
-    expect(continued).toContain('let stateIndex = gid.y * continuation.columns + gid.x;');
-    expect(continued).toContain('let resolved = previous.x >= -1.0 || previous.x <= -(f32(u.maxIterations) + 2.0);');
+    expect(continued).toContain('let stateIndex = position.y * continuation.columns + position.x;');
+    expect(continued).toContain('let resolved = previous.x >= -1.0 || previous.x <= -(f32(u.maxIterations) + 2.0) ||');
+    expect(continued).toContain('(previous.x == -2.0 && previous.y >= f32(u.maxIterations))');
   });
   it('keeps Direct resume exact and publishes only resolved samples',()=>{
     expect(continuationShader).toContain('if (DIRECT) { return iterateDirectContinued(pixel,stateIndex); }');

@@ -3,7 +3,7 @@ import Decimal from 'decimal.js';
 import {WebGpuRenderer,Method,appearanceUpgradeCompatible,blaTableEpsilon,linearBlaPolicy,
   type RenderRequest} from '../src/render/webgpu-renderer';
 import {DEFAULT_COLORS} from '../src/logic/colorSettings';
-import {DEFAULT_TUNING,TUNING_STORAGE_KEY,loadTuning,saveTuning,normalizeTuning,modifiedTuningCount} from '../src/tuning';
+import {DEFAULT_TUNING,loadTuning,saveTuning,normalizeTuning,modifiedTuningCount} from '../src/tuning';
 import {RANGE_DEFAULTS} from '../src/range-controls';
 import {snapshotExportRequest} from '../src/export/render';
 import {PendingContinuationSlot} from '../src/render/pending-continuation';
@@ -32,35 +32,35 @@ const fieldKey=(r:any,q:RenderRequest)=>r.fieldIdentity(q,q.family??'mandelbrot'
 
 describe('Mandelbrot linear BLA precision control',()=>{
   it('keeps the common default and full precision range through normalization and local persistence',()=>{
-    expect(DEFAULT_TUNING.blaPrecisionLog2).toBe(-16);
-    expect(RANGE_DEFAULTS['tuning-bla-epsilon']).toBe(16);
-    expect(normalizeTuning({}).blaPrecisionLog2).toBe(-16);
-    for(const epsilon of [-32,-30,-26,-23,-21,-16,-15,-14]){
+    expect(DEFAULT_TUNING.blaPrecisionLog2).toBe(-14);
+    expect(RANGE_DEFAULTS['tuning-bla-epsilon']).toBe(14);
+    expect(normalizeTuning({}).blaPrecisionLog2).toBe(-14);
+    for(const epsilon of [-24,-23,-21,-16,-15,-14]){
       const tuning=normalizeTuning({blaPrecisionLog2:epsilon});
       expect(tuning.blaPrecisionLog2).toBe(epsilon);
       expect(tuning.directExponent).toBe(14.75);expect(tuning.hardPixelBudget).toBe(0);
       const storage=new Map<string,string>();
       expect(saveTuning(tuning,{setItem:(key,value)=>{storage.set(key,value);}})).toBe(true);
       expect(loadTuning({getItem:key=>storage.get(key)??null}).blaPrecisionLog2).toBe(epsilon);
-      expect(modifiedTuningCount(tuning)).toBe(epsilon===-16?0:1);
+      expect(modifiedTuningCount(tuning)).toBe(epsilon===-14?0:1);
     }
-    expect(normalizeTuning({blaPrecisionLog2:-100}).blaPrecisionLog2).toBe(-32);
+    expect(normalizeTuning({blaPrecisionLog2:-100}).blaPrecisionLog2).toBe(-24);
     expect(normalizeTuning({blaPrecisionLog2:3}).blaPrecisionLog2).toBe(-14);
-    expect(normalizeTuning({blaPrecisionLog2:NaN}).blaPrecisionLog2).toBe(-16);
+    expect(normalizeTuning({blaPrecisionLog2:NaN}).blaPrecisionLog2).toBe(-14);
   });
 
   it('ignores both removed controls while preserving unrelated saved tuning',()=>{
     const legacy={blaEpsilonLog2:-30,blaZoomEpsilonLog2:-1,pointerWeight:7,dynamicDepthGain:7500};
     const normalized=normalizeTuning(legacy);
-    expect(normalized).toMatchObject({blaPrecisionLog2:-16,pointerPriority:1,pointerWeight:2,distributedWeight:1,oldestWeight:1,dynamicDepthGain:7500});
+    expect(normalized).toMatchObject({blaPrecisionLog2:-14,pointerPriority:1,pointerWeight:2,distributedWeight:1,oldestWeight:1,dynamicDepthGain:7500});
     expect(normalized).not.toHaveProperty('blaEpsilonLog2');expect(normalized).not.toHaveProperty('blaZoomEpsilonLog2');
-    const restored=loadTuning({getItem:key=>key===TUNING_STORAGE_KEY?JSON.stringify({version:3,settings:legacy}):null});
-    expect(restored).toMatchObject({blaPrecisionLog2:-16,pointerPriority:1,pointerWeight:2,distributedWeight:1,oldestWeight:1,dynamicDepthGain:7500});
+    const restored=loadTuning({getItem:key=>key==='gpu-zoomer-navigation-tuning-v3'?JSON.stringify({version:3,settings:legacy}):null});
+    expect(restored).toMatchObject({blaPrecisionLog2:-14,pointerPriority:1,pointerWeight:2,distributedWeight:1,oldestWeight:1,dynamicDepthGain:7500});
     expect(normalizeTuning({...legacy,blaPrecisionLog2:-24}).blaPrecisionLog2).toBe(-24);
   });
 
   it('keeps the fixed Julia and quadratic tolerances independent of this control',()=>{
-    for(const epsilon of [-32,-23,-16,-14]){
+    for(const epsilon of [-24,-23,-16,-14]){
       expect(blaTableEpsilon(request(epsilon))).toBe(epsilon);
       expect(blaTableEpsilon(request(epsilon,{family:'julia'}))).toBe(-40);
       expect(blaTableEpsilon(request(epsilon),true)).toBe(-29);
@@ -111,10 +111,10 @@ describe('Mandelbrot linear BLA precision control',()=>{
   });
 
   it('freezes the selected tolerance into an export without altering live controls',()=>{
-    const q=request(-26),exported=snapshotExportRequest(q);
+    const q=request(-24),exported=snapshotExportRequest(q);
     (q.tuning as any).blaPrecisionLog2=-16;
-    expect(exported.tuning?.blaPrecisionLog2).toBe(-26);
-    expect(blaTableEpsilon(exported)).toBe(-26);expect(exported.followView).toBe(false);
+    expect(exported.tuning?.blaPrecisionLog2).toBe(-24);
+    expect(blaTableEpsilon(exported)).toBe(-24);expect(exported.followView).toBe(false);
   });
 
   it('rebuilds a changed table policy using the admitted reference rather than generating it again',async()=>{

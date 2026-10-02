@@ -23,7 +23,7 @@ export function validateDefaults(value:unknown):SavedDefaults {
     (value.randomStyle!=='harmonious'&&value.randomStyle!=='unrestricted'))throw new Error('Saved defaults are invalid.');
   return {appearance:validateColors(value.appearance),tuning:normalizeTuning(value.tuning),speed:value.speed,
     baseIterations:value.baseIterations,dynamicEnabled:value.dynamicEnabled,profilingEnabled:value.profilingEnabled,
-    randomStyle:value.randomStyle as SavedDefaults['randomStyle'],panels:normalizePanelSettings(value.panels)};
+    randomStyle:'unrestricted',panels:normalizePanelSettings(value.panels)};
 }
 export function readDefaults(storage?:Pick<Storage,'getItem'>):{value:SavedDefaults|null;error:string|null}{
   try{

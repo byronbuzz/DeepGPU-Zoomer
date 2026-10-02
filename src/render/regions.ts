@@ -7,12 +7,15 @@ export interface Demand {
   covered: { x: number; y: number; width: number; height: number; spacing?: number }[];
   /** Visible area inside an overscanned work field; deficits here take priority. */
   visible?: {x:number;y:number;width:number;height:number};
+  /** Forecast changes ranking only; current coverage and sample ownership remain authoritative. */
+  predicted?: {x:number;y:number;width:number;height:number;spacing:number};
 }
 export interface RegionTuning {
   pointer: number;
   distributed: number;
   oldest: number;
   pointerRadius: number;
+  pointerRefinement?: boolean;
 }
 /** Flatten once per selection, so every candidate uses the same weighted union. */
 function disjointCoverage(covered: Demand['covered']) {
@@ -75,13 +78,13 @@ export function schedulerService(turn:number,distributed:boolean,rows=false,tuni
   if(!tuning || tuning.pointer===8 && tuning.distributed===4 && tuning.oldest===4)
     return turn%4===0?'oldest':distributed&&turn%2===0&&!rows?'distributed':'pointer';
   const weights=[tuning.pointer,distributed&&!rows?tuning.distributed:0,tuning.oldest]
-    .map(n=>Number.isFinite(n)?Math.max(0,Math.min(20,Math.trunc(n))):0);
+    .map(n=>Number.isFinite(n)?Math.max(0,Math.min(64,Math.trunc(n))):0);
   // Distributed work cannot run in row mode or without sparse refinement.
   if(!weights.some(Boolean))weights[0]=1;
   const total=weights[0]+weights[1]+weights[2];
   const balance=[0,0,0];
   let chosen=0;
-  // Smooth weighted round robin repeats within at most 60 turns. Deriving the
+  // Smooth weighted round robin repeats within at most 192 turns. Deriving the
   // current turn avoids scheduler state changes across compatible retargets.
   for(let n=0;n<((turn-1)%total)+1;n++){
     for(let i=0;i<3;i++)balance[i]+=weights[i];
@@ -142,11 +145,17 @@ export class PendingRegions {
     const visibleArea=v?Math.max(0,Math.min(r.x+r.width,v.x+v.width)-Math.max(r.x,v.x))*
       Math.max(0,Math.min(r.y+r.height,v.y+v.height)-Math.max(r.y,v.y)):0;
     const visiblePriority=deficit>0?8*visibleArea/(r.width*r.height):0;
+    const p=d.predicted;
+    const px=p?Math.max(r.x,p.x):0,py=p?Math.max(r.y,p.y):0;
+    const pw=p?Math.max(0,Math.min(r.x+r.width,p.x+p.width)-px):0;
+    const ph=p?Math.max(0,Math.min(r.y+r.height,p.y+p.height)-py):0;
+    const predictedPriority=pw*ph>0?8*pw*ph/(r.width*r.height)*disjointDeficit(
+      {...r,x:px,y:py,width:pw,height:ph,stride:Math.max(1,p!.spacing)},this.coverage):0;
     // Sparse samples cover stride squared pixels per calculation, but only
     // improve linear resolution by stride. Use that conservative cost benefit.
-    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + visiblePriority + .5 / (1 + Math.hypot(dx,dy) / pointerRadius);
+    if(r.stride>1) return deficit*4*Math.sqrt(r.stride) + visiblePriority + predictedPriority + .5 / (1 + Math.hypot(dx,dy) / pointerRadius);
     const focusWeight=this.distributed&&this.turns%2===1?4:1;
-    return deficit * 4 + visiblePriority + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
+    return deficit * 4 + visiblePriority + predictedPriority + focusWeight / (1 + Math.hypot(dx,dy) / pointerRadius);
   }
   /** Only changes density inside the selected region; never chooses its priority. */
   private nextStride(r:Region,d:Demand,levels:number):number {
@@ -177,7 +186,7 @@ export class PendingRegions {
     // Two oldest turns per eight prevent a moving focus from starving gaps.
     const service=schedulerService(++this.turns,this.distributed,!!rows,tuning);
     // Pointer turns favour navigable detail; other turns retain broad progress.
-    const refinementLevels=service==='pointer'?2:1;
+    const refinementLevels=service==='pointer'&&tuning?.pointerRefinement!==false?2:1;
     const oldest=service==='oldest';
     const pointerRadius=service==='pointer' && tuning && Number.isFinite(tuning.pointerRadius)
       ? Math.max(16,Math.min(512,tuning.pointerRadius)) : 64;

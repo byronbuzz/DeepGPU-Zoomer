@@ -19,12 +19,12 @@ export function translatedContinuationRegion(pending:PendingContinuation,next:Fr
   return region;
 }
 /** One explicit owner. A claimed buffer belongs to the caller's local finally. */
-export class PendingContinuationSlot {
-  private value:PendingContinuation|undefined;
+export class PendingContinuationSlot<T extends PendingContinuation=PendingContinuation> {
+  private value:T|undefined;
   get size(){return this.value?1:0;}
-  park(value:PendingContinuation){if(this.value?.scratch!==value.scratch)this.clear();this.value=value;}
+  park(value:T){if(this.value?.scratch!==value.scratch)this.clear();this.value=value;}
   clear(){const value=this.value;this.value=undefined;value?.scratch.destroy();}
-  claim(identity:ContinuationIdentity,next:FrameView,visible?:Rectangle):PendingContinuation|undefined {
+  claim(identity:ContinuationIdentity,next:FrameView,visible?:Rectangle):T|undefined {
     const value=this.value;if(!value)return;
     const old=value.identity;
     if(old.epoch!==identity.epoch||old.policy!==identity.policy||old.reference!==identity.reference||old.orbit!==identity.orbit||old.table!==identity.table||old.index!==identity.index){this.clear();return;}

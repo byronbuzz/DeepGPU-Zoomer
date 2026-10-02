@@ -1,5 +1,19 @@
 /** Local navigation controls are deliberately separate from saved views. */
 export interface TuningSettings {
+  throughput: number;
+  inwardWorkScale: number;
+  gpuPassScale: number;
+  /** Effective measured inward budget, before region subdivision. */
+  inwardWorkTargetMs: number;
+  publicationTargetMs: number;
+  minimumLogicalSamples: number;
+  minimumPassSamples: number;
+  /** Zero disables elective deferral; cold-work protection is independent. */
+  hardPixelCutoff: number;
+  predictionLookahead: number;
+  targetResidencyMs: number;
+  pointerRefinement: boolean;
+  workgroupShape: WorkgroupShape;
   batchTargetMs: number;
   /** Internal starting allowance for adaptive motion sizing. */
   navigationTargetMs: number;
@@ -25,20 +39,61 @@ export interface TuningSettings {
   blaPrecisionLog2: number;
 }
 
+export const THROUGHPUT_PRESETS = [
+  {name:'Smooth',workScale:1,targetResidencyMs:64},
+  {name:'Balanced',workScale:2,targetResidencyMs:128},
+  {name:'Detailed',workScale:4,targetResidencyMs:32},
+] as const;
+const DELIVERY_BASE = {inwardWorkTargetMs:24,publicationTargetMs:12,
+  minimumLogicalSamples:24_576,minimumPassSamples:16_384} as const;
+const DEFAULT_THROUGHPUT = 0;
+const DEFAULT_PRESET = THROUGHPUT_PRESETS[DEFAULT_THROUGHPUT];
+
 export const DEFAULT_TUNING: Readonly<TuningSettings> = Object.freeze({
+  throughput: DEFAULT_THROUGHPUT,
+  inwardWorkScale: DEFAULT_PRESET.workScale, gpuPassScale: DEFAULT_PRESET.workScale,
+  inwardWorkTargetMs: DELIVERY_BASE.inwardWorkTargetMs*DEFAULT_PRESET.workScale,
+  publicationTargetMs: DELIVERY_BASE.publicationTargetMs*DEFAULT_PRESET.workScale,
+  minimumLogicalSamples: DELIVERY_BASE.minimumLogicalSamples*DEFAULT_PRESET.workScale,
+  minimumPassSamples: DELIVERY_BASE.minimumPassSamples*DEFAULT_PRESET.workScale,
+  hardPixelCutoff: 0, predictionLookahead: 0, targetResidencyMs: DEFAULT_PRESET.targetResidencyMs,
+  pointerRefinement: false, workgroupShape: '16x4',
   motionPreference: 50, batchMultiplier: 16, navigationTargetMs: 16, hardPixelBudget: 0,
   overscanBase: 64, overscanMax: 128,
   dynamicDepthGain: 3000,
   // Preserve 5345's qualified Direct crossover and its deep-transition batching.
   directExponent: 14.75, hdrExponent: 25, batchTargetMs: 8,
-  pointerPriority: 2, pointerWeight: 12, distributedWeight: 3, oldestWeight: 3,
-  pointerRadius: 32, blaRebuildPercent: 100, blaChunkMs: 0, blaPrecisionLog2: -16,
+  pointerPriority: 1, pointerWeight: 2, distributedWeight: 1, oldestWeight: 1,
+  pointerRadius: 32, blaRebuildPercent: 100, blaChunkMs: 0, blaPrecisionLog2: -14,
 });
 
-export const TUNING_STORAGE_KEY = 'gpu-zoomer-navigation-tuning-v3';
-const PREVIOUS_TUNING_STORAGE_KEY = 'gpu-zoomer-navigation-tuning-v2';
+export const TUNING_STORAGE_KEY = 'gpu-zoomer-navigation-tuning-v4';
 export const HARD_PIXEL_BUDGETS = [0, 128, 256, 512, 1024, 2048, 4096, 8192, 16384] as const;
+export const HARD_PIXEL_CUTOFFS = [0, 128, 256, 512, 1024, 2048, 4096, 8192,
+  16384, 32768, 65536, 131072, 262144, 524288, 1048576] as const;
+export const WORKGROUP_SHAPES = ['8x4', '16x4', '8x8', '24x4', '32x4', '64x4'] as const;
+export type WorkgroupShape = typeof WORKGROUP_SHAPES[number];
+/** Four power-of-two stops, evenly spaced along each slider. */
+export const TUNING_SLIDER_RANGES = {
+  inwardWorkScale: {min:.5,max:4,step:0},
+  targetResidencyMs: {min:32,max:256,step:0},
+} as const;
+export type GraduatedTuningKey = keyof typeof TUNING_SLIDER_RANGES;
+export function tuningSliderPosition(key:GraduatedTuningKey,value:number):number {
+  const {min,max}=TUNING_SLIDER_RANGES[key];
+  const bounded=Number.isFinite(value)?Math.max(min,Math.min(max,value)):DEFAULT_TUNING[key];
+  return Math.log(bounded/min)/Math.log(max/min);
+}
+export function tuningSliderValue(key:GraduatedTuningKey,position:number):number {
+  const {min,max}=TUNING_SLIDER_RANGES[key];
+  if(!Number.isFinite(position))return DEFAULT_TUNING[key];
+  if(position<=0)return min;
+  if(position>=1)return max;
+  const value=min*Math.pow(max/min,Math.max(0,Math.min(1,position)));
+  return 2**Math.round(Math.log2(value));
+}
 export const EDITABLE_TUNING_KEYS = [
+  'throughput', 'pointerRefinement',
   'dynamicDepthGain',
   'blaPrecisionLog2',
   'pointerPriority',
@@ -50,29 +105,53 @@ const stepped = (value: unknown, fallback: number, min: number, max: number, ste
   Math.min(max, Math.max(min, Math.round((finite(value, fallback) - min) / step) * step + min));
 
 export function mandelbrotBlaEpsilon(tuning?: Partial<TuningSettings>): number {
-  return stepped(tuning?.blaPrecisionLog2, DEFAULT_TUNING.blaPrecisionLog2, -32, -14, 1);
+  return stepped(tuning?.blaPrecisionLog2, DEFAULT_TUNING.blaPrecisionLog2, -24, -14, 1);
 }
 
-/** Five user-facing levels; preserve the incumbent default scheduling sequence. */
-const POINTER_RATIOS = [1, 2, 4, 6, 8] as const;
+export const POINTER_RATIOS = [1, 2, 4, 8, 16] as const;
+const LEGACY_POINTER_RATIOS = [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64] as const;
+function nearestPointerLevel(ratio:number):number {
+  return POINTER_RATIOS.reduce((best,current,index)=>
+    Math.abs(current-ratio)<Math.abs(POINTER_RATIOS[best]-ratio)?index:best,0);
+}
+function legacyPointerRatio(input:Partial<TuningSettings>):number {
+  if(typeof input.pointerPriority==='number'&&Number.isFinite(input.pointerPriority))
+    return LEGACY_POINTER_RATIOS[stepped(input.pointerPriority,2,0,LEGACY_POINTER_RATIOS.length-1,1)];
+  const legacy=[input.pointerWeight,input.distributedWeight,input.oldestWeight];
+  if(!legacy.some(value=>typeof value==='number'&&Number.isFinite(value)))return POINTER_RATIOS[DEFAULT_TUNING.pointerPriority];
+  const pointer=stepped(input.pointerWeight,12,1,18,1);
+  const distributed=stepped(input.distributedWeight,3,1,18,1);
+  const oldest=stepped(input.oldestWeight,3,1,18,1);
+  const share=pointer/(pointer+distributed+oldest);
+  // Obsolete weight triples were limited to the original five levels.
+  const level=LEGACY_POINTER_RATIOS.slice(0,5).reduce((best,ratio,index)=>
+    Math.abs(ratio/(ratio+2)-share)<Math.abs(LEGACY_POINTER_RATIOS[best]/(LEGACY_POINTER_RATIOS[best]+2)-share)?index:best,0);
+  return LEGACY_POINTER_RATIOS[level];
+}
 function pointerPriorityLevel(input: Partial<TuningSettings>): number {
   if(typeof input.pointerPriority==='number'&&Number.isFinite(input.pointerPriority))
-    return stepped(input.pointerPriority,DEFAULT_TUNING.pointerPriority,0,4,1);
-  const legacy=[input.pointerWeight,input.distributedWeight,input.oldestWeight];
-  if(!legacy.some(value=>typeof value==='number'&&Number.isFinite(value)))return DEFAULT_TUNING.pointerPriority;
-  const pointer=stepped(input.pointerWeight,DEFAULT_TUNING.pointerWeight,1,18,1);
-  const distributed=stepped(input.distributedWeight,DEFAULT_TUNING.distributedWeight,1,18,1);
-  const oldest=stepped(input.oldestWeight,DEFAULT_TUNING.oldestWeight,1,18,1);
-  const share=pointer/(pointer+distributed+oldest);
-  return POINTER_RATIOS.reduce((best,ratio,index)=>
-    Math.abs(ratio/(ratio+2)-share)<Math.abs(POINTER_RATIOS[best]/(POINTER_RATIOS[best]+2)-share)?index:best,0);
+    return stepped(input.pointerPriority,DEFAULT_TUNING.pointerPriority,0,POINTER_RATIOS.length-1,1);
+  return nearestPointerLevel(legacyPointerRatio(input));
 }
 
 export function normalizeTuning(value: unknown): TuningSettings {
   const input = value && typeof value === 'object' ? value as Partial<TuningSettings> : {};
   const pointerPriority=pointerPriorityLevel(input),weightScale=pointerPriority===2?3:1;
+  const throughput=stepped(input.throughput,DEFAULT_TUNING.throughput,0,THROUGHPUT_PRESETS.length-1,1);
+  const preset=THROUGHPUT_PRESETS[throughput];
+  const inwardWorkScale=preset.workScale;
+  const gpuPassScale=inwardWorkScale;
   const next: TuningSettings = {
     ...DEFAULT_TUNING,
+    throughput, inwardWorkScale, gpuPassScale,
+    inwardWorkTargetMs: DELIVERY_BASE.inwardWorkTargetMs*inwardWorkScale,
+    publicationTargetMs: DELIVERY_BASE.publicationTargetMs*gpuPassScale,
+    minimumLogicalSamples: DELIVERY_BASE.minimumLogicalSamples*inwardWorkScale,
+    minimumPassSamples: DELIVERY_BASE.minimumPassSamples*gpuPassScale,
+    hardPixelCutoff: 0, predictionLookahead: 0,
+    targetResidencyMs: preset.targetResidencyMs,
+    pointerRefinement: typeof input.pointerRefinement==='boolean'?input.pointerRefinement:DEFAULT_TUNING.pointerRefinement,
+    workgroupShape: DEFAULT_TUNING.workgroupShape,
     motionPreference: stepped(input.motionPreference, DEFAULT_TUNING.motionPreference, 0, 100, 1),
     batchTargetMs: DEFAULT_TUNING.batchTargetMs,
     navigationTargetMs: DEFAULT_TUNING.navigationTargetMs,
@@ -123,36 +202,44 @@ export function overscanCssPx(speed: number, base: number, max: number): number 
   return base + (max - base) * t;
 }
 
-/** Obsolete manual sizing values must not silently override the adaptive starting policy. */
-export function migrateSavedTuning(value:unknown):TuningSettings {
-    return normalizeTuning(value);
+/** Unversioned durable defaults identify the new format by its throughput field. */
+export function migrateSavedTuning(value:unknown,version?:2|3|4):TuningSettings {
+  const input=value&&typeof value==='object'?value as Partial<TuningSettings>:{};
+  if(version===4||version===undefined&&'throughput' in input)return normalizeTuning(input);
+  let throughput=DEFAULT_TUNING.throughput;
+  const hasSizing=['inwardWorkScale','gpuPassScale','inwardWorkTargetMs','publicationTargetMs','targetResidencyMs']
+    .some(key=>key in input);
+  if(hasSizing){
+    const work='inwardWorkScale' in input?finite(input.inwardWorkScale,NaN):
+      'inwardWorkTargetMs' in input?finite(input.inwardWorkTargetMs,NaN)/DELIVERY_BASE.inwardWorkTargetMs:1;
+    const pass='gpuPassScale' in input?finite(input.gpuPassScale,NaN):
+      'publicationTargetMs' in input?finite(input.publicationTargetMs,NaN)/DELIVERY_BASE.publicationTargetMs:work;
+    const residency='targetResidencyMs' in input?finite(input.targetResidencyMs,NaN):64;
+    const matched=THROUGHPUT_PRESETS.findIndex(preset=>
+      preset.workScale===work&&preset.workScale===pass&&preset.targetResidencyMs===residency);
+    if(matched>=0)throughput=matched;
+  }
+  return normalizeTuning({...input,throughput,pointerPriority:nearestPointerLevel(legacyPointerRatio(input))});
 }
 
 export function loadTuning(storage?: Pick<Storage, 'getItem'>): TuningSettings {
   try {
     const source = storage ?? localStorage;
-    const stored = source.getItem(TUNING_STORAGE_KEY);
-    if (stored) {
-      const parsed: unknown = JSON.parse(stored);
-      if (!parsed || typeof parsed !== 'object' || (parsed as {version?: unknown}).version !== 3) return { ...DEFAULT_TUNING };
-      return migrateSavedTuning((parsed as {settings?: unknown}).settings);
+    for(const version of [4,3,2] as const){
+      const stored=source.getItem(`gpu-zoomer-navigation-tuning-v${version}`);
+      if(!stored)continue;
+      const parsed:unknown=JSON.parse(stored);
+      if(!parsed||typeof parsed!=='object'||(parsed as {version?:unknown}).version!==version)return {...DEFAULT_TUNING};
+      return migrateSavedTuning((parsed as {settings?:unknown}).settings,version);
     }
-    const previous = source.getItem(PREVIOUS_TUNING_STORAGE_KEY);
-    if (!previous) return { ...DEFAULT_TUNING };
-    const parsed: unknown = JSON.parse(previous);
-    if (!parsed || typeof parsed !== 'object' || (parsed as {version?: unknown}).version !== 2) return { ...DEFAULT_TUNING };
-    const old = (parsed as {settings?: unknown}).settings;
-    const settings = old && typeof old === 'object' ? old as Partial<TuningSettings> : {};
-    // Saved values have no factory/explicit provenance. Preserve every supported
-    // choice; only absent/invalid fields adopt current defaults.
-    return migrateSavedTuning(settings);
+    return {...DEFAULT_TUNING};
   } catch { return { ...DEFAULT_TUNING }; }
 }
 
 export function saveTuning(settings: TuningSettings, storage?: Pick<Storage, 'setItem'>): boolean {
   try {
     const values = Object.fromEntries(EDITABLE_TUNING_KEYS.map(key => [key, settings[key]]));
-    (storage ?? localStorage).setItem(TUNING_STORAGE_KEY, JSON.stringify({version: 3, settings: values}));
+    (storage ?? localStorage).setItem(TUNING_STORAGE_KEY, JSON.stringify({version: 4, settings: values}));
     return true;
   } catch { return false; }
 }

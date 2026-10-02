@@ -65,6 +65,8 @@ describe('one compatible unfinished region owner',()=>{
     const renderer:any=Object.assign(Object.create(WebGpuRenderer.prototype),{pendingContinuation:slot,batchCostKey:'',cancelPendingReference:vi.fn(),
       disposed:false,lossHook:{notify:null},publicationEpoch:7,referenceWorker:{cancel:vi.fn()},usedQuadraticWorkers:false,
       activeOperations:new Set(),pendingPipelines:new Map(),pendingRetain:null,ctx:{device:{queue:{onSubmittedWorkDone:async()=>{}}}},
+      ordinaryShapePipelines:new Map(),deferredPipelines:new Map(),deferredModule:null,
+      predictionCost:{reference:null,table:null},deferredPassEstimate:{reference:null,table:null},
       timing:{dispose:vi.fn()},context:{unconfigure:vi.fn()},pending:{reset:vi.fn()}});
     await renderer.dispose();await renderer.dispose();expect(a.destroy).toHaveBeenCalledTimes(1);expect(slot.size).toBe(0);
   });

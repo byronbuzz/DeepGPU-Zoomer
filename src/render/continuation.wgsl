@@ -12,6 +12,33 @@ struct ContinuationRegion {
     states: array<WideContinuation>,
 };
 @group(1) @binding(0) var<storage, read_write> continuation: ContinuationRegion;
+// Another density obligation may have finished this exact sample while its
+// checkpoint was parked. Retire this logical visit once, preserving the work
+// already performed without overwriting the determined field.
+fn retireContinuedSample(stateIndex: u32) {
+    let saved = continuation.states[stateIndex];
+    var skipped = 0u;
+    var skips = 0u;
+    var rebases = 0u;
+    var plain = saved.n;
+    if (!DIRECT) {
+        skipped = saved.skipped;
+        skips = saved.skips;
+        rebases = saved.rebases;
+        plain = saved.n - saved.skipped;
+    }
+    let beforeSkipped = atomicAdd(&stats[0], skipped);
+    let beforeSkips = atomicAdd(&stats[1], skips);
+    let beforeRebases = atomicAdd(&stats[2], rebases);
+    let beforePlain = atomicAdd(&stats[3], plain);
+    if (beforeSkipped > 0xffffffffu - skipped) { atomicAdd(&stats[8], 1u); }
+    if (beforeSkips > 0xffffffffu - skips) { atomicAdd(&stats[9], 1u); }
+    if (beforeRebases > 0xffffffffu - rebases) { atomicAdd(&stats[10], 1u); }
+    if (beforePlain > 0xffffffffu - plain) { atomicAdd(&stats[11], 1u); }
+    atomicAnd(&continuation.pendingBits[stateIndex / 32u], ~(1u << (stateIndex % 32u)));
+    atomicAdd(&stats[6], 1u);
+}
+
 // Direct uses the first three Wide slots for c, z and its Brent checkpoint.
 fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     var offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
