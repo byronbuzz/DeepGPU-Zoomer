@@ -1,14 +1,16 @@
 # Third-party code
 
-GPU-Zoomer-3 is licensed under GPL-3.0-or-later; see LICENSE.
+DeepGPU Zoomer is licensed under GPL-3.0-or-later; see [LICENSE](LICENSE).
 
-The optional completed-image antialias pass in
-`src/render/webgpu-renderer.ts` is a WGSL adaptation of the FXAA v2 shader in
+The retained completed-image antialias shader in
+`src/render/antialias.wgsl` is a WGSL adaptation of the FXAA v2 shader in
 [mattdesl/glsl-fxaa](https://github.com/mattdesl/glsl-fxaa/blob/6cf589554e182fc50ef8ec962e4550184cf4c940/fxaa.glsl),
 revision 6cf589554e182fc50ef8ec962e4550184cf4c940. The repository is Copyright
 (c) 2014 Matt DesLauriers under the MIT License; the adapted shader carries
 Copyright (c) 2011 Armin Ronacher under the BSD 3-Clause License. See
-`licenses/glsl-fxaa-MIT.md` and `licenses/glsl-fxaa-BSD-3-Clause.txt`.
+[licenses/glsl-fxaa-MIT.md](licenses/glsl-fxaa-MIT.md) and
+[licenses/glsl-fxaa-BSD-3-Clause.txt](licenses/glsl-fxaa-BSD-3-Clause.txt).
+The current application exposes oversampling rather than this post-process filter.
 
 The stable sample reuse design follows the coordinate-preserving sample
 movement and selective calculation inspected in
@@ -28,34 +30,38 @@ labelled XaoS-adapted capped final-orbit mappings in `src/render/perturbation.wg
 Copyright Jan Hubicka and Thomas Marsh, 1996–1997, GPL-2.0-or-later.
 The angular argument order and fixed-point palette scale follow that source.
 Smooth escape retains this application's normalized log-log mapping; it does
-not claim to reproduce XaoS's previous/final bailout interpolation. The ten
+not claim to reproduce XaoS's previous/final bailout interpolation. The
 named style effects are original scalar/lighting mappings, not XaoS modes or
 new numerical methods.
 
 The Viridis, Plasma, Inferno, Magma, Cividis, Turbo, Twilight, Spectral,
 Coolwarm and Cubehelix presets are compact sampled adaptations of colormap
 data distributed by Matplotlib 3.10.6. See
-https://github.com/matplotlib/matplotlib/tree/v3.10.6/lib/matplotlib and the
-Matplotlib licence at https://matplotlib.org/stable/project/license.html.
+[Matplotlib 3.10.6 source](https://github.com/matplotlib/matplotlib/tree/v3.10.6/lib/matplotlib)
+and the [Matplotlib licence](https://matplotlib.org/3.10.6/project/license.html).
 
-The arithmetic, GPU reference orbit, perturbation renderer, BLA, reprojection,
-colour settings and associated original tests are adapted from
+The arithmetic, original GPU reference-orbit implementation, perturbation
+renderer, BLA, reprojection and colour settings are adapted from
 [Desarso/mandelbrot-webgpu](https://github.com/Desarso/mandelbrot-webgpu),
 revision 6f03eb2adb2461e3481cbd0ae4403f376c53a455, GPL-3.0-or-later.
-That project credits FractalShark (Matt Renzelmann and contributors, GPL-3.0)
+That project credits [FractalShark](https://github.com/mattsaccount364/FractalShark)
+(Matt Renzelmann and contributors, GPL-3.0)
 for GPU reference-orbit architecture, perturbation, rebasing and acceleration.
 Perturbation is due to K. I. Martin; rebasing and bilinear approximation to
-Zhuoran, with explanations by Claude Heiland-Allen.
+Zhuoran, with [explanations by Claude Heiland-Allen](https://mathr.co.uk/web/deep-zoom.html).
+The current application generates its production reference orbit in a CPU Web
+Worker using BigInt arithmetic, then transfers packed samples to WebGPU.
 
 Julia reference-relative encoding and rebasing are adapted from
 [Timmor77/FractalFlow](https://github.com/Timmor77/FractalFlow),
 revision 42eea6e4a7a5909f687ca49156272cd9a41e2020,
-Copyright Timofei Amosov, Apache-2.0. See licenses/FractalFlow-LICENSE
-and licenses/FractalFlow-NOTICE.
+Copyright Timofei Amosov, Apache-2.0. See
+[licenses/FractalFlow-LICENSE](licenses/FractalFlow-LICENSE) and
+[licenses/FractalFlow-NOTICE](licenses/FractalFlow-NOTICE).
 
 Adaptations include Julia initialization and relative samples, compensated
 mantissas, normalization, iteration-budget handling, camera/presentation,
-exact saved state and independent numerical checks.
+and exact saved state.
 
 The compensated f32-pair helpers in src/arithmetic/compensated.wgsl reuse
 the author's prior WebGPU-Zoomer implementation at revision
@@ -65,7 +71,8 @@ The four-component operations in src/arithmetic/quad.wgsl adapt QD 2.3.24's
 renorm, default sloppy_add and accurate_mul algorithms from
 [BL-highprecision/QD](https://github.com/BL-highprecision/QD), revision
 b1c8ddfd2d4a0f0901a88491524df728a26cbe8e. The adaptation uses f32 components,
-splitter 4097, and normalized exponent-carrying operands. See licenses/QD-LICENSE
-(BSD-3-Clause) and licenses/QD-COPYING for the original notices.
+splitter 4097, and normalized exponent-carrying operands. See
+[licenses/QD-LICENSE](licenses/QD-LICENSE) (BSD-3-Clause) and
+[licenses/QD-COPYING](licenses/QD-COPYING) for the original notices.
 The shared src/render/wide.wgsl recurrence uses these operations for both
 Julia and Mandelbrot, with each family's initialization and pixel injection.

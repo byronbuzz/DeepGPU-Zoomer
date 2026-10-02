@@ -1,380 +1,262 @@
+<div align="center">
+
 # DeepGPU Zoomer
 
-A browser-only Mandelbrot and quadratic Julia explorer. WebGPU computes
-multiprecision reference orbits and compensated, exponent-carrying pixel deltas.
-Coordinates and saved views retain their decimal precision.
+**Explore Mandelbrot and Julia worlds, from the whole set to intricate deep-zoom detail.**
 
-## Run locally
+[![WebGPU](https://img.shields.io/badge/Rendering-WebGPU-E5A344?style=flat-square)](https://www.w3.org/TR/webgpu/) [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square)](https://www.typescriptlang.org/) [![WGSL](https://img.shields.io/badge/Shaders-WGSL-8758C7?style=flat-square)](https://www.w3.org/TR/WGSL/) [![Local computation](https://img.shields.io/badge/Compute-In_your_browser-249B83?style=flat-square)](#introduction) [![GPL](https://img.shields.io/badge/License-GPL--3.0--or--later-B8476B?style=flat-square)](LICENSE)
+
+[Get started](#get-started) · [Controls](#explore) · [Advanced](#advanced) · [References](#references) · [Acknowledgements](#acknowledgements)
+
+</div>
+
+![DeepGPU Zoomer showing the Mandelbrot set and its exploration controls](docs/images/explorer.jpg)
+
+<a id="introduction"></a>
+
+## ✨ Introduction
+
+DeepGPU Zoomer is an interactive fractal explorer built for the browser. Hold to zoom, steer with the pointer, rotate the view, and discover how a point in the Mandelbrot set shapes an entire Julia set. Shape the image with editable palettes, colour formulas, effects and lighting, then save a location, copy an exact view link, or export a high-resolution PNG.
+
+WebGPU handles parallel pixel calculation and presentation. At deeper scales, an arbitrary-precision reference orbit runs in a background worker, while GPU perturbation methods calculate the surrounding detail. Coordinates retain their decimal digits throughout navigation and saved views.
+
+| 🔭 Explore | 🎨 Make it yours | 💾 Keep the view |
+| --- | --- | --- |
+| Mandelbrot and quadratic Julia sets | Editable gradients with 2–8 colour stops | Named locations stored in your browser |
+| Pointer-directed zoom, pan and rotation | 25 colour formulas and 20 optional effects | Exact links with coordinates and appearance |
+| Live Julia preview and built-in locations | Lighting, hue rotation and capped-point patterns | Tiled PNG export at custom resolutions |
+| Progressive detail and optional 2× oversampling | Movable controls and a custom panel accent | Your own saved startup preferences |
+
+The application runs locally on your computer. It has no account system, rendering server or cloud-compute dependency.
+
+<a id="get-started"></a>
+
+## 🚀 Get started
+
+You need Node.js and npm to run the source, plus a browser and GPU that support WebGPU. Use a secure page origin: the local development address below works; a hosted installation should use HTTPS. Browser, operating-system and driver support all matter. See [WebGPU availability](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API).
 
 ```sh
+git clone https://github.com/byronbuzz/DeepGPU-Zoomer.git
+cd DeepGPU-Zoomer
 npm ci
 npm run dev
 ```
 
-Open http://127.0.0.1:5183 in stable Edge or Chrome with hardware WebGPU.
-Node.js/npm are development tools; visitors install nothing. No native helper,
-unsafe browser flags or cloud compute is required. `npm run build` checks
-TypeScript and builds `dist`; `npm run preview` serves that build locally.
+Open **[http://127.0.0.1:5183](http://127.0.0.1:5183)**. The development server uses a fixed port and reports an error if that port is already occupied.
 
-## Explore
-
-- Hold left/right mouse to zoom in/out, steering with the pointer. The default
-  zoom speed is 0.7x. Shift-drag
-  or middle-drag pans; the wheel zooms. On the focused canvas, +/− zoom,
-  arrow keys pan, and Esc stops motion.
-- Refresh recalculates the exact current view and starts a new Time taken
-  interval while keeping the prior image visible. Stop halts refinement and
-  freezes that interval without changing the view; compatible appearance
-  edits still recolour retained data. Navigation or numerical-setting changes
-  resume calculation. Esc remains motion-only.
-- J toggles a small Julia preview. While it is open, left-click/drag selects
-  the exact Mandelbrot point as c without zooming the main view. M opens the
-  selected Julia; M again restores the preserved Mandelbrot view.
-- Main, Colouring and Advanced controls share one movable, resizable tabbed
-  panel. Drag the spare strip above its connected tabs, or focus that strip and use arrow keys. The tab row
-  supports Left/Right/Home/End. Reset panel layout restores its initial size
-  and position. Layout and background opacity are device-local; the footer uses
-  that opacity. Palette and lighting editors are inline disclosure sections.
-- Resize Julia from its bottom-right corner. The previous complete image stays
-  visible until a coherent replacement is ready. Selection updates coalesce;
-  images finish even during continuous dragging. Displayed c labels the
-  displayed image; M always promotes the latest selection with main precision
-  and iteration limit. The preview follows its displayed size and device pixel
-  ratio, subject to GPU capacity, and uses its own
-  1,000-iteration limit, independent of the main viewport's limit.
-- The iteration slider is logarithmic from 1 to 1,000,000 and always sets a
-  fixed limit. Old links that specify dynamic mode retain their explicit
-  iteration limit but no longer enable depth-based increases. Depth uses
-  `10^50.37×` notation without converting the full magnification to a
-  JavaScript number.
-- Palette stops are dragged directly and adjusted with Left/Right. Clicking a
-  stop opens a nonmodal anchored RGB picker; valid hex or swatch edits recolour
-  immediately. New palette edits are seamless repeating gradients and retain
-  2–8 stops, stop-bound randomisation locks, reversal, even spacing and
-  undo/redo. Older non-repeating saved colours still load. Ten compact presets
-  use adapted colours from documented Matplotlib colormaps.
-- Colour mappings retain the original five IDs for smooth escape, classic
-  bands, XaoS binary/colour decomposition and biomorphs. Ten additional
-  formulas use escape scalars or honestly labelled final endpoint coordinates.
-  Endpoint-dependent mappings acquire their missing channels once; scalar-only
-  formula changes reuse the field. Colour spacing uses an exponential slider;
-  whole-image Hue rotation recolours palette, effects and capped samples without
-  changing the numerical field, and old links default to zero rotation;
-  distance lighting explicitly opts into derivative computation. Capped samples
-  default to black, with twelve optional low-cost final-orbit patterns. Five
-  adapt XaoS endpoint ideas; the remaining patterns are original.
-  Capped is not proven interior.
-- Places includes whole-set, Seahorse Valley, period-1215 and structured
-  Mandelbrot/Julia 1e50 views. Moving away clears the preset label.
-- Built-in Places and browser-local saved locations share one editable location
-  chooser/name with distinct IDs. Selection is explicit; saving the current
-  view with a matching name updates that location, while a different-location
-  name collision asks for confirmation. Return Home, fully reset preferences
-  while retaining saved locations, or copy a share link.
-  Coordinates, span, c, iteration limit and appearance round-trip without
-  trimming digits. Old links use default appearance.
-
-Every page load starts at shallow Home (`10^0`, 5,000 iterations). It retains
-saved locations, palette/appearance and panel preferences, but never restores a
-remembered deep camera or iteration budget automatically. A URL hash is parsed
-and staged without starting its calculation; Main shows **Open linked
-location** to apply that exact payload. Copy exact link does not rewrite the
-current address bar, so a base-URL reload remains Home.
-
-## Display and calculation
-
-Completed pixels and their camera, dimensions, family and colour metadata
-publish together before any asynchronous yield. Presentation samples the
-stored image with nearest filtering: enlarged determined pixels have hard
-boundaries. Smooth escape-time colouring remains available; there is no
-spatial blend or temporal crossfade in presentation.
-
-Single-sample escape-colour rendering publishes completed GPU regions while
-the rest of the field is still calculating. The incoming image has explicit
-sample validity and fixed geometry; unknown samples cannot replace determined
-history pixels. Each batch shades its own region, with one initial validity
-pass and one completed-image copy, rather than repeating full-image shading
-or copying for every update. Partial progress is not a completed field.
-
-One renderer-owned queue serves motion and rest at the requested pixel
-spacing. It recursively splits pending rectangles at their midpoint. Zoom-in
-weights pointer detail alongside exposed or poorly resolved coverage. Spatial
-service persists across compatible retargets. Intermediate 8/4/2 sample strides
-compete locally with dense work; there is no whole-viewport stage barrier.
-Sparse actual target samples compete with dense work by
-visible density deficit and calculation cost. Adequate existing coverage
-suppresses sparse work; there is no mandatory whole-view preview stage.
-Sparse samples fill hard-edged display blocks only: the scalar slots between
-them remain unknown until calculated. The compositor prefers finer available
-source coverage, with resolved current-view pixels authoritative at completion.
-Priorities follow the live camera and current-target progress between GPU batches,
-with deterministic broad service so other visible gaps finish. Shading chooses
-the finest available aligned anchor. This adapts XaoS's documented dynamic
-resolution priority principles without its line-reallocation engine.
-
-Camera changes retarget the same calculation process after bounded useful work.
-Releasing the mouse changes demand, without cancelling compatible pending work,
-changing the grid resolution or starting a separate quality stage. Matching
-complex coordinates retain their scalar samples through the existing GPU remap;
-off-grid retained imagery is presentation-only. Once the camera is unchanged,
-the same queue resolves every target pixel. Palette changes reuse scalars.
-
-The footer's refinement percentage is conservative dense-tier progress for the
-current target: only resolved dense target samples and compatible retained
-samples are credited. Sparse preview samples and overlapping presentation
-coverage are not summed. It can decrease or reset as camera demand changes and
-reaches 100% only after the current sampling target and any optional final pass
-have drained. It is not a mathematical accuracy certificate.
-
-Advanced offers optional completed-image antialiasing, off by default. It is a
-single cached low-preset FXAA-style presentation pass over a completed fractal
-image. Compatible sRGB texture views make its filtered reads and attachment
-writes light-correct while retaining 8-bit storage. It does not rerun orbits, alter the numerical field or its coverage
-alpha, filter the DOM HUD, recover missing subpixel detail, or claim to be the
-universally cheapest antialiasing method. Toggling it off presents the retained
-raw completion again. GPU profiling, when supported and enabled, reports this
-pass separately from recurrence and shading. The adapted shader and licenses
-are pinned in `NOTICE.md`.
-
-Before retargeting a partial image, the hard-edge composite is retained as a
-display proxy, including its validity and sample density. One original completed source
-also remains available for broader coverage, including highly magnified coarse
-fallback where partial detail has holes. Proxies never populate numerical
-storage or establish target completion. Priority uses a bounded conservative
-collection of known rectangles and their spacing. Overlaps count only their
-finest density; discarded older hints may cause redundant priority, never false
-scalar validity. Proxies use an anchored presentation lattice: fractional pans do not repeatedly
-round already retained pixels into a different phase. They remain approximate
-display samples until the exact numerical queue covers the current view.
-Retained proxies use half-float internal colour/density storage so broad valid
-samples do not disappear through byte-alpha rounding. The extra precision is
-for sub-byte sample-density metadata, not HDR display. Canvas presentation,
-completed images and PNG exports remain ordinary opaque 8-bit RGB.
-
-Measured expensive batches stalled presentation, so the numerical submission
-floor scales down from roughly 16K samples with the iteration cap; measured cost
-can grow batches toward an eight-millisecond target. Sparse preview density begins
-near 16K anchors. Changes of numerical method, precision or iteration budget reset
-that estimate. Rectangle splitting can make an individual dispatch smaller. This
-trades some numerical throughput for responsiveness; eight milliseconds is a
-sizing target, not a GPU latency guarantee. Input state does not select a different
-batch policy.
-The Julia preview can run between main-stream batches.
-The initial Home view prepares only its direct calculation, shading, sample
-reuse and presentation pipelines; other calculation variants and completed-image
-antialiasing compile asynchronously on first demand. The small retained-image
-pipelines remain ready for synchronous Stop/Refresh capture. At deep Mandelbrot
-scales, every eligible sampling density uses
-one standard linear BLA table to skip reference ranges within its existing
-radius policy. Ordinary Wide recurrence is the local fallback when a skip is
-inapplicable, and changing density does not force recomputation of an already
-calculated sample. Deep main-view Julia iteration colouring uses a separate
--40-bound BLA table; its preview, derivative-distance and per-iteration
-diagnostic modes, and direct Mandelbrot, do not use BLA. Expanded Mandelbrot
-views rebuild the table's conservative offset bound while retaining the orbit.
-Statistics distinguish reference work, pipeline wait, optional table preparation,
-completed-field wall time and copied/computed samples.
-Wide perturbation carries the already decoded absolute reference sample across
-iterations and reuses the current Mandelbrot value for its identical rebase
-comparison; this changes neither the recurrence nor its magnitude test.
-Those wall times include waits and are not GPU timestamp measurements. Optional
-GPU profiling reports pass durations using a bounded asynchronous timestamp
-readback pool when supported. It is off by default; these timings are neither
-hardware cycles nor physical display latency.
-
-## Verification and limits
+To produce the static application:
 
 ```sh
-npm test
 npm run build
-npm run test:browser
+npm run preview
 ```
 
-The browser smoke needs the development server and installed stable Edge.
-It uses an isolated sandboxed profile and covers the current product surface.
-Set `GPU_ZOOMER_URL` and `GPU_ZOOMER_TEST_DIR` to override the server and
-external evidence directory. No browser profiles or recordings belong here.
+The build writes to `dist/`; the preview command prints its local address. A deployed build needs only static hosting with HTTPS. Visitors need no Node.js installation or native helper. There is no alternative rendering backend when WebGPU is unavailable.
 
-The larger independent arithmetic/GPU campaign is preserved as an explicit
-`npm run qualify:numerical` gate for numerical changes. Superseded UI campaigns
-and manual pages are archived under `qualification/archive`, outside default
-test and build discovery. Numerical qualification includes CPU regressions, 20 GPU arithmetic/orbit checks, atomic
-publication across GPU fences, exact copied sample identity, nearest
-magnification/minification, palette reuse, Julia preview/promotion/return,
-rapid family changes, responsive layout and 1440p motion/refinement. Streaming
-checks read actual GPU presentation pixels before field completion, including
-unknown-sample fallback, incompatible Julia constants and partial-field reuse.
-Continuous-stream checks cover same-promise release, exact partial reuse, full-field
-convergence after a pan, sparse anchors versus display-filled unknown slots,
-and camera/palette demand arriving during final readback.
-Proxy checks compare 40 fractional pans with original-source reprojection and
-verify that unmappable history stays transparent, 1024x broad sources survive
-repeated retention, and coarser incoming samples preserve finer available pixels.
-The external suite includes native preview resizing at normal and high DPI;
-the in-app suite checks size-matched preview backing sizes across aspect ratios.
-Seven original numerical views compare 49 raw escape counts each with independently
-structured 512/768-bit direct evaluation, including the difficult 6e-42
-view and both original 1e50 fixtures. An eighth regression preserves the
-reported 10,000-iteration view near (-0.730641524956718, 0.161803892923925),
-span 5.34548e-18, and checks 73 points including the failing pixels and their
-immediate neighbours against the same independent oracles.
+<a id="explore"></a>
 
-These are sampled checks, not universal per-pixel certification. One original
-fixed-cap pixel independently escapes at 19688 while the unaccelerated GPU path
-reports 19679; this remains unresolved. Mandelbrot
-and Julia perturbation share QD-derived four-f32 mantissas for coordinates,
-reference transport, recurrence and rebasing. When BLA is enabled, completed
-dense Mandelbrot or eligible Julia fields and PNG export use the same linear
-approximation policy as navigation samples. Completion means the current
-sampling target is fully resolved under that selected policy, not that it
-matches the no-skip recurrence or an independent oracle. Julia preview,
-derivative-distance and per-iteration diagnostic modes fall back to no skips;
-direct Mandelbrot retains its cheaper compensated-pair path. Neither WGSL nor these tests establish
-universal error-free arithmetic.
-Precision grows through profiles up to
-256 u32 limbs; views beyond that range are rejected.
+## 🧭 Explore
 
-At the reported view the preceding compensated-pair path disagreed at eight
-of those 73 points, including a false escape. Wider transport and recurrence
-repair those sampled counts without changing the iteration cap or oracle.
-They cost more GPU time; this is a fidelity repair, not a throughput improvement.
+Start with **Seahorse Valley** in the Location chooser, or hold the left mouse button over an interesting part of the whole set. Release to let the view finish refining.
 
-A roughly 60 Hz presentation callback rate does not imply 60 newly calculated
-or correctly delivered display frames. Expensive views magnify known samples
-while refinement runs; newly exposed areas use the nearest available edge
-until coverage arrives. New detail may change pixels abruptly, with no blur
-to hide it. Deep fields can take seconds to refine at high resolution.
-The configured ten-million pixel-iteration ceiling is not a speed promise. The
-reference orbit remains separately bounded by device storage and one million
-samples; reference-end rebasing lets pixels continue beyond it. Work counters
-use paired words so high-cap totals do not wrap at 32 bits. Reference/table
-allocations check actual device capacity; BLA preparation yields cooperatively and high-cap
-batches shrink. Cancellation still waits for an already submitted GPU batch.
-GPU loss requires a reload. There is no built-in recording or public deploy.
+| Action | Control |
+| --- | --- |
+| Zoom in / out | Hold left / right mouse button; wheel; hold `+` / `−` |
+| Pan | `Shift`-drag, middle-button drag, or arrow keys |
+| Rotate | `Ctrl`-drag, hold `Ctrl` + Left/Right, or use the Rotation slider |
+| Stop movement | `Esc` |
+| Stop calculation and retain the image | **Stop** |
+| Show / hide controls | Menu button or `Tab` |
+| Fullscreen | `F11`; `Esc` or `F11` exits |
+| Open / close Julia preview | `J` |
+| Open the selected Julia / return to Mandelbrot | `M` |
 
-## Accepted follow-up, 23 September 2026
+Keyboard navigation applies when you are interacting with the canvas rather than typing into a field. While Julia preview is open over Mandelbrot, left-click or left-drag selects the Julia constant instead of zooming in. The preview follows the main iteration limit; **M** opens the latest selection and preserves the Mandelbrot view for your return.
 
-The first status/fixed-controls release is `f1247acc`, based on `f3885de`. The
-isolated 5184 focus experiment (`5f9b5c1`) was rejected and is retained only as
-history. This release changes scheduler turn allocation to four pointer, two
-distributed and two oldest turns
-per eight; its numerical policies, missing-resolution scoring, batching and
-submission path remain the stable ones. The footer shows stationary refinement
-time and stays visible when the control panel is hidden. Colour spacing reaches
-16,384; iteration limits are fixed from 1 to 1,000,000, with Home at 5,000.
+### Main controls
 
-Same-view appearance upgrades that need missing endpoint data now keep the
-previous completed, antialiased image visible and publish the new appearance
-only when its field is complete. Their footer remains at `Refined · 100% ·
-Preparing colour data` with the completed time frozen. Disabling Distance
-Lighting converts its complete retained endpoint field back to the normal field
-without another orbit recurrence. Palette-only edits and re-enabling an already
-prepared effect still recolour without recurrence. The controls toggle is an
-accessible hamburger; it and the footer remain visible while controls are hidden.
+- **Iteration limit** sets the current calculation limit, from **1 to 10,000,000**. Higher limits can reveal more detail around difficult boundaries, at a greater computation cost.
+- **Base iterations** sets the starting limit for Dynamic adjustment. **Dynamic** raises or lowers the effective limit during zooming according to depth. Turn it off to keep a fixed limit.
+- **Home** returns to the whole view of the current family. **Full Reset** restores factory preferences and Mandelbrot Home, while retaining saved locations.
+- **Location** combines built-in places and your saved views. Enter a name and choose **Save location**. Saving the selected location updates it; a collision with another saved name asks before replacement.
+- **Copy exact link** includes the camera, Julia constant, rotation, iteration limit and appearance. Opening a link starts at Home and presents **Open linked location**, so you choose when the linked calculation begins.
+- **Save defaults** stores your preferred appearance, controls, iteration settings and panel settings. Startup still uses the Home camera, never a remembered deep location.
 
-Julia BLA is now enabled for eligible main-view iteration colouring. The same
-practical acceptance standard applies to both fractal families: repeated
-bounded wall benefit and preservation of major structure and useful detail,
-not exact raw iteration equality. The historical
-default-bound Julia probe missed 6 of 49 independently checked points. At the
-tighter -40 bound, four fresh 960×640 spiral renders gave a 23.6% mean wall
-gain (including preparation), with 1.012% changed pixels and the visible
-spiral intact. No escape/capped classification changes were observed in this
-tested view, which had no capped samples; other views, GPUs and
-endpoint-dependent appearances remain unqualified. Patches and raw evidence are in
-`F:\Coding\Temp\GPU-Zoomer-3-julia-practical-20260923\RESULT.md` and the
-earlier `F:\Coding\Temp\GPU-Zoomer-3-julia-bla-20260923\RESULT.md`.
-Use the Codex in-app browser for testing; do not launch an external or headless
-browser. Candidate builds must write outside the directory served on 5183: a
-source revision or unchanged listener does not establish the served bundle.
+### Colour and detail
 
-Julia BLA is accepted for the current scope; broader numerical qualification is
-not a prerequisite for the practical-fidelity target (preserved major structure
-and useful detail) in either Julia or Mandelbrot. Park continuous UI-control
-latency work on the backlog: prioritising existing-data appearance ahead of
-preview, trying temporarily smaller batches, and investigating redundant
-reproject/copy submissions. The bounded colour-response measurement is in
-`F:\Coding\Temp\GPU-Zoomer-3-colour-response-20260923\RESULT.md`; it does not
-establish a change to adopt. Never reinstate the rejected zoom-out numerical-field
-cache or the 5184 scheduler architecture. Retain accepted numerical and BLA gains.
+The **Colouring** tab offers colour formulas, effects, capped-point patterns, colour spacing, palette offset, hue rotation and lighting. Expand **Edit Palette** to choose a preset or edit individual stops with the HSV/hex picker. Drag stops, add or remove them, lock selected colours during randomisation, reverse stops, space them evenly, and undo or redo edits.
 
-Further candidates require evidence before adoption: workgroup, subgroup,
-register, temporary-storage and submission efficiencies; redundant spatial
-dispatch, boundary/solid filling and adaptive subdivision; a retained-image
-row/column experiment; shared series-prefix jumps beyond BLA including their
-preparation cost (no separate change is justified without measured residual
-prefix work beyond current BLA); independent CPU/GPU preparation or pixel overlap, perhaps
-WASM f64/SIMD rather than idle-core parallelism; periodicity beyond Direct,
-reference choice beyond the domain-bound fix, and arithmetic cheaper than the
-accepted two-word BLA jump. Park tolerance loosening, logarithm/comparator
-rewrites, the three-step alignment bridge, wholesale arithmetic replacement,
-and another broad profiler campaign. No fixed 10–15% presentation reserve has
-been established.
+The **Advanced** tab keeps the main detail controls together:
 
-Main begins with Zoom speed and Iteration limit, then retains the Refresh/Stop
-action row. J/M and the preview panel's own controls
-retain Julia open/return behaviour; Main has no separate preview button or
-constant form. Home changes only position and scale for the active family to
-the displayed 10^0 view; Full Reset restores defaults. The footer retains a
-numeric Time taken during held navigation, starting at release; wheel timing
-still starts at the last actual wheel change. Ordinary status retains Refining
-and a fixed-width percentage during motion and for 250ms afterward; its timer
-is unaffected. The controls panel defaults to
-286 CSS pixels wide and resizes from its left, right and bottom edges.
-The Iteration limit has no helper line; each tab's content begins with 8px of
-internal top padding below the unchanged tabs. Colour-data preparation keeps
-its established label. No other status-line words or fields are added.
-Stop also cancels optional preview and colour-data
-preparation. An appearance edit that needs missing data holds the previous
-valid image until Refresh, navigation or a numerical-setting change.
+| Control | What it changes | Factory setting |
+| --- | --- | --- |
+| Throughput | Work scheduling during navigation: Smooth, Balanced or Detailed | **Smooth** |
+| Pointer priority | Relative attention to the pointer area while other regions also receive work | **2×** |
+| 2× Pointer refinement | Additional local detail around the pointer during interaction | **Off** |
+| 2× oversampling | A stationary image calculated at twice the width and height, then resolved for display | **Off** |
+| BLA precision | Mandelbrot approximation tolerance; a larger displayed exponent is stricter | **2¹⁴** |
+| Dynamic gain | Requested iteration increase per tenfold zoom from the current anchor | **3,000** |
 
-Later, investigate preparing missing effect data after visual 100% only if
-inexpensive: retain 100% and frozen time with a separate Preparing colour data
-status, let Stop halt it, and prioritize navigation.
+**When movement stops, refinement automatically uses Detailed throughput.** Your selected throughput remains the preference for navigation. Factory settings are **1×** zoom, Mandelbrot Home, **1,000 iterations** and **Dynamic enabled**. Saved defaults and remembered local preferences may override those settings; startup still uses the Home camera.
 
-The editable location chooser/name, Advanced ordering and labels, and removal
-of Reset panel layout are complete. Fullscreen uses the browser's native F11;
-the application fullscreen button was removed.
-The lazy-log optimisation comparison was not adopted.
+Move the controls by dragging their background and resize the panel from its edges. Advanced also contains panel opacity, accent colour and status visibility. The PNG export panel and Julia preview can be moved independently.
 
-Approved later UI work: retain Colour spacing and Palette offset at the top of
-Colouring, followed by Hue rotation, Palette, Edit Palette, the formula/effect/
-capped selectors and Lighting. Hue rotation affects the whole output
-including capped/effect colours without mutating palette points; presets reset
-rotation, individual palette edits preserve it. More formula/effect ideas need
-their exact approved list recovered first. Exclude solarised, duotone, halftone
-dots, crosshatch, histogram colouring and unapproved gcollombet features.
-Remove the specified “final”, “adapted”, and “XaoS adapted” label fragments and
-the capped-samples explanation. Replace Hide controls with a hamburger and
-use helpful hover-only tooltips. Keep status and the hamburger visible with
-controls hidden and do not change Julia preview visibility. A hard-right
-palette point and light-distance control were cancelled.
+### Save a PNG
 
-Main-view rotation has a −180° to +180° slider, no numerical angle field,
-Ctrl+circular drag or held Ctrl+Left/Right, Shift pan and a centre pivot.
-Ctrl+primary click resets any range slider to its factory setting, including
-rotation to zero; wheel over a visible slider changes that slider directly.
-Locations and exact links retain angle; old records default to zero.
-Home preserves angle; Full Reset clears it. Rotation is navigation and the
-Julia preview remains unrotated. Retained images reproject during rotation;
-rotated numerical grids conservatively decline exact sample remapping.
-Later antialiasing should be sharper, post-image only, after
-completion, with no extra fractal calculation. PNG should export only the
-fractal, with Current viewport, Monitor size and 2× Monitor size as true render
-sizes, retaining view, rotation, palette and AA. Palette-offset animation was
-discussed but not accepted as a requirement.
+Choose **Save PNG** in Main, then select Current viewport, Current display, a 2×–4× display preset, or enter custom dimensions. Display-based presets may request browser permission to detect the current display; custom dimensions remain available without it.
 
-The supplied extreme minibrot fixture has no confirmed mode or Julia constant.
-Do not treat it as a Julia BLA benchmark without clarification, change its
-signs, or start an unbounded extreme render by default. The supplied strings
-are preserved exactly:
+Export captures the view when you press Save PNG and renders independently of subsequent navigation. It preserves the centre, rotation and vertical span; changing the aspect ratio crops or extends the horizontal field. You can cancel an export. Output is limited to **80 million pixels** and **32,768 pixels per dimension**, with additional memory and GPU-capacity checks.
 
-```text
-real: 0.747702709800511938677751194679951319751517984123356800029955785208167644444157656204818392389452328656750204117267778516081822213518192597153358754704375802032457281379095368784237552018288630140584008517944711273258989195162368
-imaginary: 0.0726794346032732975587095198367621143952225859816777610262290490332383495948353245238954438160097885662712500585131971636074018247078694504465727984279787749804571891146232401034066596968505351404825154179221317994167287582546606
-Vertical Span: 7.43268908108426967144683224931870442656439030102003759253629056509268800548072466732357585049928883110527821380512455933576726465936251829303857402392150455973853776948664012767390892121313198148693756459499152306639282336394391e-143
+For the complete control reference, defaults and troubleshooting, see the **[User guide](docs/user-guide.md)**.
+
+![Seahorse Valley rendered in DeepGPU Zoomer with a blue, white and gold palette](docs/images/seahorse-valley.jpg)
+
+*Seahorse Valley, one of the built-in locations. Both images above are captured from the application.*
+
+<a id="advanced"></a>
+
+## 🔬 Advanced: how it works
+
+### Technologies and architecture
+
+The interface uses TypeScript, HTML and CSS without a UI framework. Vite bundles the application and imports WGSL shader sources. [decimal.js](https://mikemcl.github.io/decimal.js/) provides arbitrary-precision decimal camera arithmetic. Native `BigInt` arithmetic drives reference-orbit calculation in a dedicated Web Worker. WebGPU compute pipelines evaluate and shade pixels; render pipelines present them.
+
+| Component | Role |
+| --- | --- |
+| `src/main.ts` | Input, application state, render scheduling, Julia preview and preferences |
+| `src/state.ts`, `src/coordinate.ts`, `src/rotation.ts` | Decimal camera, exact view serialization, coordinate preparation and rotation |
+| `src/render/reference-*.ts` | Background reference generation, packing, transfer and GPU preparation |
+| `src/render/webgpu-renderer.ts` | Numerical method selection, GPU resources, retained fields and publication |
+| `src/render/*.wgsl`, `src/arithmetic/` | Pixel recurrences, compensated arithmetic, field reuse and shading |
+| `src/render/bla.ts` | Hierarchical bivariate linear approximation |
+| `src/render/regions.ts`, `src/render/*grid.ts` | Pending work, coverage and coordinate-preserving sample reuse |
+| `src/gpu/` | Device acquisition, capacity checks, shader compilation and timing |
+| `src/palette-editor.ts`, `src/panels.ts`, `src/tuning.ts` | Appearance editing, movable panels and navigation policies |
+| `src/export/` | Export snapshots, tile planning, readback and PNG encoding |
+
+The current dependency versions are decimal.js **10.6.0**, TypeScript **5.9.3**, Vite **5.4.21** and WebGPU type definitions **0.1.71**. The [lockfile](package-lock.json) records the complete dependency resolution.
+
+```mermaid
+flowchart TD
+    A[Pointer, keyboard and controls] --> B[Decimal camera and view state]
+    B --> C{Numerical method}
+    C --> D[Direct GPU calculation]
+    C --> E[BigInt reference orbit in a worker]
+    E --> F[Packed orbit and BLA preparation]
+    F --> G[GPU perturbation calculation]
+    D --> H[Retained numerical field]
+    G --> H
+    H --> I[Colour and lighting]
+    I --> J[Canvas presentation]
+    K[Palette and appearance] --> I
+    B --> L[Independent PNG export snapshot]
 ```
 
-## Licensing
+See the **[Architecture reference](docs/architecture.md)** for the active data flow, source map and implementation boundaries.
 
-GPL-3.0-or-later. See LICENSE and NOTICE.md for adopted code and attribution.
+### The fractal calculation
+
+Both families use the quadratic recurrence:
+
+$$z_{n+1}=z_n^2+c$$
+
+For Mandelbrot, each pixel supplies $c$ and starts with $z_0=0$. For Julia, every pixel shares the selected $c$, and the pixel coordinate supplies $z_0$.
+
+At shallow scales, a Direct GPU path calculates each orbit using compensated floating-point arithmetic. At deeper scales, the renderer first calculates one high-precision reference trajectory $Z_n$. Nearby pixels follow a smaller displacement $\delta z_n$:
+
+$$\delta z_{n+1}=2Z_n\delta z_n+(\delta z_n)^2+\delta c$$
+
+For Mandelbrot, $\delta c$ varies by pixel. For Julia, the initial displacement varies and $\delta c=0$. This avoids repeating a full arbitrary-precision orbit for every pixel.
+
+### Precision, range and rebasing
+
+The reference worker uses fixed-point `BigInt` arithmetic with profiles of **8, 16, 32, 64, 128 or 256 32-bit limbs**, selected from the scale. Reference generation arrives in resumable chunks; a higher iteration demand can extend a compatible reference from its retained arithmetic state.
+
+GPU deltas use compensated `f32` components and explicit exponents. The deep Wide path uses four components for each real and imaginary part, plus a shared exponent, so very small offsets do not disappear at the ordinary `f32` exponent floor. Julia also uses Wide arithmetic on its direct route.
+
+Rebasing changes the reference-relative representation when the evolving pixel orbit is better expressed closer to the reference origin. Julia uses its own relative initialization and encoding so small separations can survive subtraction from much larger coordinates.
+
+These mechanisms support very deep exploration, but do not imply unlimited precision or mathematical certification. The active profiles, requested iteration count, browser memory and device limits remain finite. Saved-view validation allows decimal spans down to the current profile envelope; actual renderability also depends on pixel scale and orbit requirements.
+
+### Bivariate linear approximation (BLA)
+
+BLA accelerates eligible stretches of a reference trajectory by approximating several perturbation iterations together:
+
+$$\delta z_{n+\ell}\approx A_{n,\ell}\delta z_n+B_{n,\ell}\delta c$$
+
+The implementation composes adjacent steps into a hierarchy of coefficients and validity radii. The GPU takes a skip only when the local radius admits it, and evaluates the full recurrence when a skip is unavailable. The shader also retains escape and rebasing logic around the accelerated path.
+
+**BLA precision** adjusts the local tolerance for Mandelbrot: the displayed range **2¹⁴–2²⁴** corresponds to tolerances **2⁻¹⁴–2⁻²⁴**. A larger displayed value is stricter and may reduce available skips. It does not change the camera's decimal precision or the reference limb count. Eligible Julia rendering uses a separate fixed policy.
+
+This is a local approximation criterion, not an interval-arithmetic proof or a guaranteed global image-error bound. Likewise, a pixel that reaches its iteration cap has not necessarily been proved to belong to the set.
+
+### Reuse, progressive detail and responsive navigation
+
+Several mechanisms work together to keep useful pixels on screen:
+
+- **Coordinate-preserving sample reuse.** Previously calculated values can move into a compatible new field when their sample coordinates match. Numerical identity includes the settings needed to interpret those values correctly.
+- **Reprojection for presentation.** A completed image can be transformed into the moving camera while replacement samples arrive. This temporary presentation is distinct from calculating a new sample.
+- **Pending-region scheduling.** Rectangular work regions balance pointer attention, distributed coverage and older pending work. Uncovered gaps are progressively filled instead of repeatedly replacing the whole image.
+- **Measured batch sizes.** Available GPU timestamps and completion feedback inform work sizing. Navigation throughput chooses a scheduling policy; stationary refinement uses Detailed.
+- **Overscan and retained coverage.** Samples outside the visible area can help with motion and rotated views, subject to bounded field sizes. Rotated views can reuse displayed imagery, but exact numerical-grid remapping is restricted to unrotated grids.
+- **Reference and iteration reuse.** Compatible reference trajectories can be extended, while already escaped samples can remain useful across eligible changes in the iteration cap.
+- **Bounded continuation.** Expensive cold work can advance in bounded portions while retaining its orbit state between submissions.
+- **Coherent publication.** A published image is paired with its camera, dimensions and appearance metadata before the renderer yields, so subsequent presentation knows which view it is showing.
+
+Responsiveness and convergence depend on the scene, resolution, iteration demand and device. Throughput labels are preferences rather than frame-rate guarantees.
+
+### Appearance without unnecessary orbit work
+
+The numerical field and its colour presentation are separate. Palette changes, hue rotation and many scalar-based formulas can recolour retained values. Formulas that need the final orbit endpoint request the additional channels when required. Distance lighting additionally propagates derivative information, so enabling it can require fresh numerical work.
+
+The palette editor provides repeating gradients with **2–8 stops**. Presets include sampled Matplotlib colormaps; colour formulas include smooth escape, iteration bands, decomposition, endpoint-based mappings and scalar patterns. Effects modify colour or relief. Capped-point patterns use the final available orbit data and are artistic representations, not classifications of proven interior points.
+
+**2× oversampling** is a separate stationary quality stage: twice the width and height means four spatial samples per displayed pixel, resolved back to the screen. **2× Pointer refinement** concentrates detail locally during interaction. Oversampling increases final sample count; pointer refinement advances local detail more aggressively.
+
+### PNG export and local state
+
+Large images are rendered in bounded, padded tiles assembled into scanline strips. Padding supplies neighbouring samples where the appearance needs them. A streaming PNG encoder consumes the strips, avoiding a single full-size GPU target. The export captures its own camera and appearance, supports cancellation, and checks both device limits and an export memory budget. A matching completed oversampled image may be reused when available.
+
+Locations, appearance and preferences are stored in browser-local storage. Exact links serialize decimal coordinate strings in the URL fragment. A link preserves the view and appearance, while device-local navigation and panel preferences remain local. Ordinary startup uses Home; the linked view is applied only after you choose to open it.
+
+There is no application analytics client, remote rendering call or automatic upload of saved locations or PNGs. Sharing a copied link is your choice. Browser storage belongs to the origin and browser profile, so clearing it removes locally saved preferences and locations.
+
+<a id="references"></a>
+
+## 📚 References
+
+### Fractal methods and implementations
+
+- **[Claude Heiland-Allen: Deep zoom theory and practice](https://mathr.co.uk/web/deep-zoom.html)** — perturbation, rebasing, BLA and links to the original research and discussions.
+- **[K. I. Martin: SuperFractalThing Maths, linked in mathr's overview](https://mathr.co.uk/blog/2021-05-14_deep_zoom_theory_and_practice.html)** — the perturbation method for deep Mandelbrot zooms, with a link to the archived paper.
+- **[Zhuoran: Another solution to perturbation glitches](https://web.archive.org/web/20230125202704/https://fractalforums.org/f/28/t/4360)** — the original rebasing discussion and pseudocode.
+- **[mandelbrot-webgpu](https://github.com/Desarso/mandelbrot-webgpu)** — the principal upstream foundation for the arithmetic and rendering implementation.
+- **[FractalShark](https://github.com/mattsaccount364/FractalShark)** — high-performance deep-zoom rendering and the architecture credited by the upstream project.
+- **[FractalFlow](https://github.com/Timmor77/FractalFlow)** — Julia reference-relative representation and rebasing techniques.
+- **[XaoS](https://github.com/xaos-project/XaoS), [XaoSjs](https://github.com/xaos-project/XaoSjs) and the [XaoS Developer Guide](https://github.com/xaos-project/XaoS/wiki/Developer%27s-Guide#dynamic-resolution)** — interactive sample reuse, dynamic resolution and colouring ideas.
+- **[QD](https://github.com/BL-highprecision/QD) and [Hida, Li and Bailey's arithmetic paper](https://www.davidhbailey.com/dhbpapers/quad-double.pdf)** — multi-component arithmetic algorithms adapted to `f32` components for the Wide GPU path.
+
+### Browser platform, tools and colour
+
+- **[WebGPU specification](https://www.w3.org/TR/webgpu/), [WGSL specification](https://www.w3.org/TR/WGSL/) and [MDN WebGPU guide](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API)** — GPU computation, shading and browser requirements.
+- **[Web Workers](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API)** — background reference computation.
+- **[decimal.js](https://mikemcl.github.io/decimal.js/), [TypeScript](https://www.typescriptlang.org/), [Vite 5 documentation](https://v5.vite.dev/guide/) and [WebGPU types](https://github.com/gpuweb/types)** — application dependencies and build tooling.
+- **[Matplotlib 3.10.6 colormaps](https://matplotlib.org/3.10.6/users/explain/colors/colormaps.html)** — the source of the sampled scientific colour presets.
+- **[glsl-fxaa](https://github.com/mattdesl/glsl-fxaa)** — source of the retained WGSL antialias shader adaptation; the current interface uses the oversampling controls described above.
+- **[PNG specification](https://www.w3.org/TR/png-3/) and [Compression Streams](https://developer.mozilla.org/en-US/docs/Web/API/Compression_Streams_API)** — the image format and browser compression used for export.
+
+<a id="acknowledgements"></a>
+
+## 💛 Acknowledgements
+
+DeepGPU Zoomer builds on openly shared fractal mathematics, rendering techniques and software. Thank you to the authors and maintainers whose work made it possible.
+
+Thank you to **[Desarso](https://github.com/Desarso/mandelbrot-webgpu)** for publishing mandelbrot-webgpu, and to **[Matt Renzelmann and the FractalShark contributors](https://github.com/mattsaccount364/FractalShark)** for the deep-zoom architecture credited by that upstream project.
+
+Thank you to **K. I. Martin** for perturbation, **Zhuoran** for rebasing and bilinear-approximation work, and **[Claude Heiland-Allen](https://mathr.co.uk/web/deep-zoom.html)** for the explanations and research resources that make these methods accessible. Thanks also to **[Timofei Amosov](https://github.com/Timmor77/FractalFlow)** for FractalFlow and its Julia rendering techniques.
+
+We are grateful to **Jan Hubička, Thomas Marsh, and the [XaoS](https://github.com/xaos-project/XaoS) and [XaoSjs](https://github.com/xaos-project/XaoSjs) contributors** for interactive zooming and colouring ideas; to **Yozo Hida, Xiaoye S. Li, David H. Bailey and the [QD contributors](https://github.com/BL-highprecision/QD)** for multi-component arithmetic; to **Matt DesLauriers and Armin Ronacher** for the [antialias shader sources](https://github.com/mattdesl/glsl-fxaa); and to the **[Matplotlib contributors and colormap authors](https://matplotlib.org/3.10.6/users/explain/colors/colormaps.html)** for the colour resources.
+
+Finally, thank you to the **decimal.js, TypeScript, Vite, WebGPU and browser communities** for the tools and platform that make this application possible.
+
+DeepGPU Zoomer is licensed under **[GPL-3.0-or-later](LICENSE)**. Detailed adaptation provenance, source revisions and third-party licensing are recorded in **[NOTICE.md](NOTICE.md)** and **[licenses/](licenses/)**.
