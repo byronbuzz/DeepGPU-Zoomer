@@ -56,10 +56,10 @@ export const DEFAULT_TUNING: Readonly<TuningSettings> = Object.freeze({
   pointerRefinement: false, workgroupShape: '16x4',
   batchMultiplier: 16, navigationTargetMs: 16,
   overscanBase: 64, overscanMax: 128,
-  dynamicDepthGain: 3000,
+  dynamicDepthGain: 5000,
   // Fixed crossover into perturbation rendering.
   directExponent: 14.75, batchTargetMs: 8,
-  pointerPriority: 1, pointerWeight: 2, distributedWeight: 1, oldestWeight: 1,
+  pointerPriority: 2, pointerWeight: 12, distributedWeight: 3, oldestWeight: 3,
   pointerRadius: 32, blaPrecisionLog2: -14,
 });
 

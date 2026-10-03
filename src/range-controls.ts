@@ -1,6 +1,7 @@
 import { DEFAULT_COLORS, cycleToSlider } from './logic/colorSettings';
 import { HOME, iterationToSlider } from './state';
 import { DEFAULT_TUNING } from './tuning';
+import { DEFAULT_ROTATION_SECONDS, rotationSecondsToSlider } from './colour-rotation';
 
 /** Values in each range's own coordinate system, sourced from app defaults. */
 export const RANGE_DEFAULTS: Record<string, number> = {
@@ -15,7 +16,8 @@ export const RANGE_DEFAULTS: Record<string, number> = {
   'light-elevation': DEFAULT_COLORS.lightElevation,
   'ambient-light': DEFAULT_COLORS.ambientLight,
   'specular-strength': DEFAULT_COLORS.specularStrength,
-  'panel-opacity': 0.8,
+  'panel-opacity': 0.6,
+  'rotation-speed': rotationSecondsToSlider(DEFAULT_ROTATION_SECONDS),
   'tuning-throughput': DEFAULT_TUNING.throughput,
   'tuning-depth-gain': DEFAULT_TUNING.dynamicDepthGain,
   'tuning-bla-epsilon': -DEFAULT_TUNING.blaPrecisionLog2,

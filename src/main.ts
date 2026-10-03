@@ -2,9 +2,9 @@ import './style.css';
 import Decimal from 'decimal.js';
 import { acquireGpu, backingSize, type GpuContext } from './gpu/device';
 import { WebGpuRenderer, Method, type RenderRequest } from './render/webgpu-renderer';
-import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors } from './logic/colorSettings';
+import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors, type ColorSettings } from './logic/colorSettings';
 import { Camera, HOME, MAX_ITERATIONS, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
-import { PLACES } from './places';
+import { setupLocations, type LocationIdentity } from './locations';
 import { setupPanels, normalizePanelSettings } from './panels';
 import { DEFAULTS_STORAGE_KEY, readDefaults, saveDefaults, type SavedDefaults } from './defaults';
 import { setupPngExportPanel } from './export/panel';
@@ -13,6 +13,8 @@ import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
 import { dynamicLimitForZoom } from './dynamic';
 import { setupRangeControls } from './range-controls';
+import { setImageColourSampler } from './colour-picker';
+import { DEFAULT_ROTATION_SECONDS, PALETTE_ROTATION_MULTIPLIER, advanceColourRotation, rotationSecondsFromSlider, rotationSecondsToSlider, rotationDurationLabel } from './colour-rotation';
 import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, POINTER_RATIOS, THROUGHPUT_PRESETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
@@ -21,11 +23,16 @@ const camera=new Camera();
 const defaultsRead=readDefaults();
 let savedDefaults:SavedDefaults|null=defaultsRead.value;
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
+setImageColourSampler((x,y)=>engine?engine.captureDisplayedColour(x,y):Promise.reject(new Error('Image is not ready')),
+  (x,y)=>engine?engine.captureDisplayedColourPatch(x,y):Promise.reject(new Error('Image is not ready')));
 let tuning:TuningSettings=savedDefaults?.tuning??(defaultsRead.error?{...DEFAULT_TUNING}:loadTuning());
 const DYNAMIC_STORAGE_KEY='gpu-zoomer-dynamic-v1';
 let dynamicEnabled=true;
 if(savedDefaults)dynamicEnabled=savedDefaults.dynamicEnabled;
 else if(!defaultsRead.error)try { dynamicEnabled=localStorage.getItem(DYNAMIC_STORAGE_KEY)!=='off'; } catch {}
+let rotationSeconds=savedDefaults?.rotationSeconds??DEFAULT_ROTATION_SECONDS,rotatePalette=savedDefaults?.rotatePalette??false,rotateLight=savedDefaults?.rotateLight??false,reverseRotation=savedDefaults?.reverseRotation??false;
+const colourRotationEditing=new Set<string>();
+let paletteRotationElapsed=0,lightRotationElapsed=0;
 let baseIterations=HOME.iterations,anchorDepth=0,lastDynamicUpdate=0;
 let provisionalNavigationCap=false;
 let sliderEditing=false;
@@ -53,10 +60,8 @@ const keys=new Set<string>();
 // when releasing Shift changes the reported key (for example '+' to '=').
 const heldKeyActions=new Map<string,string>();
 function keyIdentity(e:KeyboardEvent){return e.code||e.key;}
-let saved: {name:string;view:SavedView}[]=[];
-type LocationChoice={kind:'place'|'saved';index:number;name:string};
-let selectedLocation:LocationChoice|null=null;
-let linkedView:SavedView|null=null;
+const locationHistory:{view:SavedView;identity:LocationIdentity|null}[]=[];
+function syncBack(){el<HTMLButtonElement>('location-back').disabled=locationHistory.length===0;}
 const refinementTime=new RefinementTimer(performance.now());
 const refiningStatus=new RefiningStatus();
 const freshness=el('freshness'),depth=el('depth');
@@ -74,7 +79,7 @@ function message(text:string,transient=true){
     messageFadeTimer=window.setTimeout(()=>{if(version===messageVersion){target.textContent='';target.classList.remove('message-fading');}},fadeDelay);
   },3000);
 }
-function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString(),angle:camera.angle,appearance:validateColors(colors)};}
+function snapshot():SavedView{return {...view,x:camera.x.toString(),y:camera.y.toString(),span:camera.span.toString(),angle:camera.angle,appearance:validateColors(colors),rotationSeconds,rotatePalette,rotateLight,reverseRotation};}
 function colourPreparationLabel(progress=engine?.progress()){
   const started=progress&&progress.targets>colourDataTarget&&progress.exactTotalSamples>0&&
     (progress.pending>0||progress.finalizing||progress.exactCompletedSamples<progress.exactTotalSamples);
@@ -220,10 +225,14 @@ function syncControls(){
   syncAppearance();
   syncTuningLabels();
 }
-function load(next:SavedView,record=true){
-  dismissReplacement();
+function load(next:SavedView,record=true,remember=record){
+  const valid=validateView(next);
+  if(remember){locationHistory.push({view:snapshot(),identity:locations.identity()});if(locationHistory.length>32)locationHistory.shift();syncBack();}
+  locations.clear();
   clearTimeout(baseEditTimer);baseEditing=false;
-  const valid=validateView(next);stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;baseIterations=valid.iterations;colors=validateColors(valid.appearance??savedDefaults?.appearance??DEFAULT_COLORS);camera.load(valid);resetDynamicAnchor();generation++;
+  stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;baseIterations=valid.iterations;colors=validateColors(valid.appearance??savedDefaults?.appearance??DEFAULT_COLORS);camera.load(valid);resetDynamicAnchor();generation++;
+  rotationSeconds=valid.rotationSeconds??savedDefaults?.rotationSeconds??DEFAULT_ROTATION_SECONDS;rotatePalette=valid.rotatePalette??savedDefaults?.rotatePalette??false;rotateLight=valid.rotateLight??savedDefaults?.rotateLight??false;reverseRotation=valid.reverseRotation??savedDefaults?.reverseRotation??false;
+  paletteRotationElapsed=lightRotationElapsed=0;colourRotationEditing.clear();syncColourMotion();
   if(view.family==='julia')setPreview(false);
   resize();
   engine?.invalidateHistory();completedQuality=0;dirty=true;lastRevision=-1;lastInteraction=0;error='';refinementTime.demand(performance.now());preparing();message('');syncControls();
@@ -235,7 +244,7 @@ function persist(sync=true){
   if(sync)syncControls();
 }
 function moving(){return direction!==0||dragging||rotating||rotationSliderHeld||controlDown&&rotationKeys.size>0||keys.size>0||performance.now()-lastInteraction<180;}
-function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(qualitySizeError){error='';qualitySizeError=false;}if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();dismissReplacement();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;
+function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(qualitySizeError){error='';qualitySizeError=false;}if(kind==='wheel')refiningStatus.wheel(now);else refiningStatus.start();locations.dismiss();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;dirty=true;lastInteraction=now;
   preparing(now);
 }
 function syncRotation(){el<HTMLInputElement>('rotation').value=String(camera.angle);el('rotation-value').textContent=`${Number(camera.angle.toFixed(1))}°`;}
@@ -244,7 +253,9 @@ function setRotation(angle:number,held=true){const previous=camera.revision;came
 function finishRotation(){rotating=false;controlDown=false;rotationPointerAngle=null;releasePointer();const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);persist();}
 function syncJuliaPreview(){
   const visible=previewEnabled && view.family==='mandelbrot';
+  const opening=visible&&el('julia-preview').hidden;
   el('julia-preview').hidden=!visible;
+  if(opening)el('julia-preview').dispatchEvent(new Event('panelopened'));
   canvas.classList.toggle('selecting-julia',visible);
   el<HTMLButtonElement>('julia-promote').disabled=!selectedJulia;
 }
@@ -319,7 +330,7 @@ function switchJuliaView(){
   if(view.family==='julia'){
     if(juliaReturn){const previous=juliaReturn;juliaReturn=null;load(previous);}
   }else if(selectedJulia){
-    const next=validateView({...HOME,family:'julia',x:'0',jx:selectedJulia.x,jy:selectedJulia.y,iterations:view.iterations,angle:camera.angle,appearance:validateColors(colors)});
+    const next=validateView({...snapshot(),...HOME,family:'julia',x:'0',jx:selectedJulia.x,jy:selectedJulia.y,iterations:view.iterations,angle:camera.angle,appearance:validateColors(colors)});
     juliaReturn=snapshot();load(next);
   }else message('Press J, then select a point for the Julia preview.');
   canvas.focus();
@@ -339,6 +350,7 @@ async function compute(){
   try{
     const result=await engine.render(request());
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;
+      engine.reproject(request(),stopped||refreshHolding);
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
       provisionalNavigationCap=false;
       if(numericalWasPending)refinementTime.complete(performance.now());
@@ -357,6 +369,7 @@ function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
   if(!document.hidden){
+    advanceColourMotion(dt);
     if(controlDown&&rotationKeys.size&&dt){const turn=(rotationKeys.has('ArrowRight')?1:0)-(rotationKeys.has('ArrowLeft')?1:0);if(turn)setRotation(camera.angle+turn*dt*.06);}
     const zoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
     if(zoom && dt){const revision=camera.revision;camera.zoom(-zoom*speed*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){refinementTime.heldCameraChange();changed();updateDynamicForZoom(time,zoom);}}
@@ -407,7 +420,8 @@ canvas.addEventListener('blur',()=>{stop();persist();});
 document.addEventListener('keyup',e=>{if(e.key==='Control'&&(rotating||controlDown)){finishRotation();}
   if(rotationKeys.delete(e.key)){if(keys.size===0&&rotationKeys.size===0&&!direction&&!dragging&&!rotating){const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);}persist();}});
 document.addEventListener('keydown',e=>{
-  if(e.target instanceof HTMLElement&&(e.target.isContentEditable||e.target.closest('input,textarea,select,[role="combobox"],[role="listbox"]')))return;
+  if(e.target instanceof HTMLElement&&(e.target.isContentEditable||e.target.closest('input:not([type="checkbox"]),textarea,select,[role="combobox"],[role="listbox"]')))return;
+  if(e.target instanceof HTMLInputElement&&e.target.type==='checkbox'&&!['j','m'].includes(e.key.toLowerCase()))return;
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key))){e.preventDefault();keys.delete(e.key);if(e.ctrlKey){controlDown=true;rotationKeys.add(e.key);wheelDirection=0;}return;}
   if(e.key==='Escape'&&(rotating||controlDown||rotationSliderHeld)){stop();persist();return;}
   if(e.repeat||e.ctrlKey||e.metaKey||e.altKey)return;
@@ -415,7 +429,7 @@ document.addEventListener('keydown',e=>{
   try{if(key==='j')toggleJuliaPreview();else switchJuliaView();}catch(err){message(String(err));}
 });
 window.addEventListener('blur',()=>{stop();persist();});document.addEventListener('visibilitychange',()=>{stop();persist();previousTime=0;});window.addEventListener('resize',()=>resize());
-el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelectElement).value as Family;if(family===view.family)return;if(family==='mandelbrot'&&juliaReturn){switchJuliaView();return;}if(family==='julia')juliaReturn=snapshot();load({...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations,angle:camera.angle});};
+el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelectElement).value as Family;if(family===view.family)return;if(family==='mandelbrot'&&juliaReturn){switchJuliaView();return;}if(family==='julia')juliaReturn=snapshot();load({...snapshot(),...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations,angle:camera.angle});};
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
 el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(String(err));}};
 el('stop-refinement').onclick=stopRefinement;
@@ -460,69 +474,23 @@ el('tuning-reset').onclick=()=>{
   if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
   syncTuningLabels();refresh();
 };
-const locationEntry=el<HTMLInputElement>('location-entry'),locationOptions=el<HTMLElement>('location-options');
-const replaceLocation=el<HTMLElement>('replace-location');
-let visibleLocations:LocationChoice[]=[],locationOptionsOpen=false,filterLocations=false,activeLocation=-1;
-let pendingReplacement:{name:string;index:number;view:SavedView}|null=null;
-// Location names are shown without category or test prefixes.
-function locationLabel(name:string){return name.replace(/^(?:(?:place|saved)\s*[·:]\s*|test:\s*)+/i,'').trim();}
-function closeLocationOptions(){locationOptionsOpen=false;activeLocation=-1;locationOptions.hidden=true;locationEntry.setAttribute('aria-expanded','false');locationEntry.removeAttribute('aria-activedescendant');}
-function dismissReplacement(){pendingReplacement=null;replaceLocation.hidden=true;}
-function selectLocation(choice:LocationChoice){
-  const item=choice.kind==='place'?PLACES[choice.index]:saved[choice.index];if(!item)return;
-  selectedLocation={...choice,name:item.name};locationEntry.value=locationLabel(item.name);dismissReplacement();closeLocationOptions();load(choice.kind==='place'?PLACES[choice.index]:saved[choice.index].view);
+const locations=setupLocations(snapshot,next=>load(next),message);
+el('location-back').onclick=()=>{const previous=locationHistory.pop();if(!previous)return;load(previous.view,true,false);locations.restore(previous.identity);juliaReturn=null;syncBack();};
+syncBack();
+el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Location link copied.');}catch{message(`Copy this exact link: ${url.href}`);}};
+function openLocationLink(record=true){
+  if(!location.hash)return false;
+  let next:SavedView;
+  try{next=decodeView(location.hash.slice(1));}
+  catch{message('The linked location could not be read. The current view was kept.');return false;}
+  load(next,record);juliaReturn=null;
+  // Consume the fragment so pasting the same link again also opens its view.
+  history.replaceState(history.state,'',location.pathname+location.search);
+  message('Linked location opened.');return true;
 }
-function highlightLocation(){
-  locationOptions.querySelectorAll<HTMLElement>('[role=option]').forEach((item,index)=>item.setAttribute('aria-selected',String(index===activeLocation)));
-  if(activeLocation<0){locationEntry.removeAttribute('aria-activedescendant');return;}
-  const item=locationOptions.querySelectorAll<HTMLElement>('[role=option]')[activeLocation];
-  if(item){locationEntry.setAttribute('aria-activedescendant',item.id);item.scrollIntoView({block:'nearest'});}
-}
-function renderLocationOptions(){
-  const query=filterLocations?locationEntry.value.trim().toLocaleLowerCase():'';
-  visibleLocations=[...saved.map((item,index)=>({kind:'saved' as const,index,name:item.name})).reverse(),...PLACES.map((item,index)=>({kind:'place' as const,index,name:item.name}))]
-    .filter(item=>locationLabel(item.name).toLocaleLowerCase().includes(query));
-  locationOptions.replaceChildren();
-  visibleLocations.forEach((choice,index)=>{
-    const option=document.createElement('div');option.id=`location-option-${index}`;option.className='location-option';option.setAttribute('role','option');
-    option.dataset.locationKind=choice.kind;option.dataset.locationIndex=String(choice.index);
-    option.textContent=locationLabel(choice.name);
-    option.onpointerdown=event=>event.preventDefault();option.onclick=()=>selectLocation(choice);locationOptions.append(option);
-  });
-  if(!visibleLocations.length){const empty=document.createElement('div');empty.className='location-empty';empty.textContent='No matching location. Save to create one.';locationOptions.append(empty);}
-  locationOptions.hidden=!locationOptionsOpen;locationEntry.setAttribute('aria-expanded',String(locationOptionsOpen));highlightLocation();
-}
-locationEntry.onfocus=()=>{filterLocations=false;activeLocation=-1;locationOptionsOpen=true;renderLocationOptions();};
-locationEntry.onclick=()=>{if(!locationOptionsOpen){filterLocations=false;locationOptionsOpen=true;renderLocationOptions();}};
-locationEntry.oninput=()=>{dismissReplacement();filterLocations=true;activeLocation=-1;locationOptionsOpen=true;renderLocationOptions();};
-locationEntry.onblur=()=>setTimeout(()=>{if(document.activeElement!==locationEntry)closeLocationOptions();},0);
-locationEntry.onkeydown=event=>{
-  if(event.key==='ArrowDown'||event.key==='ArrowUp'){
-    event.preventDefault();if(!locationOptionsOpen){filterLocations=false;locationOptionsOpen=true;renderLocationOptions();}
-    if(visibleLocations.length){activeLocation=event.key==='ArrowDown'?(activeLocation+1)%visibleLocations.length:activeLocation<0?visibleLocations.length-1:(activeLocation-1+visibleLocations.length)%visibleLocations.length;highlightLocation();}
-  }else if(event.key==='Enter'&&locationOptionsOpen&&activeLocation>=0){event.preventDefault();selectLocation(visibleLocations[activeLocation]);}
-  else if(event.key==='Escape')closeLocationOptions();
-};
-function storeLocation(name:string,index:number,nextView:SavedView){
-  const next=saved.filter((_,i)=>i!==index),target=next.length;next.push({name,view:nextView});
-  try{localStorage.setItem('gpu-zoomer-locations',JSON.stringify(next));saved=next;selectedLocation={kind:'saved',index:target,name};locationEntry.value=locationLabel(name);dismissReplacement();closeLocationOptions();message(index<0?'Location saved on this browser.':'Location updated on this browser.',true);}
-  catch{dismissReplacement();message('Local storage is unavailable. Copy a share link instead.');}
-}
-el('save').onclick=()=>{
-  const name=locationLabel(locationEntry.value)||`${view.family} ${saved.length+1}`,nextView=snapshot();
-  const selectedIndex=selectedLocation?.kind==='saved'?selectedLocation.index:-1;
-  if(selectedIndex>=0&&saved[selectedIndex]&&locationLabel(saved[selectedIndex].name).toLocaleLowerCase()===name.toLocaleLowerCase()){storeLocation(saved[selectedIndex].name,selectedIndex,nextView);return;}
-  const collision=saved.findIndex(item=>locationLabel(item.name).toLocaleLowerCase()===name.toLocaleLowerCase());
-  if(collision<0){storeLocation(name,-1,nextView);return;}
-  pendingReplacement={name,index:collision,view:nextView};el('replace-location-text').textContent=`Replace saved location “${saved[collision].name}” with this view?`;
-  replaceLocation.hidden=false;closeLocationOptions();el<HTMLButtonElement>('replace-cancel').focus();
-};
-el('replace-cancel').onclick=()=>{dismissReplacement();el<HTMLButtonElement>('save').focus();};
-el('replace-confirm').onclick=()=>{if(!pendingReplacement)return;const {name,index,view:nextView}=pendingReplacement;storeLocation(name,index,nextView);el<HTMLButtonElement>('save').focus();};
-el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Exact view link copied. Reloads stay at Home until the link is explicitly opened.');}catch{message(`Copy this exact link: ${url.href}`);}};
-el('open-linked-location').onclick=()=>{if(!linkedView)return;const next=linkedView;linkedView=null;el('linked-location').hidden=true;load(next);message('Linked location opened.');};
+window.addEventListener('hashchange',()=>openLocationLink());
 const panelController=setupPanels(savedDefaults?.panels??(defaultsRead.error?normalizePanelSettings(null):undefined));
-const paletteController=setupPaletteEditor(()=>colors,c=>{
+function applyAppearance(c:ColorSettings,persistLater=true){
   const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));
   const completedBefore=currentFieldComplete()||preparingColourData;
   colors=c;
@@ -531,8 +499,8 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
     const missingData=previous.mode!==c.mode||needsEndpoints(c)&&!engine?.endpointChannelsRequired();
     const numericalChange=missingData||previous.supersample!==c.supersample||previous.oversampling!==c.oversampling;
     if(stopped&&previous.supersample===c.supersample&&previous.oversampling===c.oversampling){
-      generation++;engine?.abort();preparingColourData=false;dirty=false;
-      stoppedAppearancePending=true;
+      if(persistLater){generation++;engine?.abort();}
+      preparingColourData=false;dirty=false;stoppedAppearancePending=true;
     }else{
       if(stopped||previous.oversampling!==c.oversampling){stopped=false;refinementTime.demand(performance.now());}
       if(numericalChange){
@@ -543,16 +511,46 @@ const paletteController=setupPaletteEditor(()=>colors,c=>{
         if(!preparingColourData)completedQuality=0;
         generation++;engine?.abort();preparing();
       }
-      dirty=true;if(previewEnabled)queuePreview();
+      dirty=true;if(previewEnabled&&(persistLater||!previewBusy&&!previewPending))queuePreview();
     }
   }
-  clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);
-});
+  if(persistLater){clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);}
+}
+const paletteController=setupPaletteEditor(()=>colors,applyAppearance);
 syncAppearance=paletteController.sync;
 setupRangeControls();
+function syncColourMotion(){
+  const control=el<HTMLInputElement>('rotation-speed');control.value=String(rotationSecondsToSlider(rotationSeconds));
+  const label=rotationDurationLabel(rotationSeconds);el('rotation-speed-value').textContent=label;control.setAttribute('aria-valuetext',`${label} per light rotation; ${rotationDurationLabel(rotationSeconds*PALETTE_ROTATION_MULTIPLIER)} per palette cycle`);
+  el<HTMLInputElement>('rotate-palette').checked=rotatePalette;el<HTMLInputElement>('rotate-light').checked=rotateLight;
+  el<HTMLInputElement>('rotation-reverse').checked=reverseRotation;
+}
+function advanceColourMotion(dt:number){
+  const palette=rotatePalette&&!colourRotationEditing.has('color-offset'),light=rotateLight&&!colourRotationEditing.has('light-angle');
+  paletteRotationElapsed=palette?paletteRotationElapsed+dt:0;lightRotationElapsed=light?lightRotationElapsed+dt:0;
+  if(busy||!paletteRotationElapsed&&!lightRotationElapsed)return;
+  // Keep the submitted appearance stable until it is displayed; retain elapsed time.
+  let next=advanceColourRotation(colors,paletteRotationElapsed/1000,rotationSeconds,true,false,reverseRotation);
+  next=advanceColourRotation(next,lightRotationElapsed/1000,rotationSeconds,false,true,reverseRotation);
+  paletteRotationElapsed=lightRotationElapsed=0;applyAppearance(next,false);
+  if(palette)el<HTMLInputElement>('color-offset').value=String(colors.offset);
+  if(light)el<HTMLInputElement>('light-angle').value=String(colors.lightAngle);
+}
+el<HTMLInputElement>('rotation-speed').oninput=event=>{rotationSeconds=rotationSecondsFromSlider(Number((event.currentTarget as HTMLInputElement).value));syncColourMotion();persist(false);};
+el<HTMLInputElement>('rotation-reverse').onchange=event=>{reverseRotation=(event.currentTarget as HTMLInputElement).checked;paletteRotationElapsed=lightRotationElapsed=0;persist(false);};
+el<HTMLInputElement>('rotate-palette').onchange=event=>{rotatePalette=(event.currentTarget as HTMLInputElement).checked;persist(false);};
+el<HTMLInputElement>('rotate-light').onchange=event=>{rotateLight=(event.currentTarget as HTMLInputElement).checked;persist(false);};
+for(const id of ['color-offset','light-angle']){
+  const input=el<HTMLInputElement>(id);input.addEventListener('pointerdown',()=>colourRotationEditing.add(id));
+  input.addEventListener('keydown',event=>{if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End','PageUp','PageDown'].includes(event.key))colourRotationEditing.add(id);});
+  input.addEventListener('keyup',()=>colourRotationEditing.delete(id));input.addEventListener('blur',()=>colourRotationEditing.delete(id));
+}
+window.addEventListener('pointerup',()=>colourRotationEditing.clear());window.addEventListener('pointercancel',()=>colourRotationEditing.clear());
+window.addEventListener('blur',()=>colourRotationEditing.clear());
+syncColourMotion();
 el('save-defaults').onclick=()=>{
   if(baseEditing){const raw=baseInput.value.trim();if(!/^\d+$/.test(raw)){message('Base iterations must be a positive whole number.');return;}if(!setManualBase(Number(raw)))return;}
-  const next:SavedDefaults={appearance:validateColors(colors),tuning:{...tuning},speed,baseIterations,dynamicEnabled,
+  const next:SavedDefaults={appearance:validateColors(colors),tuning:{...tuning},speed,baseIterations,dynamicEnabled,rotationSeconds,rotatePalette,rotateLight,reverseRotation,
     panels:panelController.snapshot()};
   const result=saveDefaults(next);
   if(result.error){message(result.error);return;}
@@ -560,27 +558,27 @@ el('save-defaults').onclick=()=>{
 };
 el('full-reset').onclick=()=>{
   clearTimeout(wheelSave);clearTimeout(appearanceSave);clearTimeout(baseEditTimer);baseEditing=false;clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);
-  stop();setPreview(false);previewEngine?.abort();selectedJulia=null;juliaReturn=null;linkedView=null;
+  stop();setPreview(false);previewEngine?.abort();selectedJulia=null;juliaReturn=null;
+  rotationSeconds=DEFAULT_ROTATION_SECONDS;rotatePalette=false;rotateLight=false;reverseRotation=false;paletteRotationElapsed=lightRotationElapsed=0;colourRotationEditing.clear();syncColourMotion();
   speed=1;el<HTMLInputElement>('speed').value='1';el('speed-value').textContent='1.0×';
-  selectedLocation=null;locationEntry.value='';dismissReplacement();closeLocationOptions();
+  locations.clear();locationHistory.length=0;syncBack();
   tuning={...DEFAULT_TUNING};saveTuning(tuning);syncTuningLabels();
   dynamicEnabled=true;try{localStorage.setItem(DYNAMIC_STORAGE_KEY,'on');}catch{}
   savedDefaults=null;
   let resetStorageFailed=false;
   try{localStorage.removeItem(DEFAULTS_STORAGE_KEY);localStorage.removeItem('gpu-zoomer-view');localStorage.removeItem('gpu-zoomer-layout');}catch{resetStorageFailed=true;}
-  history.replaceState(null,'',location.pathname+location.search);el('linked-location').hidden=true;
+  history.replaceState(null,'',location.pathname+location.search);
   pngExportPanel.reset();panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message(resetStorageFailed?'Factory settings restored for this session, but stored defaults could not be cleared.':'Defaults restored. Saved locations were kept.',!resetStorageFailed);
+  el<HTMLButtonElement>('reset').focus();
 };
 const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,viewport:()=>({width:canvas.width,height:canvas.height}),captureQuality:(snapshot,width,height)=>engine?.captureMatchingQuality(snapshot,width,height)??null});
 void (async()=>{
-  try{saved=JSON.parse(localStorage.getItem('gpu-zoomer-locations')||'[]').map((s:{name:string;view:unknown})=>({name:String(s.name),view:validateView(s.view)}));}catch{saved=[];}
   let rememberedAppearance=savedDefaults?.appearance??DEFAULT_COLORS;
   if(!savedDefaults&&!defaultsRead.error)try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
   if(savedDefaults){speed=savedDefaults.speed;}
   el<HTMLInputElement>('speed').value=String(speed);el('speed-value').textContent=speed.toFixed(1)+'×';
-  let linkedError=false;if(location.hash){try{linkedView=decodeView(location.hash.slice(1));}catch{linkedError=true;}}
   load({...HOME,iterations:savedDefaults?.baseIterations??HOME.iterations,appearance:validateColors(rememberedAppearance)},false);
-  el('linked-location').hidden=!linkedView;if(linkedError)message('The linked view could not be read; showing Home.');else if(defaultsRead.error)message(defaultsRead.error);
+  if(location.hash){openLocationLink(false);}else if(defaultsRead.error)message(defaultsRead.error);else if(locations.storageError)message('Saved locations could not be read. Saving and deletion are disabled to preserve the stored data.');else if(locations.recoveryError)message('Default locations could not be added. Your existing saved locations were kept.');
   resize();requestAnimationFrame(tick);
   try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});}
   catch(e){error=String(e);message(error);throw e;}

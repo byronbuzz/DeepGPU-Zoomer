@@ -1,6 +1,6 @@
 import type { GpuContext } from '../gpu/device';
 import type { RenderRequest } from '../render/webgpu-renderer';
-import { DisplayDimensions } from './display';
+import { displayPixels } from './display';
 import { checkedExportDimensions } from './layout';
 import { canReuseExportPixels, encodeCapturedExport, renderPng, snapshotExportRequest, type CapturedExport } from './render';
 
@@ -11,18 +11,17 @@ export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;re
   const close=get<HTMLButtonElement>('png-export-close'),save=get<HTMLButtonElement>('png-save');
   const slider=get<HTMLInputElement>('png-resolution'),width=get<HTMLInputElement>('png-width'),height=get<HTMLInputElement>('png-height');
   const label=get<HTMLOutputElement>('png-resolution-label'),dimensions=get<HTMLElement>('png-dimensions'),status=get<HTMLElement>('png-status');
-  const names=['Current viewport','Current display','2× display','3× display','4× display'];
+  const names=['Current viewport','Display estimate','2× display estimate','3× display estimate','4× display estimate'];
   let custom=false,configured=false,saving=false,presetAvailable=true,qualityInitialized=false;
   let exportController:AbortController|undefined;
   const cancel=()=>{exportController?.abort(new DOMException('Export cancelled.','AbortError'));if(saving){status.textContent='Cancelling export…';describe();}};
-  const display=new DisplayDimensions(()=>{if(!custom&&Number(slider.value)>0)refreshPreset();});
   const readChoice=()=>checkedExportDimensions(Number(width.value),Number(height.value));
   const describe=()=>{
     const index=Number(slider.value);
     label.value=custom?'Custom':names[index];
     slider.setAttribute('aria-valuetext',names[index]);
     let valid=false;
-    if(!custom&&!presetAvailable)dimensions.textContent=`${names[index]} unavailable: ${display.reason}. Enter custom dimensions below.`;
+    if(!custom&&!presetAvailable)dimensions.textContent='Display size unavailable. Enter custom dimensions below.';
     else try{const size=readChoice();dimensions.textContent=`${size.width.toLocaleString()} × ${size.height.toLocaleString()} pixels`;valid=true;}
     catch(reason){dimensions.textContent=reason instanceof Error?reason.message:String(reason);}
     save.textContent=saving?(exportController?.signal.aborted?'Cancelling…':'Cancel export'):'Save PNG';
@@ -30,12 +29,13 @@ export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;re
   };
   function refreshPreset(){
     if(custom||saving)return;
-    const index=Number(slider.value),size=index===0?options.viewport():display.pixels();
+    const index=Number(slider.value),size=index===0?options.viewport():displayPixels();
     presetAvailable=!!size;
     if(size){const scale=index===0?1:index;width.value=String(size.width*scale);height.value=String(size.height*scale);}
     configured=true;describe();
   }
   open.onclick=()=>{
+    const opening=panel.hidden;
     panel.hidden=false;open.setAttribute('aria-expanded','true');
     if(!qualityInitialized&&options.request().colors.oversampling&&!saving){
       qualityInitialized=true;
@@ -45,6 +45,7 @@ export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;re
       }
     }
     if(!configured||!custom)refreshPreset();else describe();
+    if(opening)panel.dispatchEvent(new Event('panelopened'));
     close.focus();
   };
   const hide=()=>{cancel();panel.hidden=true;open.setAttribute('aria-expanded','false');open.focus();};
@@ -54,7 +55,6 @@ export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;re
   });
   slider.oninput=()=>{
     custom=false;status.textContent='';refreshPreset();
-    if(Number(slider.value)>0)void display.choose();
   };
   for(const input of [width,height])input.oninput=()=>{custom=true;presetAvailable=true;status.textContent='';describe();};
   window.addEventListener('resize',()=>{queueMicrotask(()=>{if(!panel.hidden&&!custom)refreshPreset();});});
@@ -62,7 +62,7 @@ export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;re
     if(saving){cancel();return;}
     let ctx:GpuContext|undefined;
     try{
-      if(!custom&&!presetAvailable)throw Error('Choose Custom dimensions or allow display detection.');
+      if(!custom&&!presetAvailable)throw Error('Display size unavailable. Enter custom dimensions.');
       const choice=readChoice();ctx=options.context();if(!ctx)throw Error('The GPU is not ready to export.');
       const snapshot=snapshotExportRequest(options.request());
       exportController=new AbortController();const signal=exportController.signal;

@@ -66,7 +66,7 @@ Start with **Seahorse Valley** in the Location chooser, or hold the left mouse b
 | Rotate | `Ctrl`-drag, hold `Ctrl` + Left/Right, or use the Rotation slider |
 | Stop movement | `Esc` |
 | Stop calculation and retain the image | **Stop** |
-| Show / hide controls | Menu button or `Tab` |
+| Show / hide controls | Menu button or `Tab` while focused on the fractal |
 | Fullscreen | `F11`; `Esc` or `F11` exits |
 | Open / close Julia preview | `J` |
 | Open the selected Julia / return to Mandelbrot | `M` |
@@ -77,33 +77,33 @@ Keyboard navigation applies when you are interacting with the canvas rather than
 
 - **Iteration limit** sets the current calculation limit, from **1 to 10,000,000**. Higher limits can reveal more detail around difficult boundaries, at a greater computation cost.
 - **Base iterations** sets the starting limit for Dynamic adjustment. **Dynamic** raises or lowers the effective limit during zooming according to depth. Turn it off to keep a fixed limit.
-- **Home** returns to the whole view of the current family. **Full Reset** restores factory preferences and Mandelbrot Home, while retaining saved locations.
-- **Location** combines built-in places and your saved views. Enter a name and choose **Save location**. Saving the selected location updates it; a collision with another saved name asks before replacement.
-- **Copy exact link** includes the camera, Julia constant, rotation, iteration limit and appearance. Opening a link starts at Home and presents **Open linked location**, so you choose when the linked calculation begins.
-- **Save defaults** stores your preferred appearance, controls, iteration settings and panel settings. Startup still uses the Home camera, never a remembered deep location.
+- **Home** returns to the whole view of the current family. **Full Reset** in Advanced restores factory preferences and Mandelbrot Home, while retaining saved locations.
+- **Location** combines built-in places and your saved views. Enter a name and choose **Save location**. Saving the selected location updates it; a collision with another saved name asks before replacement. **Delete location** removes a selected saved entry after confirmation, keeping the current view. **Back** restores the exact view before your last location jump, including Home or a family change; its history lasts for this session.
+- **Copy Link** includes the camera, Julia constant, camera rotation, iteration limit, appearance and colour rotation checkbox states and speed. Saved locations preserve the same settings. Paste the link into the browser address bar and press Enter to open that exact location immediately, including in an already open explorer.
+- **Save defaults** at the bottom of Advanced stores your preferred appearance, controls, iteration settings and panel settings. Startup still uses the Home camera, never a remembered deep location.
 
 ### Colour and detail
 
-The **Colouring** tab offers colour formulas, effects, capped-point patterns, colour spacing, palette offset, hue rotation and lighting. Expand **Edit Palette** to choose a preset or edit individual stops with the HSV/hex picker. Drag stops, add or remove them, lock selected colours during randomisation, reverse stops, space them evenly, and undo or redo edits.
+The **Colouring** tab offers colour formulas, effects, capped-point patterns, colour spacing, Palette Offset, Hue Offset and lighting. Expand **Edit Palette** to choose a preset or edit individual stops with the 2D swatch, hue and hex picker, including an eyedropper with a magnified pixel preview for sampling the image. Drag stops, add or remove them, lock selected colours during randomisation, reverse stops, space them evenly, and undo or redo edits. Palette Offset and Light Direction each have a **rotate** checkbox; Advanced's **Rotation speed** ranges from 1 second to 1 minute per light rotation (default 10 seconds). Palette rotation takes four times as long, from 4 seconds to 4 minutes per cycle. Move the speed slider right for faster rotation; Reverse direction reverses both rotations.
 
 The **Advanced** tab keeps the main detail controls together:
 
 | Control | What it changes | Factory setting |
 | --- | --- | --- |
 | Throughput | Work scheduling during navigation: Smooth, Balanced or Detailed | **Smooth** |
-| Pointer priority | Relative attention to the pointer area while other regions also receive work | **2×** |
+| Pointer priority | Relative attention to the pointer area while other regions also receive work | **4×** |
 | 2× Pointer refinement | Additional local detail around the pointer during interaction | **Off** |
 | 2× oversampling | A stationary image calculated at twice the width and height, then resolved for display | **Off** |
 | BLA precision | Mandelbrot approximation tolerance; a larger displayed exponent is stricter | **2¹⁴** |
-| Dynamic gain | Requested iteration increase per tenfold zoom from the current anchor | **3,000** |
+| Dynamic gain | Requested iteration increase per tenfold zoom from the current anchor | **5,000** |
 
 **When movement stops, refinement automatically uses Detailed throughput.** Your selected throughput remains the preference for navigation. Factory settings are **1×** zoom, Mandelbrot Home, **1,000 iterations** and **Dynamic enabled**. Saved defaults and remembered local preferences may override those settings; startup still uses the Home camera.
 
-Move the controls by dragging their background and resize the panel from its edges. Advanced also contains panel opacity, accent colour and status visibility. The PNG export panel and Julia preview can be moved independently.
+Move the controls by dragging their background or tab headers and resize their width from the side edges. Each tab fits its content, scrolling when it reaches the bottom margin of the viewport. Main’s **Controls** accordion contains the keyboard and mouse guide. Advanced also contains panel opacity, accent colour and status visibility. The PNG export panel and Julia preview can be moved independently.
 
 ### Save a PNG
 
-Choose **Save PNG** in Main, then select Current viewport, Current display, a 2×–4× display preset, or enter custom dimensions. Display-based presets may request browser permission to detect the current display; custom dimensions remain available without it.
+Choose **Save PNG** in Main, then select Current viewport, Display estimate, a 2×–4× display estimate, or enter custom dimensions. Display estimates use browser-reported screen dimensions and pixel ratio without requesting permissions; browser zoom can affect the estimate.
 
 Export captures the view when you press Save PNG and renders independently of subsequent navigation. It preserves the centre, rotation and vertical span; changing the aspect ratio crops or extends the horizontal field. You can cancel an export. Output is limited to **80 million pixels** and **32,768 pixels per dimension**, with additional memory and GPU-capacity checks.
 
@@ -217,7 +217,7 @@ The palette editor provides repeating gradients with **2–8 stops**. Presets in
 
 Large images are rendered in bounded, padded tiles assembled into scanline strips. Padding supplies neighbouring samples where the appearance needs them. A streaming PNG encoder consumes the strips, avoiding a single full-size GPU target. The export captures its own camera and appearance, supports cancellation, and checks both device limits and an export memory budget. A matching completed oversampled image may be reused when available.
 
-Locations, appearance and preferences are stored in browser-local storage. Exact links serialize decimal coordinate strings in the URL fragment. A link preserves the view and appearance, while device-local navigation and panel preferences remain local. Ordinary startup uses Home; the linked view is applied only after you choose to open it.
+Locations, appearance and preferences are stored in browser-local storage. Exact links serialize decimal coordinate strings in the URL fragment. A link preserves the view and appearance, while device-local navigation and panel preferences remain local. Ordinary startup uses Home; pasted location links open their views immediately.
 
 There is no application analytics client, remote rendering call or automatic upload of saved locations or PNGs. Sharing a copied link is your choice. Browser storage belongs to the origin and browser profile, so clearing it removes locally saved preferences and locations.
 

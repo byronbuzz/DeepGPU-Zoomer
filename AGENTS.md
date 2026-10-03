@@ -1,0 +1,3 @@
+# Saved-location preservation
+
+Before delivering a new candidate, moving to a new origin or port, or releasing a new version, back up the saved locations from the user's current browser and origin. Restore the backup into the new version and verify the location names and count before retiring the old version. Preserve existing destination entries when merging. Built-in presets and browser-saved locations are distinct; backing up presets alone does not establish that custom browser locations were backed up. If the source browser cannot be accessed, report that limitation and obtain its exported backup rather than claiming the transfer is complete.

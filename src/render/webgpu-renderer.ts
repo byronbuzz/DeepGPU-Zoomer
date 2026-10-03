@@ -557,7 +557,7 @@ export class WebGpuRenderer {
       minFilter: "nearest",
     });
     this.uniformBuffer = ctx.device.createBuffer({
-      size: 416,
+      size: 432,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.stopsBuffer = storageBuffer(ctx.device, MAX_STOPS * 4, "palette-stops");
@@ -1201,7 +1201,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.screenHold?.destroy();
       this.screenHoldSize={width:this.canvas.width,height:this.canvas.height};
       this.screenHold=device.createTexture({label:'last-presented-screen',size:this.screenHoldSize,
-        format:this.format,usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+        format:this.format,usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.COPY_SRC});
       this.screenHoldValid=false;
     }
     if (!this.xformBuffer) {
@@ -1594,6 +1594,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const azimuth=colors.lightAngle*Math.PI/180,elevation=colors.lightElevation*Math.PI/180;
     f32[28]=Math.cos(azimuth)*Math.cos(elevation);f32[29]=Math.sin(azimuth)*Math.cos(elevation);f32[30]=Math.sin(elevation);
     f32[31]=colors.ambientLight;f32[32]=colors.diffuseStrength;f32[33]=colors.specularStrength;u32[34]=colors.slopeLighting?1:0;f32[36]=1/Math.max(1,colors.gamma);
+    f32.set(hexToRgb(colors.highlightColour),104);
     return stopData;
   }
 
@@ -1798,6 +1799,53 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         for(let i=3;i<pixels.length;i+=4)pixels[i]=255;
         return {width,height,pixels};
       }finally{if(mapped)staging!.unmap();staging?.destroy();resolved?.destroy();snapshot.destroy();}
+    });
+  }
+
+  /** Read one displayed pixel, including reprojection and partial refinement. */
+  captureDisplayedColour(x:number,y:number):Promise<string>{
+    return this.trackOperation(async()=>{
+      const texture=this.screenHold,{width,height}=this.screenHoldSize;
+      if(!texture||!this.screenHoldValid||!Number.isInteger(x)||!Number.isInteger(y)||x<0||y<0||x>=width||y>=height)throw new Error('Image is not ready');
+      const {device}=this.ctx;
+      const staging=device.createBuffer({label:'colour-picker-readback',size:4,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      let mapped=false;
+      try{
+        const encoder=device.createCommandEncoder({label:'colour-picker-readback'});
+        encoder.copyTextureToBuffer({texture,origin:{x,y}},{buffer:staging},{width:1,height:1});
+        device.queue.submit([encoder.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);mapped=true;
+        const pixel=new Uint8Array(staging.getMappedRange());
+        const rgb=this.format.startsWith('bgra')?[pixel[2],pixel[1],pixel[0]]:[pixel[0],pixel[1],pixel[2]];
+        return '#'+rgb.map(value=>value.toString(16).padStart(2,'0')).join('');
+      }finally{if(mapped)staging.unmap();staging.destroy();}
+    });
+  }
+
+  /** Small displayed-pixel neighbourhood for the image picker, centred even at canvas edges. */
+  captureDisplayedColourPatch(x:number,y:number):Promise<{width:number;height:number;pixels:Uint8ClampedArray}>{
+    return this.trackOperation(async()=>{
+      const texture=this.screenHold,{width,height}=this.screenHoldSize;
+      if(!texture||!this.screenHoldValid||!Number.isInteger(x)||!Number.isInteger(y)||x<0||y<0||x>=width||y>=height)throw new Error('Image is not ready');
+      const size=15,radius=7,left=Math.max(0,x-radius),top=Math.max(0,y-radius);
+      const copiedWidth=Math.min(width,x+radius+1)-left,copiedHeight=Math.min(height,y+radius+1)-top,bytesPerRow=256;
+      const {device}=this.ctx;
+      const staging=device.createBuffer({label:'colour-picker-loupe',size:bytesPerRow*copiedHeight,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+      let mapped=false;
+      try{
+        const encoder=device.createCommandEncoder({label:'colour-picker-loupe'});
+        encoder.copyTextureToBuffer({texture,origin:{x:left,y:top}},{buffer:staging,bytesPerRow},{width:copiedWidth,height:copiedHeight});
+        device.queue.submit([encoder.finish()]);
+        await staging.mapAsync(GPUMapMode.READ);mapped=true;
+        const raw=new Uint8Array(staging.getMappedRange()),pixels=new Uint8ClampedArray(size*size*4),bgra=this.format.startsWith('bgra');
+        for(let py=0;py<size;py++)for(let px=0;px<size;px++){
+          const sx=Math.max(0,Math.min(width-1,x+px-radius))-left,sy=Math.max(0,Math.min(height-1,y+py-radius))-top;
+          const source=sy*bytesPerRow+sx*4,destination=(py*size+px)*4;
+          pixels[destination]=raw[source+(bgra?2:0)];pixels[destination+1]=raw[source+1];
+          pixels[destination+2]=raw[source+(bgra?0:2)];pixels[destination+3]=255;
+        }
+        return {width:size,height:size,pixels};
+      }finally{if(mapped)staging.unmap();staging.destroy();}
     });
   }
 
@@ -2286,7 +2334,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
 
     // Layout must match the Uniforms struct in perturbation.wgsl. vec3 members
     // align to 16 bytes, which is what the gaps below are for.
-    const uniforms = new ArrayBuffer(416);
+    const uniforms = new ArrayBuffer(432);
     const f32 = new Float32Array(uniforms);
     const i32 = new Int32Array(uniforms);
     const u32 = new Uint32Array(uniforms);

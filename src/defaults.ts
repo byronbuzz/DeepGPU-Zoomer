@@ -1,6 +1,7 @@
 import { validateColors, type ColorSettings } from './logic/colorSettings';
 import { normalizeTuning, migrateSavedTuning, type TuningSettings } from './tuning';
 import { normalizePanelSettings, type PanelSettings } from './panels';
+import { normalizeRotationSeconds } from './colour-rotation';
 
 export const DEFAULTS_STORAGE_KEY='gpu-zoomer-defaults-v1';
 /** Deliberately excludes camera geometry, family and Julia constants. */
@@ -10,6 +11,7 @@ export interface SavedDefaults {
   speed:number;
   baseIterations:number;
   dynamicEnabled:boolean;
+  rotationSeconds:number;rotatePalette:boolean;rotateLight:boolean;reverseRotation:boolean;
   panels:PanelSettings;
 }
 const object=(value:unknown):value is Record<string,unknown>=>!!value&&typeof value==='object'&&!Array.isArray(value);
@@ -19,7 +21,8 @@ export function validateDefaults(value:unknown):SavedDefaults {
     typeof value.baseIterations!=='number'||!Number.isInteger(value.baseIterations)||value.baseIterations<1||value.baseIterations>10_000_000||
     typeof value.dynamicEnabled!=='boolean')throw new Error('Saved defaults are invalid.');
   return {appearance:validateColors(value.appearance),tuning:normalizeTuning(value.tuning),speed:value.speed,
-    baseIterations:value.baseIterations,dynamicEnabled:value.dynamicEnabled,panels:normalizePanelSettings(value.panels)};
+    baseIterations:value.baseIterations,dynamicEnabled:value.dynamicEnabled,panels:normalizePanelSettings(value.panels),
+    rotationSeconds:normalizeRotationSeconds(value.rotationSeconds),rotatePalette:value.rotatePalette===true,rotateLight:value.rotateLight===true,reverseRotation:value.reverseRotation===true};
 }
 export function readDefaults(storage?:Pick<Storage,'getItem'>):{value:SavedDefaults|null;error:string|null}{
   try{

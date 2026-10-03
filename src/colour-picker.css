@@ -1,9 +1,21 @@
 .colour-picker{display:grid;gap:10px;min-width:0}
-.colour-picker-preview{height:30px;border:1px solid var(--line);border-radius:4px}
+.colour-picker-swatch{position:relative;aspect-ratio:4/3;min-height:100px;border:1px solid var(--line);border-radius:4px;background:linear-gradient(to top,#000,transparent),linear-gradient(to right,#fff,var(--picker-hue));cursor:crosshair;touch-action:none;user-select:none}
+.colour-picker-swatch:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.colour-picker-marker{position:absolute;left:0;top:0;width:12px;height:12px;border:2px solid #fff;border-radius:50%;box-shadow:0 0 0 1px #000,0 1px 3px #000;transform:translate(-50%,-50%);pointer-events:none}
+.colour-picker .colour-picker-axis[type=range],.colour-picker-help{position:absolute;width:1px;height:1px;min-height:0;padding:0;margin:0;border:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.colour-picker-actions{display:flex;align-items:stretch;gap:8px;min-width:0}
+.colour-picker-preview{flex:0 0 34px;min-height:32px;border:1px solid var(--line);border-radius:4px}
+.colour-picker-actions button{flex:1;min-width:0;padding:7px 8px;white-space:normal}
 .colour-picker .colour-picker-channel{display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px;margin:0}
+.colour-picker-channel>span{font-size:12px;color:var(--muted);font-weight:700}
 .colour-picker-channel output{float:none;font-variant-numeric:tabular-nums;color:var(--muted);font-size:11px}
 .colour-picker input[type=range]{grid-column:1/-1;appearance:none;width:100%;height:16px;border:1px solid var(--line);border-radius:8px;margin:3px 0;cursor:pointer}
 .colour-picker input[type=range]::-webkit-slider-thumb{appearance:none;width:16px;height:20px;border:2px solid white;border-radius:4px;background:transparent;box-shadow:0 0 2px #000}
 .colour-picker input[type=range]::-moz-range-thumb{width:12px;height:16px;border:2px solid white;border-radius:4px;background:transparent;box-shadow:0 0 2px #000}
 .colour-picker .colour-picker-h{background:linear-gradient(to right,#f00,#ff0,#0f0,#0ff,#00f,#f0f,#f00)}
+.colour-picker-status{font-size:11px;line-height:1.4;color:var(--muted)}
 .colour-picker-error{display:block;margin-top:5px;color:#ffb6ad;font-size:11px;line-height:1.4}
+.colour-picker-loupe{position:fixed;z-index:10000;width:109px;height:109px;border:2px solid #fff;border-radius:50%;overflow:hidden;background:#171c24;box-shadow:0 0 0 1px #000,0 3px 12px #0009;pointer-events:none}
+.colour-picker-loupe[hidden]{display:none}
+.colour-picker-loupe canvas{display:block;width:105px;height:105px;image-rendering:pixelated}
+.colour-picker-loupe-centre{position:absolute;left:50%;top:50%;width:7px;height:7px;box-sizing:border-box;border:1px solid #fff;box-shadow:0 0 0 1px #000;transform:translate(-50%,-50%);pointer-events:none}

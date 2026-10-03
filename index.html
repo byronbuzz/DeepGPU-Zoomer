@@ -5,7 +5,6 @@
   <canvas id="fractal" tabindex="0" aria-label="Fractal explorer. Hold left mouse to zoom in, right mouse to zoom out, Shift drag to pan. Ctrl drag or Ctrl left and right arrows rotate. Keyboard plus and minus zoom; arrows pan. J toggles Julia preview; while preview is open, left click or drag selects its constant. M opens the selected Julia or returns to Mandelbrot."></canvas>
   <header><div id="title-badge" class="brand" data-panel><strong><span class="brand-deep">Deep</span>GPU Zoomer</strong></div><button id="toggle" aria-label="Hide controls" title="Hide controls" aria-expanded="true" aria-controls="controls">☰</button></header>
   <aside id="controls" data-panel aria-label="Explorer controls">
-    <div class="controls-scroll">
     <div class="tabs-shell" data-handle>
       <div class="tabs" role="tablist" aria-label="Explorer controls">
         <button id="tab-main" role="tab" aria-selected="true" aria-controls="panel-main" tabindex="0">Main</button>
@@ -13,20 +12,23 @@
         <button id="tab-advanced" role="tab" aria-selected="false" aria-controls="panel-advanced" tabindex="-1">Advanced</button>
       </div>
     </div>
+    <div class="controls-scroll">
     <div id="panel-main" class="tab-panel" role="tabpanel" aria-labelledby="tab-main">
       <label>Fractal family<select id="family"><option value="mandelbrot">Mandelbrot</option><option value="julia">Julia</option></select></label>
       <label>Zoom speed <output id="speed-value">1.0×</output><input id="speed" type="range" min="0.2" max="3" step="0.1" value="1"></label>
       <label title="Rotate the main view about its centre. Ctrl+drag or hold Ctrl+Left/Right arrows on the fractal.">Rotation <output id="rotation-value">0°</output><input id="rotation" type="range" min="-180" max="180" step="0.1" value="0"></label>
       <label>Iteration limit <output id="iteration-value">1,000</output><input id="iteration-slider" aria-label="Iteration limit slider" type="range" min="0" max="1" step="any"></label>
       <div class="iteration-row"><label for="iteration-base">Base iterations<input id="iteration-base" type="number" min="1" max="10000000" step="1" inputmode="numeric" value="1000"></label><button id="iteration-dynamic" type="button" aria-pressed="true">Dynamic</button></div>
-      <div class="row main-action-row"><button id="stop-refinement">Stop</button><button id="reset">Home</button><button id="full-reset">Full Reset</button></div>
-      <label>Location<input id="location-entry" role="combobox" type="text" maxlength="80" autocomplete="off" aria-autocomplete="list" aria-controls="location-options" aria-expanded="false" placeholder="Choose or name a location"></label>
+      <div class="row main-action-row"><button id="reset">Home</button><button id="stop-refinement">Stop</button></div>
+      <label for="location-entry">Location</label><div id="location-field" class="location-field"><input id="location-entry" role="combobox" type="text" maxlength="80" autocomplete="off" aria-autocomplete="list" aria-controls="location-options" aria-expanded="false" placeholder="Choose or name a location"><button id="location-toggle" type="button" tabindex="-1" aria-label="Choose location" aria-controls="location-options" aria-expanded="false">▾</button></div>
       <div id="location-options" class="location-options" role="listbox" aria-label="Places and saved locations" hidden></div>
-      <div class="row"><button id="save">Save location</button><button id="share">Copy exact link</button></div>
-      <div id="linked-location" class="linked-location" hidden><p>An exact linked location is ready. It will not calculate until opened.</p><button id="open-linked-location">Open linked location</button></div>
+      <div class="panel-actions">
+      <div class="row"><button id="save">Save location</button><button id="delete-location" disabled>Delete location</button></div>
+      <button id="share" class="full-width">Copy Link</button>
       <div id="replace-location" class="linked-location" role="group" aria-labelledby="replace-location-text" hidden><p id="replace-location-text"></p><div class="row"><button id="replace-cancel" type="button">Cancel</button><button id="replace-confirm" type="button">Replace location</button></div></div>
-      <div class="row save-action-row"><button id="save-defaults" type="button">Save defaults</button><button id="screenshot" type="button" aria-haspopup="dialog" aria-controls="png-export" aria-expanded="false" disabled>Save PNG</button></div>
-      <p class="help">Controls:<br>Tab = open/close menu<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag</p>
+      <div class="row save-action-row"><button id="location-back" type="button" disabled>Back</button><button id="screenshot" type="button" aria-haspopup="dialog" aria-controls="png-export" aria-expanded="false" disabled>Save PNG</button></div>
+      </div>
+      <details id="navigation-controls"><summary>Controls</summary><p class="help">Tab on the fractal = open/close menu<br>F11 = Fullscreen, Esc/F11 = Exit fullscreen<br>J = Julia Preview, M = Julia/Mandelbrot toggle<br>Zoom in/out = left/right-click or wheel or +/− keys<br>Rotate = Ctrl+drag, Pan = Shift-drag</p></details>
     </div>
     <div id="panel-colouring" class="tab-panel" role="tabpanel" aria-labelledby="tab-colouring" hidden>
       <details id="edit-palette"><summary>Edit Palette</summary>
@@ -38,43 +40,54 @@
           <label>Hex colour<input id="stop-color" type="text" pattern="#[0-9a-fA-F]{6}" maxlength="7" spellcheck="false"></label>
           <button id="stop-delete">Delete stop</button>
         </div>
+        <div class="panel-actions">
         <div class="row palette-actions"><button id="palette-reverse">Reverse stops</button><button id="palette-even">Space evenly</button></div>
         <div class="row palette-actions"><button id="random-palette">Randomise</button><button id="palette-undo">Undo</button><button id="palette-redo">Redo</button></div>
+        </div>
       </details>
       <label>Colour spacing <output id="cycle-value">64</output><input id="cycle" type="range" min="0" max="1" value="0.5" step="0.001"></label>
-      <label>Palette offset<input id="color-offset" type="range" min="0" max="1" step="0.001"></label>
-      <label>Hue rotation <output id="hue-value">0°</output><input id="hue-rotation" type="range" min="0" max="360" step="1" value="0"></label>
-      <details id="lighting"><summary>Lighting</summary>
-        <label class="check"><input id="distance-mode" type="checkbox"> Distance lighting · extra computation</label>
-        <label>Relief strength<input id="slope-depth" type="range" min="0" max="80" step="0.1"></label>
-        <label>Light direction<input id="light-angle" type="range" min="0" max="360" step="1"></label>
-        <label>Light elevation<input id="light-elevation" type="range" min="0" max="90" step="1"></label>
-        <label>Ambient<input id="ambient-light" type="range" min="0" max="2" step="0.01"></label>
-        <label>Highlights<input id="specular-strength" type="range" min="0" max="3" step="0.01"></label>
-      </details>
+      <div class="rotating-control"><div class="rotation-label-row"><label for="color-offset">Palette Offset</label><div class="rotate-toggle"><span id="rotate-palette-label">rotate</span><input id="rotate-palette" type="checkbox" aria-label="Rotate palette offset"></div></div><input id="color-offset" aria-label="Palette Offset" type="range" min="0" max="1" step="0.001"></div>
+      <label>Hue Offset <output id="hue-value">0°</output><input id="hue-rotation" type="range" min="0" max="360" step="1" value="0"></label>
+
       <label>Colouring formula<select id="color-formula"></select></label>
       <label>Effect<select id="color-effect"></select></label>
       <label>Capped samples<select id="capped-mode"></select></label>
+      <details id="lighting"><summary>Lighting</summary>
+        <label class="check"><input id="distance-mode" type="checkbox"> Distance lighting · extra computation</label>
+        <label>Relief strength<input id="slope-depth" type="range" min="0" max="80" step="0.1"></label>
+        <div class="rotating-control"><div class="rotation-label-row"><label for="light-angle">Light Direction</label><div class="rotate-toggle"><span id="rotate-light-label">rotate</span><input id="rotate-light" type="checkbox" aria-label="Rotate light direction"></div></div><input id="light-angle" aria-label="Light Direction" type="range" min="0" max="360" step="1"></div>
+        <label>Light elevation<input id="light-elevation" type="range" min="0" max="90" step="1"></label>
+        <label>Ambient<input id="ambient-light" type="range" min="0" max="2" step="0.01"></label>
+        <label>Highlights<input id="specular-strength" type="range" min="0" max="3" step="0.01"></label>
+        <div class="colour-control"><button id="highlight-colour-toggle" type="button" aria-label="Choose highlight colour" aria-haspopup="dialog" aria-expanded="false"></button><span>Highlight colour</span></div>
+        <div id="highlight-colour-popover" class="colour-popover" role="dialog" aria-label="Highlight colour" hidden><div id="highlight-colour-picker"></div><label>Hex colour<input id="highlight-colour" type="text" value="#ffffff" pattern="#[0-9a-fA-F]{6}" maxlength="7" spellcheck="false"></label></div>
+      </details>
     </div>
     <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
-      <label>Panel opacity<input id="panel-opacity" type="range" min="0.15" max="1" step="0.01" value="0.8"></label>
+      <label for="rotation-speed" title="Time for one full light rotation. A palette cycle takes four times as long. Move right for faster rotation.">Rotation speed <output id="rotation-speed-value">10 s</output><input id="rotation-speed" type="range" min="0" max="1" step="0.001" aria-describedby="rotation-speed-value"></label>
+      <label class="check"><input id="rotation-reverse" type="checkbox"> Reverse direction</label>
+      <label>Panel opacity<input id="panel-opacity" type="range" min="0.15" max="1" step="0.01" value="0.6"></label>
       <div class="panel-accent-label"><button id="panel-accent-toggle" aria-label="Choose panel accent colour" aria-haspopup="dialog" aria-expanded="false"></button><span>Panel Accent Colour</span></div>
-      <div id="panel-accent-popover" class="colour-popover" role="dialog" aria-label="Panel accent colour" hidden><div id="panel-accent-picker"></div><label>Hex colour<input id="panel-accent" type="text" value="#eba046" pattern="#[0-9a-fA-F]{6}" maxlength="7" spellcheck="false"></label></div>
-      <label class="check"><input id="status-with-menu" type="checkbox"> hide status line with menu</label>
+      <div id="panel-accent-popover" class="colour-popover" role="dialog" aria-label="Panel accent colour" hidden><div id="panel-accent-picker"></div><label>Hex colour<input id="panel-accent" type="text" value="#e5a14e" pattern="#[0-9a-fA-F]{6}" maxlength="7" spellcheck="false"></label></div>
+      <label class="check"><input id="status-with-menu" type="checkbox"> menu hides title and status line</label>
       <label class="check"><input id="oversampling" type="checkbox"> 2x oversampling</label>
       <section id="tuning" aria-label="Rendering controls">
         <label class="check tuning-control" for="tuning-pointer-refinement"><input id="tuning-pointer-refinement" type="checkbox">2x Pointer refinement <span id="tuning-pointer-refinement-modified" class="tuning-modified" hidden>Modified</span></label>
-        <label class="tuning-control" for="tuning-pointer-priority">Pointer priority<output id="tuning-pointer-priority-value">2×</output><span id="tuning-pointer-priority-modified" class="tuning-modified" hidden>Modified</span><input id="tuning-pointer-priority" type="range" min="0" max="4" step="1" value="1"></label>
+        <label class="tuning-control" for="tuning-pointer-priority">Pointer priority<output id="tuning-pointer-priority-value">4×</output><span id="tuning-pointer-priority-modified" class="tuning-modified" hidden>Modified</span><input id="tuning-pointer-priority" type="range" min="0" max="4" step="1" value="2"></label>
         <label class="tuning-control" for="tuning-throughput">Throughput<output id="tuning-throughput-value">Smooth</output><span id="tuning-throughput-modified" class="tuning-modified" hidden>Modified</span><input id="tuning-throughput" type="range" min="0" max="2" step="1" value="0"></label>
-        <label class="tuning-control" for="tuning-depth-gain">Dynamic gain<output id="tuning-depth-gain-value">3,000</output><span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><input id="tuning-depth-gain" type="range" min="0" max="30000" step="50" value="3000"></label>
+        <label class="tuning-control" for="tuning-depth-gain">Dynamic gain<output id="tuning-depth-gain-value">5,000</output><span id="tuning-depth-gain-modified" class="tuning-modified" hidden>Modified</span><input id="tuning-depth-gain" type="range" min="0" max="30000" step="50" value="5000"></label>
         <label class="tuning-control" for="tuning-bla-epsilon">BLA precision<output id="tuning-bla-epsilon-value">2^14</output><span id="tuning-bla-epsilon-modified" class="tuning-modified" hidden>Modified</span><input id="tuning-bla-epsilon" type="range" min="14" max="24" step="1" value="14"></label>
-        <button id="tuning-reset" type="button">Reset tuning</button>
       </section>
+      <div class="panel-actions">
+      <div class="row reset-actions"><button id="tuning-reset" type="button">Reset tuning</button><button id="full-reset" type="button">Full Reset</button></div>
+      <div class="row save-action-row"><button id="backup-locations" type="button">Backup locations</button><button id="restore-locations" type="button">Restore locations</button></div>
+      <button id="save-defaults" type="button" class="full-width">Save defaults</button>
+      </div>
+      <input id="restore-locations-file" type="file" accept=".json,application/json" aria-label="Restore saved locations from JSON" hidden>
     </div>
     </div>
     <button class="resize-edge resize-left" data-resize="left" aria-label="Resize controls from left edge" title="Drag or use arrow keys to resize"></button>
     <button class="resize-edge resize-right" data-resize="right" aria-label="Resize controls from right edge" title="Drag or use arrow keys to resize"></button>
-    <button class="resize-edge resize-bottom" data-resize="bottom" aria-label="Resize controls from bottom edge" title="Drag or use arrow keys to resize"></button>
   </aside>
   <section id="png-export" class="popup" data-panel role="dialog" aria-modal="false" aria-label="PNG export" aria-labelledby="png-export-title" hidden>
     <div class="export-panel-content">

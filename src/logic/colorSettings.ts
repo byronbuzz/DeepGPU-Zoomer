@@ -36,6 +36,8 @@ export interface ColorSettings {
   ambientLight: number;
   diffuseStrength: number;
   specularStrength: number;
+  /** RGB colour of the specular highlights. */
+  highlightColour: string;
   /** Turn the pseudo-3D lighting off and keep flat palette bands. */
   slopeLighting: boolean;
   /** Samples per axis: 1 = off, 2 = 2x2, 3 = 3x3. */
@@ -70,6 +72,7 @@ export const DEFAULT_COLORS: ColorSettings = {
   ambientLight: 0.35,
   diffuseStrength: 0.9,
   specularStrength: 0.25,
+  highlightColour: '#ffffff',
   slopeLighting: true,
   supersample: 1,
   gamma: 2.2,
@@ -133,6 +136,7 @@ export function validateColors(value:unknown):ColorSettings {
     (c as unknown as Record<string,unknown>)[key]=val;
   }
   c.stops=[...v.stops];
+  if(!/^#[0-9a-f]{6}$/i.test(c.highlightColour))throw Error('Invalid highlight colour');
   const positions=v.positions??stopPositions({...c,positions:undefined,repeating:v.repeating});
   if(positions.length!==c.stops.length||positions.some((p,i)=>!Number.isFinite(p)||p<0||p>1||i>0&&p<positions[i-1]))throw Error('Invalid palette positions');
   c.positions=[...positions];c.locks=c.stops.map((_,i)=>v.locks?.[i]===true);c.repeating=v.repeating!==false;

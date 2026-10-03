@@ -73,6 +73,7 @@ struct Uniforms {
     // Output-wide coordinates are separate from local tile storage dimensions.
     domainResolution: vec2<f32>,
     domainOrigin: vec2<f32>,
+    highlightColour: vec3<f32>,
 };
 
 // Raw worker output is consumed only by the one-time reference decode pass.
@@ -533,7 +534,7 @@ fn effectColour(p:f32,angle:f32,gradient:vec2<f32>)->vec3<f32>{
         var spec=pow(max(0.0,dot(normal,normalize(u.lightDir+vec3<f32>(0.0,0.0,1.0)))),16.0);
         if(u.effect==7u){col=palette(wrapCoordinate(t+.24*normal.x+.16*normal.y));}
         if(u.effect==8u){spec=pow(max(0.0,1.0-abs(dot(normal.xy,u.lightDir.xy))),24.0)*diffuse;}
-        col=col*(u.ambientLight+u.diffuseStrength*diffuse)+vec3<f32>(spec*u.specularStrength);
+        col=col*(u.ambientLight+u.diffuseStrength*diffuse)+u.highlightColour*(spec*u.specularStrength);
     }
     if(u.effect==10u){col=mix(col,vec3<f32>(.64,.73,.82),1.0-exp(-abs(p)*.08));}
     // Palette/RGB-only effects. No neighbouring field, derivative, endpoint or
@@ -634,7 +635,7 @@ fn shade(baseColour: vec3<f32>, hCentre: f32, hRight: f32, hUp: f32) -> vec3<f32
         // Blinn-Phong against a viewer straight down the z axis.
         let halfway = normalize(u.lightDir + vec3<f32>(0.0, 0.0, 1.0));
         let specular = pow(max(dot(normal, halfway), 0.0), 32.0);
-        lit = lit + vec3<f32>(u.specularStrength * specular);
+        lit = lit + toLinear(u.highlightColour) * (u.specularStrength * specular);
     }
     return lit;
 }

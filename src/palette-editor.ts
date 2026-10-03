@@ -31,7 +31,7 @@ export function randomizePalette(c:ColorSettings,all:boolean,harmonious:boolean)
 
 export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings)=>void){
   const el=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
-  let selected=0,dragging=false,dragDistance=0,dragRemembered=false,colourEditRemembered=false;const undo:ColorSettings[]=[],redo:ColorSettings[]=[];
+  let selected=0,dragging=false,dragDistance=0,dragRemembered=false,colourEditRemembered=false,highlightEditRemembered=false;const undo:ColorSettings[]=[],redo:ColorSettings[]=[];
   const remember=()=>{undo.push(validateColors(get()));if(undo.length>100)undo.shift();redo.length=0;};
   const commit=(c:ColorSettings,record=true)=>{if(record)remember();change(validateColors(c));sync();};
   const update=(mutate:(s:Stop[])=>Stop[],selectAfter=selected)=>{remember();const next=withSelectedStop(get(),mutate(paletteStops(get())),selectAfter);selected=next.selected;commit(next.colors,false);};
@@ -78,10 +78,27 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).value=String(c[key]);
     el<HTMLInputElement>('oversampling').checked=c.oversampling===true;
   }
-  function syncFields(){const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));const s=stops[selected];colourPicker.sync(s.color);el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
+  function syncFields(){const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));const s=stops[selected];colourPicker.sync(s.color);highlightPicker.sync(c.highlightColour);highlightButton.style.background=c.highlightColour;el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
   el('palette-strip').onpointerdown=e=>{if(e.target!==el('palette-strip')||get().stops.length>=8)return;const r=el('palette-strip').getBoundingClientRect();const position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));update(s=>[...s,{position,color:s[selected].color,locked:false}],get().stops.length);};
   const liveColour=(value:string)=>{if(!/^#[0-9a-f]{6}$/i.test(value))return;if(!colourEditRemembered){remember();colourEditRemembered=true;}const stops=paletteStops(get());stops[selected].color=value;const next=withSelectedStop(get(),stops,selected);selected=next.selected;change(next.colors);sync();};
   const colourPicker=setupColourPicker(el('stop-color-swatch'),el<HTMLInputElement>('stop-color'),liveColour);
+  const highlightButton=el<HTMLButtonElement>('highlight-colour-toggle'),highlightPopover=el('highlight-colour-popover');
+  const highlightPicker=setupColourPicker(el('highlight-colour-picker'),el<HTMLInputElement>('highlight-colour'),highlightColour=>{
+    if(!highlightEditRemembered){remember();highlightEditRemembered=true;}change({...get(),highlightColour});sync();
+  });
+  const closeHighlight=(focus=false)=>{highlightPopover.hidden=true;highlightButton.setAttribute('aria-expanded','false');if(focus)highlightButton.focus();};
+  highlightButton.onclick=()=>{
+    if(!highlightPopover.hidden){closeHighlight();return;}
+    closePicker();highlightEditRemembered=false;highlightPopover.hidden=false;highlightButton.setAttribute('aria-expanded','true');syncFields();
+    const anchor=highlightButton.getBoundingClientRect(),r=highlightPopover.getBoundingClientRect();
+    highlightPopover.style.left=Math.max(8,Math.min(innerWidth-r.width-8,anchor.left))+'px';
+    highlightPopover.style.top=Math.max(8,Math.min(innerHeight-r.height-8,anchor.bottom+6))+'px';
+    const hex=el<HTMLInputElement>('highlight-colour');hex.focus();hex.select();
+  };
+  highlightPopover.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeHighlight(true);}});
+  document.addEventListener('pointerdown',event=>{if(!highlightPopover.hidden&&!highlightPopover.contains(event.target as Node)&&!highlightButton.contains(event.target as Node))closeHighlight();},true);
+  el('controls').querySelector('.controls-scroll')?.addEventListener('scroll',()=>closeHighlight());window.addEventListener('resize',()=>closeHighlight());
+  el('controls').addEventListener('click',event=>{if((event.target as HTMLElement).closest('[role=tab]'))closeHighlight();});
   popover.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();e.stopPropagation();closePicker();(el('palette-strip').children[selected] as HTMLElement)?.focus();}};
   document.addEventListener('pointerdown',e=>{if(!popover.hidden&&!popover.contains(e.target as Node)&&!(e.target as HTMLElement).classList.contains('palette-stop'))closePicker();},true);
   el<HTMLInputElement>('stop-lock').onchange=e=>update(s=>{s[selected].locked=(e.target as HTMLInputElement).checked;return s;});
@@ -90,13 +107,13 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   el('palette-even').onclick=()=>update(s=>s.map((v,i)=>({...v,position:i/s.length})));
   el<HTMLSelectElement>('palette').onchange=e=>{const value=(e.target as HTMLSelectElement).value;if(value==='')return;const p=PRESETS[Number(value)];commit({...get(),palette:5,repeating:true,stops:[...p.stops],positions:undefined,locks:undefined,hueRotation:0});};
   el('random-palette').onclick=()=>{closePicker();commit(randomizePalette(get(),true,false));};
-  el('palette-undo').onclick=()=>{const c=undo.pop();if(c){redo.push(validateColors(get()));commit(c,false);}};
-  el('palette-redo').onclick=()=>{const c=redo.pop();if(c){undo.push(validateColors(get()));commit(c,false);}};
+  el('palette-undo').onclick=()=>{const c=undo.pop();if(c){closePicker();closeHighlight();redo.push(validateColors(get()));commit(c,false);}};
+  el('palette-redo').onclick=()=>{const c=redo.pop();if(c){closePicker();closeHighlight();undo.push(validateColors(get()));commit(c,false);}};
   for(const [id,key] of [['color-formula','formula'],['color-effect','effect'],['capped-mode','capped']] as const)el<HTMLSelectElement>(id).onchange=e=>commit({...get(),[key]:Number((e.target as HTMLSelectElement).value)});
   el<HTMLInputElement>('distance-mode').onchange=e=>commit({...get(),mode:(e.target as HTMLInputElement).checked?1:0});
   el<HTMLInputElement>('oversampling').onchange=e=>commit({...get(),oversampling:(e.target as HTMLInputElement).checked});
   el<HTMLInputElement>('cycle').oninput=e=>{const value=e instanceof CustomEvent&&e.detail?.factoryReset?DEFAULT_COLORS.cycle:cycleFromSlider(Number((e.target as HTMLInputElement).value));change({...get(),cycle:value});el('cycle-value').textContent=value<100?value.toFixed(1):Math.round(value).toString();};
   el<HTMLInputElement>('hue-rotation').oninput=e=>{const hueRotation=Number((e.target as HTMLInputElement).value);change({...get(),hueRotation});el('hue-value').textContent=`${hueRotation}°`;};
   for(const [id,key] of [['color-offset','offset'],['slope-depth','slopeDepth'],['light-angle','lightAngle'],['light-elevation','lightElevation'],['ambient-light','ambientLight'],['specular-strength','specularStrength']] as const)el<HTMLInputElement>(id).oninput=e=>{change({...get(),[key]:Number((e.target as HTMLInputElement).value)});};
-  sync();return {sync,reset(){selected=0;dragging=false;undo.length=0;redo.length=0;closePicker();sync();}};
+  sync();return {sync,reset(){selected=0;dragging=false;undo.length=0;redo.length=0;closePicker();closeHighlight();sync();}};
 }

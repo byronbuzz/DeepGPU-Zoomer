@@ -2,9 +2,10 @@ import Decimal from 'decimal.js';
 import { validateColors, type ColorSettings } from './logic/colorSettings';
 import { rotationBasis } from './rotation';
 import { parseCoordinateInput } from './coordinate';
+import { normalizeRotationSeconds } from './colour-rotation';
 
 export type Family = 'mandelbrot' | 'julia';
-export interface SavedView { family: Family; x: string; y: string; span: string; jx: string; jy: string; iterations: number; angle?: number; appearance?: ColorSettings }
+export interface SavedView { family: Family; x: string; y: string; span: string; jx: string; jy: string; iterations: number; angle?: number; appearance?: ColorSettings; rotationSeconds?: number; rotatePalette?: boolean; rotateLight?: boolean; reverseRotation?: boolean }
 export const MAX_ITERATIONS=10_000_000;
 export function iterationFromSlider(value:number){return Math.round(Math.pow(MAX_ITERATIONS,Math.max(0,Math.min(1,value))));}
 export function iterationToSlider(value:number){return Math.log(value)/Math.log(MAX_ITERATIONS);}
@@ -24,8 +25,12 @@ export function validateView(value: unknown): SavedView {
   if(!Number.isInteger(v.iterations)||v.iterations<1||v.iterations>MAX_ITERATIONS) throw Error('Iteration limit must be 1–10000000');
   if(v.angle!==undefined&&(!Number.isFinite(v.angle)||v.angle < -180||v.angle > 180))throw Error('Rotation must be between −180° and 180°');
   for(const k of ['x','y','jx','jy'] as const) if(new Decimal(v[k]).abs().gt(16)) throw Error('Coordinates must be within ±16');
+  if(v.rotationSeconds!==undefined&&(typeof v.rotationSeconds!=='number'||!Number.isFinite(v.rotationSeconds)))throw Error('Invalid rotation speed');
+  for(const k of ['rotatePalette','rotateLight','reverseRotation'] as const)if(v[k]!==undefined&&typeof v[k]!=='boolean')throw Error('Invalid rotation state');
   // Old links may contain iterationMode; fixed limits are now the only policy.
-  return {family:v.family,x:v.x,y:v.y,span:v.span,jx:v.jx,jy:v.jy,iterations:v.iterations,angle:v.angle??0,...(v.appearance?{appearance:validateColors(v.appearance)}:{})};
+  return {family:v.family,x:v.x,y:v.y,span:v.span,jx:v.jx,jy:v.jy,iterations:v.iterations,angle:v.angle??0,...(v.appearance?{appearance:validateColors(v.appearance)}:{}),
+    ...(v.rotationSeconds!==undefined?{rotationSeconds:normalizeRotationSeconds(v.rotationSeconds)}:{}),
+    ...(v.rotatePalette!==undefined?{rotatePalette:v.rotatePalette}:{}),...(v.rotateLight!==undefined?{rotateLight:v.rotateLight}:{}),...(v.reverseRotation!==undefined?{reverseRotation:v.reverseRotation}:{})};
 }
 export function encodeView(v: SavedView): string { return encodeURIComponent(JSON.stringify(validateView(v))); }
 export function decodeView(s: string): SavedView { return validateView(JSON.parse(decodeURIComponent(s))); }
