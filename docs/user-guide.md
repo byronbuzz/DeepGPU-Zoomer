@@ -4,7 +4,7 @@
 
 ## First exploration
 
-Run the application using the [setup instructions](../README.md#get-started). Choose **Seahorse Valley** from Location, or hold the left mouse button over a part of the Mandelbrot set you would like to explore. Zoom follows the pointer. Release the button to let the image finish refining.
+Open [the hosted application](https://byronbuzz.github.io/DeepGPU-Zoomer/) or run it using the [setup instructions](../README.md#get-started). Choose **Julia Jewels 10^0x** from Location, or hold the left mouse button over a part of the Mandelbrot set you would like to explore. Zoom follows the pointer. Release the button to let the image finish refining.
 
 The footer shows refinement progress, elapsed calculation time, magnification and the effective iteration limit. Magnification is expressed as a power of ten, so it remains readable even at extremely small scales. A completed image means the requested calculation has finished; it does not prove every capped point is mathematically inside the set.
 
@@ -58,7 +58,7 @@ A higher limit gives difficult orbits more time to escape. It also increases wor
 
 ### Locations and exact links
 
-Location is both a searchable chooser and a name field. Click to browse, or type to filter the built-in and saved locations. Use the dropdown arrow to browse. Arrow keys select a result; Enter opens it. Escape or clicking outside closes the list. Saving works with the list open.
+Location is both a searchable chooser and a name field. Click to browse, or type to filter saved locations, including the 12 editable defaults. Use the dropdown arrow to browse. Arrow keys select a result; Enter opens it. Escape or clicking outside closes the list. Saving works with the list open.
 
 To save your view, enter a name and select **Save location**. A saved view contains the family, exact decimal centre and span, Julia constant, camera rotation, iteration limit, appearance, colour rotation checkbox states, Reverse direction and Rotation speed. Saving the selected saved name updates that entry. Reusing another saved name asks before replacement. Editing the name clears the selection. Select a saved location and choose **Delete location** to remove it after confirmation; the current camera view stays in place. Default locations are added to the saved collection once and can also be deleted; deleted entries stay deleted after reloading.
 
@@ -67,6 +67,8 @@ To save your view, enter a name and select **Save location**. A saved view conta
 **Copy Link** places those same view fields in a URL fragment. It does not change the current address bar. Paste the link into the browser address bar and press Enter to open the shared view immediately. This works on a fresh page or in the running explorer, without a reload or a second confirmation. After opening, the fragment is removed from the address bar so the same link can be pasted again; use Copy Link to share the current view. Zoom speed, Dynamic preference, navigation tuning and panel layout are local preferences and are not carried in that link.
 
 Saved locations belong to this browser profile and origin. A different hostname or port has separate browser storage. Copy links for views you want to keep outside that storage.
+
+**Advanced → Backup locations** downloads a JSON collection containing the saved names and complete views. **Restore locations** validates a selected backup before merging it. Exact duplicates are skipped; a different view with an existing name receives a numbered suffix so both remain available. Restoring never replaces an existing entry. Keep the backup before changing hostname, port or browser profile, and restore it in the destination.
 
 ### Save defaults
 
@@ -85,7 +87,7 @@ Expand **Edit Palette** to select one of 18 presets or edit a custom palette.
 | Add a stop | Click an empty position on the palette strip |
 | Move a stop | Drag it, or focus it and use Left/Right |
 | Edit a colour | Click a stop, or use Enter/Space; choose saturation and brightness in the 2D swatch, adjust hue, or enter hex |
-| Sample the image | Use the eyedropper in any colour picker, then click the image; Escape cancels |
+| Sample the image | Use the eyedropper in any colour picker, move over the image to inspect the magnifying loupe, then click to select its centre pixel; Escape cancels |
 | Delete a stop | Use Delete in the picker, or the Delete key on a focused stop |
 | Preserve a stop during Randomise | Select it and enable Lock stop |
 | Reverse the palette | Reverse stops |
@@ -120,7 +122,7 @@ Once movement stops, the main view automatically uses **Detailed** scheduling un
 
 ### Pointer controls
 
-Pointer priority offers **Off, 2×, 4×, 8× and 16×**. It weights work near the pointer relative to distributed and older pending work. Off means equal service weighting; it does not stop rendering. The factory setting is 2×.
+Pointer priority offers **Off, 2×, 4×, 8× and 16×**. It weights work near the pointer relative to distributed and older pending work. Off means equal service weighting; it does not stop rendering. The factory setting is **4×**.
 
 **2× Pointer refinement** increases local detail around the pointer during interaction. It is independent of priority and is off by default.
 
@@ -138,7 +140,9 @@ Pointer priority offers **Off, 2×, 4×, 8× and 16×**. It weights work near th
 
 Drag panel backgrounds or the tab headers to reposition them; dragging uses the normal mouse pointer. Clicking a tab still selects it. The main controls resize in width from the left and right edges. Each tab’s height follows its content and stops eight pixels above the viewport bottom, scrolling inside the panel when needed. The Controls accordion at the bottom of Main contains the interaction guide. The title badge, Julia preview and PNG export panel have their own positions. Use the input, checkbox or button itself to activate a control; ordinary labels do not activate it. Accordions toggle only from their summary text. Resize edges show a double-arrow cursor without a highlighted side strip.
 
-Panel accent colour also styles the borders of dropdowns and entry fields; focusing these thickens the existing border without adding a second outline. Regular buttons use the accent on hover. Opacity adjusts panel backgrounds and the menu button. Control backgrounds use 1.2 times that opacity, capped at 100%. **menu hides title and status line** hides both the title and footer with the menu when checked; both stay visible when unchecked.
+Panel accent colour also styles the borders of dropdowns and entry fields; focusing these thickens the existing border without adding a second outline. The title and footer use the same border style as the menu button. Regular buttons use the accent on hover. Hover, pressed and active-button backgrounds and the selected tab are fully opaque. The menu icon remains white, including on hover. Opacity adjusts panel backgrounds and the menu button. Control backgrounds use 1.2 times that opacity, capped at 100%. **menu hides title and status line** hides both the title and footer with the menu when checked; both stay visible when unchecked.
+
+Opening PNG export or Julia preview while the other is open places the new panel beneath it if it fits, otherwise it is centred in the viewport.
 
 Use the mouse wheel over a slider to adjust it. Ctrl-click resets supported application sliders to their factory values. Standard keyboard slider controls remain available.
 
@@ -161,6 +165,10 @@ Use **Cancel export** or close the export panel to cancel. Large images are gene
 | Iteration base / Dynamic | 1,000 / On |
 | Zoom speed | 1× |
 | Panel opacity | 60% |
+| Panel accent / Menu hides title and status line | #e5a14e / Off |
+| Light rotation / Palette rotation / Reverse direction | Off / Off / Off |
+| Rotation speed / Palette cycle at that speed | 10 seconds / 40 seconds |
+| Default locations | 12 editable, deletable saved views |
 | Throughput / stationary refinement | Smooth / Detailed |
 | Pointer priority / 2× Pointer refinement | 4× / Off |
 | 2× oversampling / Distance lighting | Off / Off |
@@ -177,13 +185,11 @@ Use **Cancel export** or close the export panel to cancel. Large images are gene
 | Navigation or refinement is slow | Iteration count, resolution, scene complexity, lighting and oversampling all affect work. Start with Smooth throughput, a lower iteration limit and oversampling off. |
 | Image stays stopped | Navigate to resume after pressing Stop. |
 | Colour changes start more calculation | The chosen formula or lighting may require channels absent from the retained field. |
-| PNG display preset is unavailable | Use Custom dimensions, or allow display detection where the browser supports it. |
+| PNG display estimate is unsuitable | Use Custom dimensions for an exact size; display estimation does not require a permission grant. |
 | GPU or export capacity error | Reduce output dimensions, oversampling or the iteration budget, as appropriate to the reported error. |
 | A link does not open | Use the complete URL produced by Copy Link, including its fragment. Invalid links leave the current view unchanged. |
 | Saved locations appear missing | Confirm the same browser profile, hostname and port. Local storage is separate for each origin. |
 
 The application computes and exports locally. Its code does not upload locations, send analytics or use a rendering service. Loading the application and its worker assets still uses the serving origin.
-
-When opening PNG export or Julia preview while the other is open, the new panel goes beneath it if it fits, otherwise it is centred in the viewport.
 
 Before moving to a new candidate, port or version, use **Advanced → Backup locations** and keep the downloaded JSON file. Use **Restore locations** in the new version and verify the names before retiring the old version. Restoring merges locations without overwriting name conflicts. The 12 default locations come from the owner's 3 October 2026 backup and are added once, preserving existing saved entries.

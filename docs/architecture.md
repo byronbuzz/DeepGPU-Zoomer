@@ -18,6 +18,7 @@ This reference describes the active application: a decimal camera and browser in
 | Work scheduling | Pending regions, coverage, adaptive sizing and publication stripes | [regions.ts](../src/render/regions.ts), [motion-sizing.ts](../src/render/motion-sizing.ts), [ordinary-stripes.ts](../src/render/ordinary-stripes.ts) |
 | Device | Feature/limit discovery, allocation checks, compilation and timing | [device.ts](../src/gpu/device.ts), [timing.ts](../src/gpu/timing.ts) |
 | Appearance | Colour schema, palettes, picker and panel preferences | [colorSettings.ts](../src/logic/colorSettings.ts), [palette-editor.ts](../src/palette-editor.ts), [colour-picker.ts](../src/colour-picker.ts), [panels.ts](../src/panels.ts) |
+| Persistence | Saved-view validation, defaults, location backups and initial locations | [state.ts](../src/state.ts), [defaults.ts](../src/defaults.ts), [locations.ts](../src/locations.ts), [default-locations.json](../src/default-locations.json) |
 | Export | Snapshot, tiling, device readback and streaming PNG encoding | [export/](../src/export/) |
 
 The frontend is TypeScript with native HTML/CSS controls. Vite 5.4.21 bundles modules, worker entry points and imported WGSL strings. decimal.js 10.6.0 is the direct runtime package dependency. Native browser APIs provide workers, GPU access, local storage, clipboard access, image download and compression.
@@ -94,7 +95,7 @@ The user selects one of three navigation throughput policies:
 | Balanced | 2× | 128 ms |
 | Detailed | 4× | 32 ms |
 
-These are internal workload settings, not measured latency promises. The main application uses the selection while interacting, and Detailed while stationary. Pointer priority selects relative service weights of 1, 2, 4, 8 or 16 against the other service classes; Off corresponds to equal weighting.
+These are internal workload settings, not measured latency promises. The main application uses the selection while interacting, and Detailed while stationary. Pointer priority selects relative service weights of 1, 2, 4, 8 or 16 against the other service classes; Off corresponds to equal weighting. The factory setting is 4× pointer priority, with Smooth navigation and pointer refinement disabled.
 
 Measured GPU cost and completion feedback adapt eligible work sizes. Established inward work can publish aligned stripes. Ordinary Mandelbrot kernels use a **16×4** workgroup specialization where applicable. GPU timing is used when supported.
 
@@ -114,6 +115,16 @@ The optional **2× oversampling** stage calculates twice the width and height wh
 
 Pointer refinement is independent: it concentrates additional detail near the pointer during navigation. Full-view stationary oversampling is not implied by enabling it.
 
+## Appearance and interface
+
+Iteration colouring is the factory mode. Distance colouring adds a derivative-based distance field and screen-space surface relief, with ambient, diffuse and specular lighting. Highlight colour, light direction and elevation are appearance settings.
+
+Palette and light rotation are optional and independently enabled. [colour-rotation.ts](../src/colour-rotation.ts) maps the shared speed control to a light period of 1–60 seconds, defaulting to 10 seconds. A full palette cycle takes four light periods: 40 seconds at the factory speed. Reverse applies to both. These changes use retained appearance data when compatible; changing the required numerical channels still follows the field-admission rules above. Manual offset or light-angle editing suspends that channel's automatic rotation for the gesture.
+
+The shared colour picker provides saturation/brightness, hue and validated hex input for palette stops, highlights and panel accent. Image picking reads the renderer's last presented screen texture, including reprojection and partial refinement, rather than recalculating the fractal. A mapped GPU readback supplies the selected pixel and a 15×15 neighbourhood for the magnified loupe. Edge pixels are repeated at image boundaries; the centre marker identifies the selected pixel. Picking intercepts navigation gestures and can be cancelled with Escape.
+
+[panels.ts](../src/panels.ts) owns draggable placement, the controls panel's edge resizing, Julia preview resizing, tabs and menu visibility. Positions remain within the viewport. When export and Julia preview are both open, the newly opened panel goes below the other if it fits, otherwise to the centre in front. Panel opacity defaults to 60%, with control backgrounds at 1.2 times panel opacity, capped at full opacity. The status/title can optionally hide with the menu. These interface settings do not change the numerical field or exported appearance.
+
 ## PNG export
 
 An export snapshots camera, appearance and numerical settings. It has an independent renderer and cancellation signal, so live navigation does not replace the chosen image.
@@ -122,15 +133,23 @@ The planner preserves centre, rotation and vertical span. It splits the output i
 
 Output limits are **80,000,000 pixels** and **32,768 pixels per dimension**. A **768 MiB export allocation estimate** and actual device limits further restrict admissible work. The estimate is not the total browser process footprint: existing viewport/reference resources and browser internals are separate.
 
-The encoder uses browser compression streams and enforces an encoded-output budget during construction. Display-based resolution presets use supported display detection with permission; custom dimensions do not depend on it.
+The encoder uses browser compression streams and enforces an encoded-output budget during construction. Display-based resolution estimates use screen CSS dimensions multiplied by the device pixel ratio without Window Management permission; browser zoom can affect the estimate. Custom dimensions do not depend on it.
 
 ## Persistence and privacy
 
-The saved-view schema includes family, decimal centre and span, Julia constant, iteration limit, rotation and appearance. Exact links encode that schema in the URL fragment. Local tuning and panel preferences are separate.
+The saved-view schema includes family, decimal centre and span, Julia constant, iteration limit, camera rotation, appearance and colour-motion settings (speed, palette/light enablement and reverse). Exact links encode the validated schema in the URL fragment. A valid fragment opens automatically on startup or a hash change, then is removed from the address bar so opening the same link again works. An invalid link leaves the current view intact. Local tuning and panel preferences are separate.
 
-Saved defaults capture startup appearance, base iterations, Dynamic preference, speed, tuning and panel settings. They exclude camera geometry, family, Julia constant and saved locations. Startup begins at Mandelbrot Home; a hash payload is staged until explicitly opened.
+Saved defaults capture startup appearance, base iterations, Dynamic preference, navigation speed, colour-motion settings, tuning and panel settings, including selected tab, expanded sections and menu visibility. They exclude camera geometry, family, Julia constant and saved locations. Startup begins at Mandelbrot Home unless an exact link supplies a view. Without explicit saved defaults, the previous view can supply remembered appearance, while its camera is not restored. Reset restores factory settings and Home without deleting saved locations.
+
+The initial collection is the owner's 12 locations in [default-locations.json](../src/default-locations.json). Each browser origin merges that collection into saved locations once, using a separate seeding marker. Existing locations are preserved, identical name/view entries are skipped, and conflicting names receive a numbered suffix. After successful seeding, deleting an initial location does not recreate it on reload. Browser-saved locations are distinct from this checked-in initial collection.
+
+Location backups use a versioned `deepgpu-zoomer-locations` JSON envelope; restoration also accepts a legacy location array. Every incoming view is validated before merging. Restoration preserves destination entries and is safe to repeat. Unreadable stored location data disables saving and deletion rather than replacing it. Locations and settings remain origin-local; moving to another port or hosted site requires a backup and restore to transfer browser-saved entries.
 
 Application state lives in browser local storage. Rendering and PNG encoding use local CPU/GPU resources. There is no application upload, analytics or remote rendering client; application and worker files are loaded from the serving origin.
+
+## Static deployment
+
+[The GitHub Pages workflow](../.github/workflows/pages.yml) installs the locked npm dependencies on Node.js 24, runs the TypeScript check and Vite production build, and publishes only `dist/` through the Pages artifact and deployment actions. The hosted build uses `/DeepGPU-Zoomer/` as its public base path; local builds use the root path. Deployment runs on pushes to `main` and supports manual dispatch. No application backend is deployed.
 
 ## Platform references
 

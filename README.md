@@ -6,7 +6,7 @@
 
 [![WebGPU](https://img.shields.io/badge/Rendering-WebGPU-E5A344?style=flat-square)](https://www.w3.org/TR/webgpu/) [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square)](https://www.typescriptlang.org/) [![WGSL](https://img.shields.io/badge/Shaders-WGSL-8758C7?style=flat-square)](https://www.w3.org/TR/WGSL/) [![Local computation](https://img.shields.io/badge/Compute-In_your_browser-249B83?style=flat-square)](#introduction) [![GPL](https://img.shields.io/badge/License-GPL--3.0--or--later-B8476B?style=flat-square)](LICENSE)
 
-[Get started](#get-started) · [Controls](#explore) · [Advanced](#advanced) · [References](#references) · [Acknowledgements](#acknowledgements)
+[Open the app](https://byronbuzz.github.io/DeepGPU-Zoomer/) · [Get started](#get-started) · [Controls](#explore) · [Advanced](#advanced) · [References](#references) · [Acknowledgements](#acknowledgements)
 
 </div>
 
@@ -24,7 +24,7 @@ WebGPU handles parallel pixel calculation and presentation. At deeper scales, an
 | --- | --- | --- |
 | Mandelbrot and quadratic Julia sets | Editable gradients with 2–8 colour stops | Named locations stored in your browser |
 | Pointer-directed zoom, pan and rotation | 25 colour formulas and 20 optional effects | Exact links with coordinates and appearance |
-| Live Julia preview and built-in locations | Lighting, hue rotation and capped-point patterns | Tiled PNG export at custom resolutions |
+| Live Julia preview and 12 editable default locations | Lighting, hue rotation and capped-point patterns | Tiled PNG export at custom resolutions |
 | Progressive detail and optional 2× oversampling | Movable controls and a custom panel accent | Your own saved startup preferences |
 
 The application runs locally on your computer. It has no account system, rendering server or cloud-compute dependency.
@@ -33,7 +33,9 @@ The application runs locally on your computer. It has no account system, renderi
 
 ## 🚀 Get started
 
-You need Node.js and npm to run the source, plus a browser and GPU that support WebGPU. Use a secure page origin: the local development address below works; a hosted installation should use HTTPS. Browser, operating-system and driver support all matter. See [WebGPU availability](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API).
+**[Open DeepGPU Zoomer](https://byronbuzz.github.io/DeepGPU-Zoomer/)** in a browser with WebGPU support. No installation is needed to use the hosted app. Browser, GPU, operating-system and driver support all matter. See [WebGPU availability](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API).
+
+To run the source locally, you need Node.js and npm. Use a secure page origin: the local development address below works; hosted installations should use HTTPS.
 
 ```sh
 git clone https://github.com/byronbuzz/DeepGPU-Zoomer.git
@@ -53,11 +55,13 @@ npm run preview
 
 The build writes to `dist/`; the preview command prints its local address. A deployed build needs only static hosting with HTTPS. Visitors need no Node.js installation or native helper. There is no alternative rendering backend when WebGPU is unavailable.
 
+GitHub Pages is published by [the deployment workflow](.github/workflows/pages.yml), which installs the locked dependencies, checks TypeScript, and builds with `--base=/DeepGPU-Zoomer/` so scripts, styles and the reference worker load beneath the repository URL. It runs after a push to `main` or a manual **Deploy GitHub Pages** workflow run. Normal local builds keep the root path.
+
 <a id="explore"></a>
 
 ## 🧭 Explore
 
-Start with **Seahorse Valley** in the Location chooser, or hold the left mouse button over an interesting part of the whole set. Release to let the view finish refining.
+Start with **Julia Jewels 10^0x** in the Location chooser, or hold the left mouse button over an interesting part of the whole Mandelbrot set. Release to let the view finish refining.
 
 | Action | Control |
 | --- | --- |
@@ -78,9 +82,10 @@ Keyboard navigation applies when you are interacting with the canvas rather than
 - **Iteration limit** sets the current calculation limit, from **1 to 10,000,000**. Higher limits can reveal more detail around difficult boundaries, at a greater computation cost.
 - **Base iterations** sets the starting limit for Dynamic adjustment. **Dynamic** raises or lowers the effective limit during zooming according to depth. Turn it off to keep a fixed limit.
 - **Home** returns to the whole view of the current family. **Full Reset** in Advanced restores factory preferences and Mandelbrot Home, while retaining saved locations.
-- **Location** combines built-in places and your saved views. Enter a name and choose **Save location**. Saving the selected location updates it; a collision with another saved name asks before replacement. **Delete location** removes a selected saved entry after confirmation, keeping the current view. **Back** restores the exact view before your last location jump, including Home or a family change; its history lasts for this session.
-- **Copy Link** includes the camera, Julia constant, camera rotation, iteration limit, appearance and colour rotation checkbox states and speed. Saved locations preserve the same settings. Paste the link into the browser address bar and press Enter to open that exact location immediately, including in an already open explorer.
-- **Save defaults** at the bottom of Advanced stores your preferred appearance, controls, iteration settings and panel settings. Startup still uses the Home camera, never a remembered deep location.
+- **Location** searches your saved views, including 12 defaults added once from the supplied collection. All entries are editable and deletable; deleted defaults stay deleted after reload. Enter a name and choose **Save location**. Saving the selected location updates it; a collision with another saved name asks before replacement. **Delete location** asks “Delete saved location?” and keeps the current view. **Back** restores the exact view before your last location jump, including Home or a family change; its history lasts for this session.
+- **Copy Link** includes the camera, Julia constant, camera rotation, iteration limit, appearance, colour rotation checkbox states, reverse direction and speed. Saved locations preserve the same settings. Paste the link into the browser address bar and press Enter to open that exact location immediately, including in an already open explorer.
+- **Backup locations** and **Restore locations** in Advanced export and import JSON. Restore preserves existing entries, skips duplicates, and renames conflicting incoming names to keep both versions. Keep a backup before moving to another hostname, port or browser profile; browser storage is separate for each origin.
+- **Save defaults**, beneath the location backup/restore buttons in Advanced, stores your preferred appearance, controls, iteration settings and panel settings. Startup uses the Home camera unless an exact link is opened.
 
 ### Colour and detail
 
@@ -99,7 +104,9 @@ The **Advanced** tab keeps the main detail controls together:
 
 **When movement stops, refinement automatically uses Detailed throughput.** Your selected throughput remains the preference for navigation. Factory settings are **1×** zoom, Mandelbrot Home, **1,000 iterations** and **Dynamic enabled**. Saved defaults and remembered local preferences may override those settings; startup still uses the Home camera.
 
-Move the controls by dragging their background or tab headers and resize their width from the side edges. Each tab fits its content, scrolling when it reaches the bottom margin of the viewport. Main’s **Controls** accordion contains the keyboard and mouse guide. Advanced also contains panel opacity, accent colour and status visibility. The PNG export panel and Julia preview can be moved independently.
+Move the controls by dragging their background or tab headers and resize their width from the side edges. Each tab fits its content, scrolling when it reaches the bottom margin of the viewport. Main’s **Controls** accordion contains the keyboard and mouse guide. Advanced also contains panel opacity, accent colour and **menu hides title and status line**. That option hides both with the menu when checked; both remain visible when unchecked.
+
+The factory accent is **#e5a14e** and panel opacity is **60%**. Control backgrounds use 1.2 times the panel opacity, capped at 100%; active tabs, active buttons, pressed states and hover backgrounds are fully opaque. The menu icon stays white. PNG export and Julia preview move independently: opening one while the other is visible places it underneath when space permits, otherwise it is centred.
 
 ### Save a PNG
 
@@ -109,9 +116,9 @@ Export captures the view when you press Save PNG and renders independently of su
 
 For the complete control reference, defaults and troubleshooting, see the **[User guide](docs/user-guide.md)**.
 
-![Seahorse Valley rendered in DeepGPU Zoomer with a blue, white and gold palette](docs/images/seahorse-valley.jpg)
+![Julia Jewels rendered in DeepGPU Zoomer](docs/images/julia-jewels.jpg)
 
-*Seahorse Valley, one of the built-in locations. Both images above are captured from the application.*
+*Julia Jewels, one of the editable default locations. Both images above are captured from the current application.*
 
 <a id="advanced"></a>
 
@@ -132,6 +139,8 @@ The interface uses TypeScript, HTML and CSS without a UI framework. Vite bundles
 | `src/render/regions.ts`, `src/render/*grid.ts` | Pending work, coverage and coordinate-preserving sample reuse |
 | `src/gpu/` | Device acquisition, capacity checks, shader compilation and timing |
 | `src/palette-editor.ts`, `src/panels.ts`, `src/tuning.ts` | Appearance editing, movable panels and navigation policies |
+| `src/colour-picker.ts`, `src/colour-rotation.ts` | Shared colour pickers, image-sampling loupe and timed palette/light rotation |
+| `src/locations.ts`, `src/default-locations.json`, `src/defaults.ts` | Location backup/restore, the default collection and saved startup preferences |
 | `src/export/` | Export snapshots, tile planning, readback and PNG encoding |
 
 The current dependency versions are decimal.js **10.6.0**, TypeScript **5.9.3**, Vite **5.4.21** and WebGPU type definitions **0.1.71**. The [lockfile](package-lock.json) records the complete dependency resolution.
