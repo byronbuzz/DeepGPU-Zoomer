@@ -53,6 +53,14 @@ fn wideMul(a: Wide, b: Wide) -> Wide {
                          qAdd(qMul(a.x, b.y), qMul(a.y, b.x)), a.e + b.e));
 }
 
+// Only ordinary scalar Mandelbrot with BLA admits the cheaper product.
+// Coordinates, analytic certificates and reference decoding retain qMul.
+fn wideRecurrenceMul(a: Wide, b: Wide) -> Wide {
+    if (!ORDINARY || !APPROX || JULIA || DIRECT) { return wideMul(a,b); }
+    return wideNorm(Wide(qAdd(qMulFast(a.x,b.x),-qMulFast(a.y,b.y)),
+                         qAdd(qMulFast(a.x,b.y),qMulFast(a.y,b.x)),a.e+b.e));
+}
+
 fn wideLog(a: Wide) -> f32 {
     if (a.x.x == 0.0 && a.y.x == 0.0) { return -1e30; }
     return f32(a.e) + 0.5 * log2(max(a.x.x * a.x.x + a.y.x * a.y.x, 1e-38));
@@ -228,7 +236,7 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
                 var twiceReference = reference;
                 twiceReference.e += 1;
                 // Factored quadratic difference, shared with the Julia path.
-                delta = wideMul(delta, wideAdd(twiceReference, delta));
+                delta = wideRecurrenceMul(delta, wideAdd(twiceReference, delta));
                 if (!JULIA) { delta = wideAdd(delta, injection); }
                 referenceIndex += 1u;
                 reference = wideReference(referenceIndex, false);

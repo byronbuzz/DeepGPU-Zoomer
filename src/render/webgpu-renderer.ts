@@ -19,6 +19,7 @@ import { checkedGpu, validateRenderSize, compileShader, readBuffer, storageBuffe
 import { GpuTiming } from "../gpu/timing";
 import compensatedSource from "../arithmetic/compensated.wgsl?raw";
 import quadSource from "../arithmetic/quad.wgsl?raw";
+import quadFastSource from "../arithmetic/quad-fast.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
 import continuationSource from "./continuation.wgsl?raw";
@@ -582,7 +583,7 @@ export class WebGpuRenderer {
     await this.ensureComputePipeline("reuse");
     this.reuseUniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    this.renderModule = await compileShader(device, [compensatedSource, quadSource, perturbationSource, wideSource].join("\n"), "perturbation");
+    this.renderModule = await compileShader(device, [compensatedSource, quadSource, quadFastSource, perturbationSource, wideSource].join("\n"), "perturbation");
 
     // Explicit rather than "auto": the two entry points touch different
     // subsets of the bindings, and an auto layout would derive a different
@@ -750,7 +751,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       const device=this.ctx.device;
       if(device.limits.maxStorageBuffersPerShaderStage<8)throw Error('Continuation requires eight storage bindings');
       this.continuationModule??=await compileShader(device,
-        [compensatedSource,quadSource,continuationEntry(perturbationSource),wideSource,continuationSource].join('\n'),
+        [compensatedSource,quadSource,quadFastSource,continuationEntry(perturbationSource),wideSource,continuationSource].join('\n'),
         'continuation');
       this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
         {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
