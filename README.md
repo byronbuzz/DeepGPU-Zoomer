@@ -33,7 +33,7 @@ WebGPU handles parallel pixel calculation and presentation. At deeper scales, an
 
 ## 🚀 Get started
 
-**[Open DeepGPU Zoomer](https://byronbuzz.github.io/DeepGPU-Zoomer/)** in a browser with WebGPU support. No installation is needed.
+Open **[DeepGPU Zoomer](https://byronbuzz.github.io/DeepGPU-Zoomer/)** in a browser with WebGPU support. No installation is needed.
 
 Browser, GPU, operating-system and driver support all matter. See [WebGPU availability](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API).
 
