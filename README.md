@@ -4,13 +4,13 @@
 
 **The fastest, deepest and smoothest WebGPU Fractal Zoomer in the world! (probably)... Explore Mandelbrot and Julia sets in real-time - in your browser - to depths of 10^-400 and beyond.**
 
+![DeepGPU Zoomer showing a blue and gold Mandelbrot set, Julia preview, PNG export and colour controls](public/gallery/images/screenshot-2026-10-03-212953.png)
+
 [![WebGPU](https://img.shields.io/badge/Rendering-WebGPU-E5A344?style=flat-square)](https://www.w3.org/TR/webgpu/) [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square)](https://www.typescriptlang.org/) [![WGSL](https://img.shields.io/badge/Shaders-WGSL-8758C7?style=flat-square)](https://www.w3.org/TR/WGSL/) [![Local computation](https://img.shields.io/badge/Compute-In_your_browser-249B83?style=flat-square)](#introduction) [![GPL](https://img.shields.io/badge/License-GPL--3.0--or--later-B8476B?style=flat-square)](LICENSE)
 
-[Open the app](https://byronbuzz.github.io/DeepGPU-Zoomer/) · [Get started](#get-started) · [Controls](#explore) · [Advanced](#advanced) · [References](#references) · [Acknowledgements](#acknowledgements)
+[Open the app](https://byronbuzz.github.io/DeepGPU-Zoomer/) · [Gallery](https://byronbuzz.github.io/DeepGPU-Zoomer/gallery/) · [Get started](#get-started) · [Controls](#explore) · [Advanced](#advanced) · [References](#references) · [Acknowledgements](#acknowledgements)
 
 </div>
-
-![DeepGPU Zoomer showing the Mandelbrot set and its exploration controls](docs/images/explorer.jpg)
 
 <a id="introduction"></a>
 
@@ -28,6 +28,8 @@ WebGPU handles parallel pixel calculation and presentation. At deeper scales, an
 | Progressive detail and optional 2× oversampling | Movable controls and a custom panel accent | Your own saved startup preferences |
 
 The application runs locally on your computer. It has no account system, rendering server or cloud-compute dependency.
+
+[Browse the gallery](https://byronbuzz.github.io/DeepGPU-Zoomer/gallery/) for eight captured views, with full-resolution PNGs. You can also open it from Advanced in the explorer.
 
 <a id="get-started"></a>
 

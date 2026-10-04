@@ -1,12 +1,14 @@
 # DeepGPU Zoomer — User guide
 
-[Project overview](../README.md) · [Architecture](architecture.md) · [Attribution](../NOTICE.md)
+[Project overview](../README.md) · [Gallery](https://byronbuzz.github.io/DeepGPU-Zoomer/gallery/) · [Architecture](architecture.md) · [Attribution](../NOTICE.md)
 
 ## First exploration
 
 Open [the hosted application](https://byronbuzz.github.io/DeepGPU-Zoomer/) or run it using the [setup instructions](../README.md#get-started). Choose **Julia Jewels 10^0x** from Location, or hold the left mouse button over a part of the Mandelbrot set you would like to explore. Zoom follows the pointer. Release the button to let the image finish refining.
 
 The footer shows refinement progress, elapsed calculation time, magnification and the effective iteration limit. Magnification is expressed as a power of ten, so it remains readable even at extremely small scales. A completed image means the requested calculation has finished; it does not prove every capped point is mathematically inside the set.
+
+**View the gallery** at the bottom of Advanced opens eight captured views in a separate tab. Select an image to view its full-resolution PNG; **Open the explorer** returns to the application.
 
 ## Navigation
 
