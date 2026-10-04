@@ -125,10 +125,10 @@ function* buildBlaSteps(
   }
   const data = new Float32Array(Math.max(1, entryCount) * ENTRY_FLOATS);
   // Keep full binary64 coefficients until every dependent merge is complete.
-  // Only the current and next levels live here; the f32 transport is output,
+  // Compact each level in place after packing it; the f32 transport is output,
   // never input to a higher level's coefficient or radius calculation.
   const STEP_DOUBLES = 7;
-  let current = new Float64Array(count * STEP_DOUBLES);
+  const current = new Float64Array(count * STEP_DOUBLES);
   const store = (target: Float64Array, index: number, a: Scaled, b: Scaled, radius: number) => {
     const at = index * STEP_DOUBLES;
     target[at] = a.x; target[at + 1] = a.y; target[at + 2] = a.e;
@@ -170,7 +170,7 @@ function* buildBlaSteps(
       if (levelIndex > 0 && radius > MIN_USABLE_RADIUS_LOG2) hasUsableMultiStep = true;
     }
     if (levelIndex + 1 === counts.length) break;
-    const mergedCount = counts[levelIndex + 1], merged = new Float64Array(mergedCount * STEP_DOUBLES);
+    const mergedCount = counts[levelIndex + 1];
     for (let i = 0; i < mergedCount; i++) {
       if (i % 2048 === 0) yield;
       load(current, 2 * i, first); load(current, 2 * i + 1, second);
@@ -182,9 +182,10 @@ function* buildBlaSteps(
       }
       if (!Number.isFinite(radiusLog2)) radiusLog2 = NEVER;
       const combined = compose(first, second);
-      store(merged, i, combined.a, combined.b, radiusLog2);
+      // Both inputs are loaded before overwriting an earlier slot. Subsequent
+      // pairs start at 2*(i+1), beyond every destination already written.
+      store(current, i, combined.a, combined.b, radiusLog2);
     }
-    current = merged;
   }
   return { data, levelOffsets, levelCounts, levels: counts.length, entryCount, hasUsableMultiStep };
 }
