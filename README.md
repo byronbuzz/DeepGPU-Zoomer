@@ -48,6 +48,8 @@ npm run dev
 
 Open **[http://127.0.0.1:5183](http://127.0.0.1:5183)**. The development server uses a fixed port and reports an error if that port is already occupied.
 
+To use a different local port, such as 5494, run `npm run dev -- --port 5494` and open **[http://127.0.0.1:5494](http://127.0.0.1:5494)** instead.
+
 To produce the static application:
 
 ```sh
