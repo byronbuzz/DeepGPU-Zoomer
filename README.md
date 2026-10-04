@@ -16,7 +16,7 @@
 
 ## ✨ Introduction
 
-Dive into a dazzling universe of Mandelbrot and Julia fractals, where every zoom reveals another world of spirals, filaments and miniature sets. Put your GPU to work and follow your curiosity into extraordinary depths, right in your browser. Steer, pan and rotate through the detail, bring it alive with colour and lighting, then capture your discoveries as exact view links or high-resolution PNGs.
+Dive into the dazzling world of Mandelbrot and Julia fractals, where every zoom reveals another ocean of spirals, filaments and miniature sets. Put your AMD/nVidia GPU to work and follow your curiosity into extraordinary depths, right in your browser. 
 
 WebGPU handles parallel pixel calculation and presentation. At deeper scales, an arbitrary-precision reference orbit runs in a background worker, while GPU perturbation methods calculate the surrounding detail. Coordinates retain their decimal digits throughout navigation and saved views.
 
@@ -27,15 +27,15 @@ WebGPU handles parallel pixel calculation and presentation. At deeper scales, an
 | Live Julia preview and 12 editable default locations | Lighting, hue rotation and capped-point patterns | Tiled PNG export at custom resolutions |
 | Progressive detail and optional 2× oversampling | Movable controls and a custom panel accent | Your own saved startup preferences |
 
-The application runs locally on your computer. It has no account system, rendering server or cloud-compute dependency.
-
-[Browse the gallery](https://byronbuzz.github.io/DeepGPU-Zoomer/gallery/) for eight captured views, with full-resolution PNGs. You can also open it from Advanced in the explorer.
+[Browse the gallery](https://byronbuzz.github.io/DeepGPU-Zoomer/gallery/) for some captured views, with full-resolution PNGs. You can also open it from Advanced in the explorer.
 
 <a id="get-started"></a>
 
 ## 🚀 Get started
 
-**[Open DeepGPU Zoomer](https://byronbuzz.github.io/DeepGPU-Zoomer/)** in a browser with WebGPU support. No installation is needed to use the hosted app. Browser, GPU, operating-system and driver support all matter. See [WebGPU availability](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API).
+**[Open DeepGPU Zoomer](https://byronbuzz.github.io/DeepGPU-Zoomer/)** in a browser with WebGPU support. No installation is needed.
+
+Browser, GPU, operating-system and driver support all matter. See [WebGPU availability](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API).
 
 To run the source locally, you need Node.js and npm. Use a secure page origin: the local development address below works; hosted installations should use HTTPS.
 
