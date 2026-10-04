@@ -679,7 +679,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if(display.fallbackCounts.z>0.0){fresh=qualityResolve(incoming,freshUV,display.fallbackCounts.z);}
     let valid = display.freshOptions.x > 0.0 && fresh.a > 0.0 && all(freshUV >= vec2<f32>(0.0)) && all(freshUV <= vec2<f32>(1.0));
     let freshSpacing=display.units.z * round(1.0 / max(fresh.a,1e-30));
-    let prefer = (fresh.a > 0.99 && select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0) || freshSpacing < spacing;
+    let prefer = (fresh.a > 0.99 && freshSpacing <= spacing && select(display.freshOptions.y, display.freshOptions.z, useBack) > 0.0) || freshSpacing < spacing;
     if (valid && (prefer || (!frontValid && !backValid))) { result = fresh; spacing=freshSpacing; }
     if (!frontValid && !backValid && !valid) {
         if (display.fallbackCounts.w > 0.0) {
@@ -1527,9 +1527,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       JSON.stringify(frame.colors)===JSON.stringify(request.colors);
   }
   private samePresentation(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>): frame is NonNullable<WebGpuRenderer["lastFrame"]> {
+    // Retained imagery survives automatic route changes. Compare configured
+    // tolerance even for Direct-labelled composites that can contain BLA pixels;
+    // numerical reuse/completion keep their method-dependent policy checks.
     return !!frame && exportIdentity(frame)===exportIdentity(request) && frame.family === request.family && frame.maxIterations === request.maxIterations &&
       frame.useApprox === (request.useApprox === true) &&
-      this.sameBlaPolicy(frame,request) &&
+      linearBlaPolicy(frame,Method.Hdr)===linearBlaPolicy(request,Method.Hdr) &&
       (request.family !== "julia" || !!frame.juliaX?.eq(request.juliaX!) && !!frame.juliaY?.eq(request.juliaY!)) &&
       JSON.stringify(frame.colors) === JSON.stringify(request.colors);
   }
@@ -1572,7 +1575,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private stalePresentationCompatible(frame: WebGpuRenderer["lastFrame"], request: RenderRequest | NonNullable<WebGpuRenderer["lastFrame"]>){
     return !!frame&&exportIdentity(frame)===exportIdentity(request)&&frame.family===request.family&&frame.maxIterations===request.maxIterations&&
       frame.useApprox===(request.useApprox===true)&&
-      this.sameBlaPolicy(frame,request)&&
+      linearBlaPolicy(frame,Method.Hdr)===linearBlaPolicy(request,Method.Hdr)&&
       (request.family!=='julia'||!!frame.juliaX?.eq(request.juliaX!)&&!!frame.juliaY?.eq(request.juliaY!));
   }
 
