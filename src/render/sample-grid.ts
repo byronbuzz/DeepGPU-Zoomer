@@ -160,3 +160,37 @@ export function sampleGridRemap(previous: FrameView, next: FrameView): SampleGri
   if (!values.every(value => Number.isSafeInteger(value) && value >= -2147483648 && value <= 2147483647)) return null;
   return { offsetX, offsetY, step, denominator };
 }
+
+/** A prior field's completed stride-1 rectangle can certify a whole remapped
+ * region. Callers must separately admit the unchanged numerical policy.
+ * Presentation coverage and unions of partial rectangles are not certificates. */
+export function knownRemappedRegion(
+  region: {x:number;y:number;width:number;height:number},
+  mapping: SampleGridRemap,
+  sourceView: {width:number;height:number},
+  completedRects: readonly {x:number;y:number;width:number;height:number;spacing?:number}[],
+): boolean {
+  if (mapping.denominator !== 1 || mapping.step <= 0 ||
+      ![mapping.step, mapping.offsetX, mapping.offsetY, region.x, region.y,
+        region.width, region.height, sourceView.width, sourceView.height].every(Number.isSafeInteger) ||
+      region.x < 0 || region.y < 0 || region.width <= 0 || region.height <= 0 ||
+      sourceView.width <= 0 || sourceView.height <= 0) return false;
+  const right = region.x + region.width, bottom = region.y + region.height;
+  if (!Number.isSafeInteger(right) || !Number.isSafeInteger(bottom)) return false;
+  const products = [region.x * mapping.step, region.y * mapping.step,
+    (right - 1) * mapping.step, (bottom - 1) * mapping.step];
+  if (!products.every(Number.isSafeInteger)) return false;
+  const [left, top, lastX, lastY] = products.map((value, i) =>
+    value + (i % 2 === 0 ? mapping.offsetX : mapping.offsetY));
+  if (![left, top, lastX, lastY].every(Number.isSafeInteger) ||
+      left < 0 || top < 0 || lastX >= sourceView.width || lastY >= sourceView.height) return false;
+  return completedRects.some(rect => {
+    if ((rect.spacing ?? 1) !== 1 ||
+        ![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger) ||
+        rect.x < 0 || rect.y < 0 || rect.width <= 0 || rect.height <= 0) return false;
+    const rectRight = rect.x + rect.width, rectBottom = rect.y + rect.height;
+    return Number.isSafeInteger(rectRight) && Number.isSafeInteger(rectBottom) &&
+      rectRight <= sourceView.width && rectBottom <= sourceView.height &&
+      left >= rect.x && top >= rect.y && lastX < rectRight && lastY < rectBottom;
+  });
+}

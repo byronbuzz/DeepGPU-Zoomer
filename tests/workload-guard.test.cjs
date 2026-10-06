@@ -14,7 +14,7 @@ test('slice allowance bounds total recurrence operations as the lane count chang
   for(const lanes of [1,9,576,4096]){
     const operations=guard.resumedContinuationOperations(4096,lanes);
     assert.ok(operations>=1&&operations<=4096);
-    assert.ok(operations*lanes<=guard.CONTINUATION_DISPATCH_OPERATIONS);
+    assert.ok(operations*lanes<=guard.CONTINUATION_DISPATCH_OPERATIONS*2);
   }
 });
 test('grid samples own separate state and capacity overflow is rejected',()=>{

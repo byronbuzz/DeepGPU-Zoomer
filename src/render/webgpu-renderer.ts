@@ -1,4 +1,5 @@
 import { ReferenceOrbitCache } from './reference-cache';
+import { BlaTableCache } from './bla-cache';
 import {motionBatchBudget} from './motion-sizing';
 import {deliveryWorkgroup} from './delivery-workgroup';
 // Ordinary variants use these workgroup dimensions.
@@ -29,7 +30,7 @@ import { PendingContinuationSlot, translatedContinuationRegion, type Continuatio
 import reuseSource from "./reuse.wgsl?raw";
 import qualityResolveSource from "./quality-resolve.wgsl?raw";
 import { oversampledView } from "./quality";
-import { boundedRetainedView, createSampleGridAnchor, planRetainedView, sourceAlignedRetainedView, sampleGridRemap, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
+import { boundedRetainedView, createSampleGridAnchor, planRetainedView, sourceAlignedRetainedView, sampleGridRemap, knownRemappedRegion, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
 import { planNumericalView, containsNumericalView, learnOutwardDelay, outwardHorizonMs, outwardPadding } from './numerical-grid';
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
@@ -315,6 +316,15 @@ interface ReferenceDemand {
   followView: boolean;
 }
 
+interface ReferencePrefetch {
+  demand:ReferenceDemand;
+  epsilonLog2:number;
+  owner:RenderRequest;
+  claimed:ReferenceDemand|null;
+  cancelled:boolean;
+  promise:Promise<void>;
+}
+
 interface FieldDescriptor {
   family: "mandelbrot" | "julia";
   constant: string;
@@ -441,6 +451,7 @@ export class WebGpuRenderer {
   private reuseMapping: SampleGridRemap | null = null;
   private reusableView: FrameView | null = null;
   private reusableComplete = false;
+  private reusableKnownRectangles: {x:number;y:number;width:number;height:number;spacing?:number}[] = [];
   private batchMsPerSample = 0;
   private gpuBatchCost = {msPerVisit:0};
   private gpuBatchPolicy = '';
@@ -524,7 +535,9 @@ export class WebGpuRenderer {
   private orbitCapacity = 0;
   private referenceWorker = new ReferenceWorkerClient();
   private referenceCache = new ReferenceOrbitCache(4,128*1024*1024);
+  private blaCache = new BlaTableCache(2,128*1024*1024);
   private pendingReferenceDemand: ReferenceDemand | null = null;
+  private referencePrefetch:ReferencePrefetch|null=null;
 
   /** Cached reference orbit: regenerating it per frame would kill panning. */
   private refX = new Decimal(0);
@@ -845,9 +858,81 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   private cancelPendingReference(message: string) {
-    if (!this.pendingReferenceDemand && !this.referenceWorker.active) return;
+    if (!this.pendingReferenceDemand && !this.referencePrefetch && !this.referenceWorker.active) return;
     this.pendingReferenceDemand = null;
+    if(this.referencePrefetch)this.referencePrefetch.cancelled=true;
+    this.referencePrefetch=null;
     this.referenceWorker.cancel(message);
+  }
+
+  /** Speculation owns CPU data only; the normal foreground path admits GPU data. */
+  private prefetchCompatible(job:ReferencePrefetch,live:RenderRequest):boolean {
+    if(job.claimed)return this.pendingReferenceDemand===job.claimed&&this.referenceDemandCompatible(job.claimed,live);
+    if(!live.followView||!live.interacting||!live.heldInwardZoom||(live.zoom??0)<=0||
+       (live.family??'mandelbrot')!=='mandelbrot'||live.angle||live.exportDomain||live.stationaryOversampling||
+       live.colors.mode!==0||live.colors.supersample!==1||needsEndpoints(live.colors)||(live.colors.capped??0)!==0||
+       !live.useApprox||blaTableEpsilon(live)!==job.epsilonLog2)return false;
+    const focus=live.focus??{x:.5,y:.5};
+    let limbs:number;try{limbs=limbsForScale(this.workRequest(live).unitsPerPixel,96);}catch{return false;}
+    return focus.x===.5&&focus.y===.5&&live.centerX.eq(job.owner.centerX)&&live.centerY.eq(job.owner.centerY)&&
+      this.referenceBudget(live.maxIterations,live.dynamicIterations,'mandelbrot')<=job.demand.input.maxIterations&&
+      limbs<=job.demand.input.limbs;
+  }
+
+  private startReferencePrefetch(request:RenderRequest):void {
+    if(this.referencePrefetch||this.pendingReferenceDemand||this.referenceWorker.active||this.referencePreparing||
+       !this.refValid||this.disposed||this.abortRequested)return;
+    const live=this.currentView??request,rate=live.zoomRate??0;
+    if(!Number.isFinite(rate)||rate<=0||!request.useApprox||!live.followView||!live.interacting||!live.heldInwardZoom||
+       (live.zoom??0)<=0||(live.family??'mandelbrot')!=='mandelbrot'||live.angle||live.exportDomain||live.stationaryOversampling||
+       live.colors.mode!==0||live.colors.supersample!==1||needsEndpoints(live.colors)||(live.colors.capped??0)!==0)return;
+    const focus=live.focus??{x:.5,y:.5};if(focus.x!==.5||focus.y!==.5)return;
+    const work=this.workRequest(live),factor=Math.exp(-rate*1.5);
+    if(!Number.isFinite(factor)||factor<=0)return;
+    let next:number;try{next=limbsForScale(work.unitsPerPixel.times(factor),96);}catch{return;}
+    if(next!==LIMB_PROFILES[LIMB_PROFILES.indexOf(this.refLimbs as typeof LIMB_PROFILES[number])+1])return;
+    // Predict the existing planner's first dyadic grid at the next profile.
+    // Its exact centre is only a cache key; mismatched foreground demand cancels
+    // speculation rather than changing its reference parameter or admission.
+    if(!this.numericalAnchor)return;
+    let spacing=work.unitsPerPixel;
+    while(limbsForScale(spacing,96)<next)spacing=spacing.div(2);
+    const limits=this.ctx.device.limits;
+    const forecast=planNumericalView({...live,unitsPerPixel:spacing.times(2).times(1-1e-12)},this.numericalAnchor,
+      {maxDimension:limits.maxTextureDimension2D,maxSamples:Math.floor(Math.min(limits.maxStorageBufferBindingSize,limits.maxBufferSize)/8)});
+    if(!forecast||!forecast.unitsPerPixel.eq(spacing))return;
+    const future={...live,...forecast,workView:true};
+    const demand=this.referenceDemand(future,next),cached=this.referenceCache.get(demand.input);
+    if(cached&&(cached.escaped||cached.terminal.iteration>=demand.input.maxIterations))return;
+    // A discarded orbit would be rebuilt in the foreground. A shorter escaped
+    // orbit may also leave room for its table, even when the capped pair would not.
+    if((demand.input.maxIterations+1)*40>128*1024*1024)return;
+    const epsilonLog2=blaTableEpsilon(work),maxDelta=approximationDeltaBound('mandelbrot',future,demand.referenceX,demand.referenceY);
+    const job:ReferencePrefetch={demand,epsilonLog2,owner:live,claimed:null,cancelled:false,promise:Promise.resolve()};
+    this.referencePrefetch=job;
+    const checkCurrent=()=>{
+      if(job.cancelled||this.referencePrefetch!==job||this.disposed||this.abortRequested||
+         request.isCurrent&&!request.isCurrent()||!this.prefetchCompatible(job,this.currentView??request))
+        throw new DOMException('Superseded reference prefetch','AbortError');
+    };
+    job.promise=this.trackOperation(async()=>{
+      try{
+        const limit=Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize);
+        const capacity=Math.floor(limit/48)-1;
+        const orbit=await prepareReference(demand.input,(input,resume)=>{
+          const budget=Math.min(REFERENCE_CHUNK_ITERATIONS,capacity-(resume?.iteration??0));
+          if(budget<1)throw Error('Prefetched trajectory exceeds reference capacity');
+          return this.referenceWorker.generate(input,resume,budget);
+        },checkCurrent,cached,yieldToEvents);
+        checkCurrent();this.referenceCache.remember(demand.input,orbit);
+        if(orbit.samples.byteLength+orbit.length*ENTRY_FLOATS*4>128*1024*1024)return;
+        const table=await buildBlaAsync(orbit.samples,orbit.length,maxDelta,async()=>{await yieldToEvents();checkCurrent();},
+          {sampleWords:orbit.sampleWords,epsilonLog2});
+        checkCurrent();this.blaCache.remember(orbit.samples,orbit.length,orbit.sampleWords,epsilonLog2,maxDelta,table);
+      }finally{if(this.referencePrefetch===job)this.referencePrefetch=null;}
+    });
+    // Observe failure immediately. Foreground demand can retry through its normal path.
+    void job.promise.catch(()=>{});
   }
 
   /** Generates and transfers the packed reference in one persistent worker. */
@@ -860,7 +945,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const limit=Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize);
     const decodedBytesPerSample=demand.input.family==='julia'?96:48;
     const capacity = Math.floor(limit / decodedBytesPerSample) - 1;
+    const prefetch=this.referencePrefetch;
+    const claim=prefetch&&!prefetch.cancelled&&referenceIdentity(prefetch.demand.input)===referenceIdentity(demand.input)&&
+      prefetch.demand.input.maxIterations>=demand.input.maxIterations;
+    if(prefetch&&!claim)this.cancelPendingReference('Foreground reference changed');
     this.pendingReferenceDemand = demand;
+    if(claim)prefetch.claimed=demand;
     this.pipelineWaitMs = 0;
     // This demand always needs decoding: overlap its preparation with the CPU
     // orbit, without compiling unrelated numerical variants at startup.
@@ -878,6 +968,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           throw new DOMException('Superseded reference', 'AbortError');
         }
       };
+      if(claim){await prefetch.promise.catch(()=>{});checkCurrent();}
       const cached=this.referenceCache.get(demand.input);
       const active=this.refValid && this.refSamples && this.refTerminal ? { samples:this.refSamples, terminal:this.refTerminal,
         formatVersion:this.refFormatVersion, sampleWords:this.refSampleWords } : undefined;
@@ -975,9 +1066,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       await yieldToEvents();
       checkCurrent();
     };
-    const table = await buildBlaAsync(samples, this.refLength, maxDelta, checkpoint,
+    const cached=this.blaCache.get(samples,this.refLength,this.refSampleWords,epsilonLog2,maxDelta);
+    const table = cached?.table??await buildBlaAsync(samples, this.refLength, maxDelta, checkpoint,
        { sampleWords: this.refSampleWords, epsilonLog2 });
     checkCurrent();
+    if(!cached)this.blaCache.remember(samples,this.refLength,this.refSampleWords,epsilonLog2,maxDelta,table);
     if(table.data.byteLength>Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))throw Error('The approximation table exceeds this GPU’s buffer capacity.');
     const tableMs = performance.now() - started;
     // Builders own an ordinary ArrayBuffer. Narrow its type without copying
@@ -1014,7 +1107,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.clearContinuationWork();
       const previousTable=this.laBuffer,previousIndex=this.laIndexBuffer;
       this.laBuffer=nextTable!;this.laIndexBuffer=nextIndex!;nextTable=undefined;nextIndex=undefined;
-      this.tableMaxDelta=maxDelta;this.tableEpsilonLog2=epsilonLog2;
+      this.tableMaxDelta=cached?.maxDelta??maxDelta;this.tableEpsilonLog2=epsilonLog2;
       this.laLevels=table.entryCount===0?0:table.levels;
       this.laHasUsableMultiStep=table.entryCount!==0&&table.hasUsableMultiStep;
       this.tableMs=tableMs;
@@ -1150,6 +1243,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const mapping = capMapping ?? (reuse && !request.exportDomain && !this.fieldView?.exportDomain && previous && this.fieldView && this.sampleKey === key
       ? sampleGridRemap(this.fieldView, request) : null);
     this.reuseMapping = mapping; this.reusableView = this.fieldView; this.reusableComplete = this.fieldComplete;
+    // Only completed native-density rectangles certify exact copied samples.
+    this.reusableKnownRectangles=mapping&&grid===1&&!capMapping
+      ?this.determined.rectangles.filter(r=>r.spacing===1).map(r=>({...r})):[];
+    // Geometry ownership moves now, even if the caller is cancelled before its
+    // later pending reset. Old-coordinate certificates must not survive adoption.
+    this.determined=new CoverageRegions();this.determinedRegion=null;
     this.fieldComplete = false;
     if (!this.spareField || this.spareCapacity < samples) {
       this.spareField?.destroy();
@@ -1368,12 +1467,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.fieldBuffer=null;this.spareField=null;this.endpointBuffer=null;this.orbitBuffer=null;
       this.laBuffer=null;this.laIndexBuffer=null;this.reuseUniform=null;this.xformBuffer=null;
       this.target=null;this.history=null;this.coverageHistory=null;this.spareHistory=null;this.screenHold=null;this.admittedSamples=null;
-      this.refSamples=null;this.refValid=false;this.referenceCache.clear();
+      this.refSamples=null;this.refValid=false;this.referenceCache.clear();this.blaCache.clear();
       this.pendingReferenceDemand=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
       this.currentView=null;this.fieldView=null;this.completedFrame=null;this.lastFrame=null;this.regionCoverage=null;
       this.coverageFrame=null;this.incomingFrame=null;this.appearanceHoldFrame=null;
       this.lastPresentedSource=null;this.lastPresentedFrame=null;this.lastPresentedCoverage=null;this.cachedStats=null;this.fieldStats=null;this.fieldDescriptor=null;
       this.retainedAnchor=null;this.reuseMapping=null;this.reusableView=null;
+      this.reusableKnownRectangles=[];
       this.pending.reset(0,0);this.determined=new CoverageRegions();
       this.activeOperations.clear();this.pendingPipelines.clear();this.pendingRetain=null;
       this.ordinaryShapePipelines.clear();
@@ -1397,6 +1497,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   }
 
   reproject(request: RenderRequest, allowStaleAppearance=false): boolean {
+    if(this.referencePrefetch&&!this.referencePrefetch.claimed&&!this.prefetchCompatible(this.referencePrefetch,request))
+      this.cancelPendingReference('Reference forecast changed');
     if(this.disposed||request.exportDomain)return false;
     if(this.deviceLost)return false;
     this.validateCoordinates(request);
@@ -1943,16 +2045,20 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const rotated=!!frame.angle;
     if(!rotated)this.retainedAnchor ??= createSampleGridAnchor(this.lastFrame?.angle?frame:this.lastFrame ?? frame);
     const live=this.currentView;
-    // Inward work grids cover more than the screen. Fitting that entire field
-    // into history downsamples detail that is already visible. Preserve the
-    // visible image at display resolution; retain wide coverage on zoom-out.
-    const inward=!!(live?.interacting&&(live.zoom??0)>0&&!rotated&&!live.angle&&
-      (frame.width>live.width||frame.height>live.height));
-    const geometry=inward?(sourceAlignedRetainedView(frame,live!,device.limits.maxTextureDimension2D)??planRetainedView({centerX:live!.centerX,centerY:live!.centerY,
-      unitsPerPixel:live!.unitsPerPixel,width:live!.width,height:live!.height},this.retainedAnchor!,
-      {overscan:1,deviceLimit:device.limits.maxTextureDimension2D})):
+    // During inward zoom, retain the composite on the exact visible grid.
+    // Regridding it onto the incoming source can shift density boundaries and
+    // replace published detail; lattice padding can also halve its resolution.
+    // Keep only geometry from the live view, preserving the captured identity.
+    const inward=!!(live?.interacting&&(live.zoom??0)>0&&!rotated&&!live.angle);
+    let geometry=inward?boundedRetainedView({centerX:live!.centerX,centerY:live!.centerY,
+      unitsPerPixel:live!.unitsPerPixel,width:live!.width,height:live!.height},device.limits.maxTextureDimension2D):
       rotated?boundedRetainedView(frame,device.limits.maxTextureDimension2D):
         planRetainedView(frame,this.retainedAnchor!,{overscan:1,deviceLimit:device.limits.maxTextureDimension2D});
+    // Releasing input must not downsample detail already published from this
+    // target. Keep the existing stable lattice unless its padding would force
+    // a coarser snapshot and a lossless visible crop fits the same history cap.
+    if(!inward&&!rotated&&!live?.angle&&(live?.zoom??0)>=0&&geometry.unitsPerPixel.gt(frame.unitsPerPixel))
+      geometry=sourceAlignedRetainedView(frame,live??frame,device.limits.maxTextureDimension2D)??geometry;
     const retained={...frame,...geometry};
     const candidates=[...this.coverageIn({...frame,proxy:true,coveredRegions:this.determined.rectangles.map(r=>({...r,spacing:frame.unitsPerPixel.times(r.spacing??1)}))},retained),...[this.historyValid?this.lastFrame:null,this.coverageFrame].flatMap(
       old=>this.samePresentation(old,frame) ? this.coverageIn(old!,retained) : [])].filter(r=>r!==null);
@@ -1971,6 +2077,13 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       this.hasFinerRetainedCoverage(this.lastFrame,retained,live??retained)&&
       (!this.presentationCompatible(this.coverageFrame,live??retained)||
         !this.hasFinerRetainedCoverage(this.coverageFrame,retained,live??retained)));
+    // A bounded composite cannot encode detail finer than its own texel grid.
+    // Preserve an already finer backup when the front has no proved finer
+    // coverage; promoting a completed but coarser front would erase that detail.
+    const keepFinerBack=!!(this.samePresentation(this.coverageFrame,frame)&&
+      this.hasFinerRetainedCoverage(this.coverageFrame,retained,live??retained)&&
+      !(this.samePresentation(this.lastFrame,frame)&&
+        this.hasFinerRetainedCoverage(this.lastFrame,this.coverageFrame!,live??retained)));
     let snapshot:GPUTexture|undefined;
     this.spareHistory?.destroy();this.spareHistory=null;
     const pending=checkedGpu(device,()=>{
@@ -1990,7 +2103,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if(this.deviceLost||epoch!==this.publicationEpoch||this.incomingFrame!==frame||this.history!==history)return false;
       if(this.currentView&&!this.presentationCompatible(frame,this.currentView)&&
         !(allowStaleAppearance&&this.stalePresentationCompatible(frame,this.currentView)))return false;
-      if(this.historyValid&&(this.lastFrame?.snapshotComplete||keepPriorCap||keepFiner)){
+      if(this.historyValid&&!keepFinerBack&&(this.lastFrame?.snapshotComplete||keepPriorCap||keepFiner)){
         this.coverageHistory?.destroy();this.coverageHistory=this.history;this.coverageFrame=this.lastFrame;
       }else this.history?.destroy();
       this.history=snapshot!;snapshot=undefined;
@@ -2030,7 +2143,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
   private approximationPreparation(request:RenderRequest) {
     const family=request.family??'mandelbrot';
     const requiredDelta=approximationDeltaBound(family,request,this.refX,this.refY);
-    const narrowRetry=!this.laHasUsableMultiStep&&requiredDelta.lt(this.tableMaxDelta.times(1-1e-12));
+    const narrowRetry=this.laLevels>0&&!this.laHasUsableMultiStep&&requiredDelta.lt(this.tableMaxDelta.times(1-1e-12));
     const needed=request.useApprox===true&&approximationEligible(family,request.colors.mode)&&
       (this.tableEpsilonLog2!==blaTableEpsilon(request)||
        requiredDelta.gt(this.tableMaxDelta.times(1+1e-12))||narrowRetry);
@@ -2309,6 +2422,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     }
 
     this.referencePreparing=false;
+    this.startReferencePrefetch(request);
     // Preparation can take longer than a fast outward zoom's viewport lifetime.
     // Re-enter the existing retarget loop before allocating/calculating an old
     // field; the reserved table is reused if the live domain fits it.
@@ -2462,7 +2576,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     } else if(inPlaceCapUpgrade) {
       // Keep the old field and visible target. Reopened regions will visit only
       // samples stamped with an older cap; no CPU whole-region reuse applies.
-      this.reuseMapping=null;this.reusableComplete=false;
+      this.reuseMapping=null;this.reusableComplete=false;this.reusableKnownRectangles=[];
+      this.determined=new CoverageRegions();this.determinedRegion=null;
       this.fieldComplete=false;this.sampleKey=sampleKey;this.currentImageValid=false;
       u32[41]=2;
       device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
@@ -2663,10 +2778,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const ownsExact=!carry;
       const width=region.width, rows=region.height;
       const m = this.reuseMapping, old = this.reusableView;
-      const fullyKnown = !capUpgrade && this.reusableComplete && m && old && m.denominator === 1 &&
+      const fullyKnown = !capUpgrade && m && old && m.denominator === 1 &&
         m.offsetX + region.x * m.step >= 0 && m.offsetY + region.y * m.step >= 0 &&
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
-        m.offsetY + (region.y + rows - 1) * m.step < old.height;
+        m.offsetY + (region.y + rows - 1) * m.step < old.height &&
+        (this.reusableComplete || grid===1&&knownRemappedRegion(region,m,old,this.reusableKnownRectangles));
       if (!carry&&fullyKnown) { if(region.stride===1){cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;} continue; }
       const visits=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride);
       const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);

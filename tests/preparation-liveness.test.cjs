@@ -248,6 +248,7 @@ test('unusable BLA narrowing policy remains active for each newly admitted field
   commitReference(p, demand);
   p.tableMaxDelta = D('1e-12'); p.tableEpsilonLog2 = blaTableEpsilon(initial);
   p.laHasUsableMultiStep = false;
+  p.laLevels=2;
   const latest = contracted(initial);
   assert.equal(p.approximationPreparation(latest).needed, true);
   assert.equal(p.approximationPreparation({ ...latest, zoom: 0 }).needed, true);
@@ -256,6 +257,15 @@ test('unusable BLA narrowing policy remains active for each newly admitted field
   assert.equal(p.approximationPreparation(changedEpsilon).needed, true);
   const bigger = { ...latest, unitsPerPixel: initial.unitsPerPixel.times(2) };
   assert.equal(p.approximationPreparation(bigger).needed, true);
+});
+
+test('a structurally empty BLA table cannot gain skips by narrowing its unchanged orbit',()=>{
+  const p=probe(),initial=request();commitReference(p,p.referenceDemand(initial,8));
+  p.laLevels=0;p.laHasUsableMultiStep=false;p.tableMaxDelta=D('1e-12');p.tableEpsilonLog2=blaTableEpsilon(initial);
+  const smaller=contracted(initial);
+  assert.equal(p.approximationPreparation(smaller).needed,false);
+  assert.equal(p.approximationPreparation({...smaller,tuning:{...smaller.tuning,blaPrecisionLog2:-24}}).needed,true);
+  assert.equal(p.approximationPreparation({...initial,unitsPerPixel:initial.unitsPerPixel.times(2)}).needed,true);
 });
 
 test('repeated costly preparation boundaries admit the captured field before held-zoom retarget', async () => {

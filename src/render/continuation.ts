@@ -25,8 +25,8 @@ export function measuredContinuationBudget(msPerVisit:number,targetMs:number):nu
 /** Resume saved work in independently bounded slices. */
 export function resumedContinuationOperations(admitted:number,lanes:number,stationary=false):number {
   // Settled work can amortize its counter fence across a larger bounded slice.
-  // Keep the per-pixel bound and the motion dispatch allowance unchanged.
-  const perLane=Math.floor(CONTINUATION_DISPATCH_OPERATIONS*(stationary?4:1)/Math.max(1,lanes));
+  // Moving work also amortizes readback; each lane retains its cold bound.
+  const perLane=Math.floor(CONTINUATION_DISPATCH_OPERATIONS*(stationary?4:2)/Math.max(1,lanes));
   return Math.max(1,Math.min(admitted,COLD_CONTINUATION_OPERATIONS,perLane));
 }
 

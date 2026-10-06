@@ -24,9 +24,46 @@ test('cached prefix resumes without rounding and equals a fresh orbit',async()=>
  assert.equal(hash(a),hash(await prep(extended)));assert.equal(a.terminal.identity,referenceIdentity(extended));
  c.remember(extended,a);assert.equal(c.get(input),a);
 });
-test('identity includes precision, family, centre and Julia constant',async()=>{
+test('Mandelbrot identity includes precision, family and exact centre',async()=>{
  const c=new ReferenceOrbitCache(4,128*1024*1024);c.remember(input,await prep(input));
- for(const change of [{limbs:16},{family:'julia'},{centerX:'.2500001'},{centerY:'.1'},{juliaX:'.2'},{juliaY:'.3'}])assert.equal(c.get({...input,...change}),undefined);
+ for(const change of [{limbs:16},{family:'julia'},{centerX:'.2500001'},{centerY:'.1'}])assert.equal(c.get({...input,...change}),undefined);
+});
+
+test('unused Julia coordinates preserve Mandelbrot fresh bytes, cache hits and exact cached extension',async()=>{
+ const c=new ReferenceOrbitCache(4,128*1024*1024),a=await prep(input),before=hash(a);c.remember(input,a);
+ for(const change of [{juliaX:'.2'},{juliaY:'.3'},{juliaX:'-.8',juliaY:'.156'}]){
+  const changed={...input,...change},fresh=generatePackedReference(changed);
+  assert.equal(referenceIdentity(changed),referenceIdentity(input));
+  assert.equal(c.get(changed),a);assert.equal(c.get(changed).samples.buffer,a.samples.buffer);
+  assert.deepEqual(Buffer.from(fresh.buffer),Buffer.from(a.samples.buffer));
+  assert.deepEqual(fresh.terminal,a.terminal);
+ }
+ const changed={...input,juliaX:'-.8',juliaY:'.156',maxIterations:1280},resumes=[];
+ const extended=await prepareReference(changed,async(i,resume)=>{
+  resumes.push(resume);return generatePackedReference(i,resume,71);
+ },()=>{},c.get(changed));
+ assert.equal(resumes.length,4);assert.equal(resumes[0],a.terminal);
+ assert.deepEqual(resumes.map(r=>r.iteration),[1000,1071,1142,1213]);
+ const fresh=generatePackedReference({...input,maxIterations:1280});
+ assert.deepEqual(Buffer.from(extended.samples.buffer),Buffer.from(fresh.buffer));
+ assert.deepEqual(extended.terminal,fresh.terminal);assert.equal(hash(a),before);
+ c.remember(changed,extended);assert.equal(c.get(input),extended);
+});
+
+test('Julia constants still miss the cache and reject another constant\'s resume state',async()=>{
+ const julia={...input,family:'julia',centerX:'.1',centerY:'.2',juliaX:'-.1',juliaY:'.2',maxIterations:128};
+ const a=await prep(julia),c=new ReferenceOrbitCache(4,128*1024*1024);c.remember(julia,a);
+ assert.equal(a.escaped,false);assert.equal(a.terminal.iteration,128);
+ for(const change of [{juliaX:'-.11'},{juliaY:'.21'}]){
+  const changed={...julia,...change,maxIterations:160};
+  assert.notEqual(referenceIdentity(changed),referenceIdentity(julia));assert.equal(c.get(changed),undefined);
+  assert.throws(()=>generatePackedReference(changed,a.terminal,71),/Incompatible reference continuation/);
+  const resumes=[],fresh=await prepareReference(changed,async(i,resume)=>{
+   resumes.push(resume);return generatePackedReference(i,resume,71);
+  },()=>{},a);
+  assert.equal(resumes[0],undefined,'an incompatible cached prefix starts from the real origin');
+  assert.deepEqual(Buffer.from(fresh.samples.buffer),Buffer.from(generatePackedReference(changed).buffer));
+ }
 });
 test('LRU count and hard byte caps do not retain oversize or incomplete arrays',async()=>{
  const a=await prep(input),c=new ReferenceOrbitCache(1,a.samples.byteLength*2);
@@ -87,7 +124,7 @@ vm.runInNewContext(ts.transpileModule(`class Probe { ${actual} } exports.Probe=P
 function probe(c,active){
  const p=new context.exports.Probe();let workers=0;const request={input,followView:false,isCurrent:()=>true};
  Object.assign(p,{ctx:{device:{limits:{maxStorageBufferBindingSize:2**28,maxBufferSize:2**28},queue:{onSubmittedWorkDone:async()=>{}}}},
-  referenceCache:c,referenceDemand:()=>({...request,referenceX:0,referenceY:0}),referenceDemandCompatible:()=>true,
+  referenceCache:c,blaCache:{clear:()=>{}},referenceDemand:()=>({...request,referenceX:0,referenceY:0}),referenceDemandCompatible:()=>true,
   ensureComputePipeline:async()=>{},referenceWorker:{generate:async(i,resume,budget)=>{workers++;return generatePackedReference(i,resume,Math.min(budget,71));},cancel:()=>{}},
   refValid:!!active,refSamples:active?.samples,refTerminal:active?.terminal,refFormatVersion:active?.formatVersion,refSampleWords:active?.sampleWords,
   activeOperations:new Set(),pendingPipelines:new Map(),ordinaryShapePipelines:new Map(),lossHook:{notify:()=>{}},
@@ -100,6 +137,8 @@ test('renderer cache hit bypasses worker but checks cancellation before GPU adop
  const a=await prep(input),c=new ReferenceOrbitCache(4,128*1024*1024);c.remember(input,a);
  const {p,request,workers}=probe(c);context.gpuEntries=0;
  await assert.rejects(p.generateOrbit(request,8),e=>e===stopBeforeGpu);assert.equal(workers(),0);assert.equal(context.gpuEntries,1);
+ p.referenceDemand=()=>({...request,input:{...input,juliaX:'-.8',juliaY:'.156'},referenceX:0,referenceY:0});
+ await assert.rejects(p.generateOrbit(request,8),e=>e===stopBeforeGpu);assert.equal(workers(),0);assert.equal(context.gpuEntries,2);
  const oldGpu=p.orbitBuffer;p.abortRequested=true;context.gpuEntries=0;
  await assert.rejects(p.generateOrbit(request,8),e=>e.name==='AbortError');
  assert.equal(workers(),0);assert.equal(context.gpuEntries,0);assert.equal(p.orbitBuffer,oldGpu);assert.equal(p.pendingReferenceDemand,null);

@@ -46,9 +46,11 @@ export interface ReferenceResumeState {
   escapeIndex: number;
 }
 
-/** Iteration demand is intentionally excluded: an extension is the same orbit. */
+/** Iteration demand is excluded; Mandelbrot also ignores the unused Julia constant. */
 export function referenceIdentity(input: ReferenceOrbitInput): string {
-  return JSON.stringify([input.family, input.centerX, input.centerY, input.juliaX, input.juliaY, input.limbs]);
+  return JSON.stringify(input.family === "julia"
+    ? [input.family, input.centerX, input.centerY, input.juliaX, input.juliaY, input.limbs]
+    : [input.family, input.centerX, input.centerY, input.limbs]);
 }
 
 /** Mandelbrot starts at zero, so its relative reference equals its absolute one. */
