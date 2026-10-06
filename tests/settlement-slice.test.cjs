@@ -4,15 +4,15 @@ const {resumedContinuationOperations:operations,CONTINUATION_DISPATCH_OPERATIONS
 test('stationary slices amortize fences without exceeding either operation bound',()=>{
  for(const lanes of [1,9,128,256,512,768,1024,2048,4096])for(const admitted of [64,256,512,4096]){
   const motion=operations(admitted,lanes),still=operations(admitted,lanes,true);
-  assert.ok(motion*lanes<=cap);assert.ok(still*lanes<=cap*2);assert.ok(still<=admitted&&still<=pixelCap);assert.ok(still>=motion);
+  assert.ok(motion*lanes<=cap);assert.ok(still*lanes<=cap*4);assert.ok(still<=admitted&&still<=pixelCap);assert.ok(still>=motion);
   assert.equal(operations(admitted,lanes,false),motion);
  }
  assert.equal(operations(4096,512),2048);assert.equal(operations(4096,512,true),4096);
- assert.equal(operations(4096,4096),256);assert.equal(operations(4096,4096,true),512);
+ assert.equal(operations(4096,4096),256);assert.equal(operations(4096,4096,true),1024);
  assert.equal(operations(4096,1,true),4096);
 });
 test('a new interaction immediately restores the motion slice allowance',()=>{
- const samples=[true,true,false,false,true,false].map(still=>operations(4096,1024,still));assert.deepEqual(samples,[2048,2048,1024,1024,2048,1024]);
+ const samples=[true,true,false,false,true,false].map(still=>operations(4096,1024,still));assert.deepEqual(samples,[4096,4096,1024,1024,4096,1024]);
  assert.equal(continuationOperations(1_000_000,0.000001,8),4096,'mandatory slicing remains active with optional hard-pixel work Off');
 });
 // Execute the actual renderer selection expression so the guard follows live view.

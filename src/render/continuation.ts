@@ -26,7 +26,7 @@ export function measuredContinuationBudget(msPerVisit:number,targetMs:number):nu
 export function resumedContinuationOperations(admitted:number,lanes:number,stationary=false):number {
   // Settled work can amortize its counter fence across a larger bounded slice.
   // Keep the per-pixel bound and the motion dispatch allowance unchanged.
-  const perLane=Math.floor(CONTINUATION_DISPATCH_OPERATIONS*(stationary?2:1)/Math.max(1,lanes));
+  const perLane=Math.floor(CONTINUATION_DISPATCH_OPERATIONS*(stationary?4:1)/Math.max(1,lanes));
   return Math.max(1,Math.min(admitted,COLD_CONTINUATION_OPERATIONS,perLane));
 }
 
