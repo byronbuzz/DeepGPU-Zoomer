@@ -1,3 +1,4 @@
+import { ReferenceOrbitCache } from './reference-cache';
 import {motionBatchBudget} from './motion-sizing';
 import {deliveryWorkgroup} from './delivery-workgroup';
 // Ordinary variants use these workgroup dimensions.
@@ -23,7 +24,7 @@ import quadFastSource from "../arithmetic/quad-fast.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
 import continuationSource from "./continuation.wgsl?raw";
-import { continuationEntry, continuationRegion, continuationOperations, resumedContinuationOperations, continuationLaneLimit, measuredContinuationBudget, COLD_CONTINUATION_OPERATIONS, CONTINUATION_HEADER_BYTES } from "./continuation";
+import { MANDATORY_CONTINUATION_ITERATIONS, continuationRegion, continuationOperations, resumedContinuationOperations, continuationLaneLimit, measuredContinuationBudget, COLD_CONTINUATION_OPERATIONS, CONTINUATION_HEADER_BYTES } from "./continuation";
 import { PendingContinuationSlot, translatedContinuationRegion, type ContinuationIdentity, type PendingContinuation } from './pending-continuation';
 import reuseSource from "./reuse.wgsl?raw";
 import qualityResolveSource from "./quality-resolve.wgsl?raw";
@@ -309,6 +310,8 @@ interface ReferenceDemand {
   centerY: Decimal;
   referenceX: Decimal;
   referenceY: Decimal;
+  /** Original numerical snapshot; motion does not change its admitted orbit. */
+  view: RenderRequest;
   followView: boolean;
 }
 
@@ -520,6 +523,7 @@ export class WebGpuRenderer {
   private orbitBuffer: GPUBuffer | null = null;
   private orbitCapacity = 0;
   private referenceWorker = new ReferenceWorkerClient();
+  private referenceCache = new ReferenceOrbitCache(4,128*1024*1024);
   private pendingReferenceDemand: ReferenceDemand | null = null;
 
   /** Cached reference orbit: regenerating it per frame would kill panning. */
@@ -746,19 +750,19 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return this[field]!;
   }
 
-  private async ensureContinuationPipeline(kind:'direct'|'plain'|'approx'|'julia'|'juliaApprox') {
+  private async ensureContinuationPipeline(kind:'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|'julia'|'juliaApprox') {
     await this.oncePipeline('continuation-'+kind,()=>this.continuationPipelines.has(kind),async()=>{
       const device=this.ctx.device;
       if(device.limits.maxStorageBuffersPerShaderStage<8)throw Error('Continuation requires eight storage bindings');
       this.continuationModule??=await compileShader(device,
-        [compensatedSource,quadSource,quadFastSource,continuationEntry(perturbationSource),wideSource,continuationSource].join('\n'),
+        [compensatedSource,quadSource,quadFastSource,perturbationSource,wideSource,continuationSource].join('\n'),
         'continuation');
       this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
         {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
-      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')?1:0,APPROX:kind==='approx'||kind==='juliaApprox'?1:0};
+      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')?1:0,ORDINARY:kind.startsWith('ordinary')?1:0,APPROX:kind==='approx'||kind==='ordinaryApprox'||kind==='juliaApprox'?1:0};
       const pipeline=await device.createComputePipelineAsync({label:'continuation-'+kind,
         layout:device.createPipelineLayout({bindGroupLayouts:[this.bindLayout!,this.continuationLayout]}),
-        compute:{module:this.continuationModule,entryPoint:'compute',constants}});
+        compute:{module:this.continuationModule,entryPoint:'computeContinued',constants}});
       if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
       this.continuationPipelines.set(kind,pipeline);
     });
@@ -817,10 +821,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         referenceX=this.refX;referenceY=this.refY;
       }
     }
-    return {input,centerX:request.centerX,centerY:request.centerY,referenceX,referenceY,followView:!!request.followView};
+    return {input,centerX:request.centerX,centerY:request.centerY,referenceX,referenceY,view:request,followView:!!request.followView};
   }
 
   private referenceDemandCompatible(demand: ReferenceDemand, request: RenderRequest): boolean {
+    const visible=request;
     request=this.workRequest(request);
     const method = methodForScale(request.unitsPerPixel,request.tuning);
     if (method === Method.Direct) return false;
@@ -835,7 +840,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const domain = renderDomain(request);
     const halfSpan = request.unitsPerPixel.times(Math.min(domain.width, domain.height) / 2);
     const drift = request.centerX.minus(demand.referenceX).abs().plus(request.centerY.minus(demand.referenceY).abs());
-    return drift.lessThanOrEqualTo(halfSpan.times(0.5));
+    return drift.lessThanOrEqualTo(halfSpan.times(0.5))||
+      this.inwardPreparationContinues(demand.view,visible);
   }
 
   private cancelPendingReference(message: string) {
@@ -872,15 +878,22 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
           throw new DOMException('Superseded reference', 'AbortError');
         }
       };
-      const orbit = await prepareReference(demand.input,
+      const cached=this.referenceCache.get(demand.input);
+      const active=this.refValid && this.refSamples && this.refTerminal ? { samples:this.refSamples, terminal:this.refTerminal,
+        formatVersion:this.refFormatVersion, sampleWords:this.refSampleWords } : undefined;
+      // An oversized extension may outgrow the cache; keep its longer active prefix.
+      const previous=cached && (!active || active.terminal.identity!==referenceIdentity(demand.input) ||
+        cached.escaped || cached.terminal.iteration>=active.terminal.iteration) ? cached : active;
+      const orbit = cached && (cached.escaped||cached.terminal.iteration>=demand.input.maxIterations)?cached:await prepareReference(demand.input,
         (input, resume) => {
           const budget = Math.min(REFERENCE_CHUNK_ITERATIONS, capacity - (resume?.iteration ?? 0));
           if (budget < 1) throw new Error('This trajectory needs a longer reference than this GPU can hold. No result was finalised.');
           return this.referenceWorker.generate(input, resume, budget);
         }, checkCurrent,
-        this.refValid && this.refSamples && this.refTerminal ? { samples:this.refSamples, terminal:this.refTerminal,
-          formatVersion:this.refFormatVersion, sampleWords:this.refSampleWords } : undefined,
+        previous,
         yieldToEvents);
+      checkCurrent();
+      this.referenceCache.remember(demand.input,orbit);
       const samples = orbit.samples;
       const pipelineStarted=performance.now();
       await decodePreparation;
@@ -1355,7 +1368,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       this.fieldBuffer=null;this.spareField=null;this.endpointBuffer=null;this.orbitBuffer=null;
       this.laBuffer=null;this.laIndexBuffer=null;this.reuseUniform=null;this.xformBuffer=null;
       this.target=null;this.history=null;this.coverageHistory=null;this.spareHistory=null;this.screenHold=null;this.admittedSamples=null;
-      this.refSamples=null;this.refValid=false;
+      this.refSamples=null;this.refValid=false;this.referenceCache.clear();
       this.pendingReferenceDemand=null;this.fieldUniforms=null;this.partialAppearanceUniforms=null;
       this.currentView=null;this.fieldView=null;this.completedFrame=null;this.lastFrame=null;this.regionCoverage=null;
       this.coverageFrame=null;this.incomingFrame=null;this.appearanceHoldFrame=null;
@@ -1994,6 +2007,16 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
   private isInteracting(request: RenderRequest): boolean {
     return !!(request.followView ? this.currentView ?? request : request).interacting;
   }
+  /** Finish the admitted snapshot while inward demand remains inside it.
+   * The resulting pixels keep their original grid/reference/table identity;
+   * committed-reference reuse still uses its strict quarter-span bound. */
+  private inwardPreparationContinues(prepared:RenderRequest,live:RenderRequest):boolean {
+    const ordinary=(r:RenderRequest)=>!!r.followView&&!!r.interacting&&!!r.heldInwardZoom&&(r.zoom??0)>0&&
+      (r.family??'mandelbrot')==='mandelbrot'&&!r.angle&&!r.exportDomain&&!r.stationaryOversampling&&
+      r.publishPartial!==false&&r.colors.mode===0&&r.colors.supersample===1&&
+      !needsEndpoints(r.colors)&&(r.colors.capped??0)===0;
+    return !!prepared&&ordinary(prepared)&&ordinary(live)&&containsNumericalView(prepared,live);
+  }
   private referenceNeedsPreparation(request:RenderRequest,limbs:number):boolean {
     const family=request.family??'mandelbrot';
     const constant=family==='julia'?`${request.juliaX},${request.juliaY}`:'';
@@ -2044,13 +2067,12 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       limbsForScale(request.unitsPerPixel,wide?96:48)!==limbsForScale(live.unitsPerPixel,wide?96:48))
       throw new LiveDemandChanged();
   }
-  /** Preparation may outlive an inward work grid. Re-enter the existing
-   * retarget path before calculating that old grid, without changing ordinary
-   * between-batch residency or the outward/stationary policies. */
+  /** An admitted inward snapshot gets useful work before the existing batch
+   * retarget follows a finer live grid. Other geometry changes still retry. */
   private requirePreparedInwardView(request:RenderRequest){
     const live=request.followView?this.currentView:null;
     if((request.family??'mandelbrot')==='mandelbrot'&&live?.interacting&&(live.zoom??0)>0&&
-        !this.sameView(request,this.workRequest(live)))throw new LiveDemandChanged();
+        !this.sameView(request,this.workRequest(live))&&!this.inwardPreparationContinues(request,live))throw new LiveDemandChanged();
   }
   /** Plan numerical sampling independently of the visible camera and output. */
   methodForRequest(visible:RenderRequest):Method|null {
@@ -2150,7 +2172,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const xs=corners.map(p=>p.x*request.width),ys=corners.map(p=>p.y*request.height);
     const visible=corners.length?{x:Math.min(...xs),y:Math.min(...ys),
       width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)}:undefined;
-    return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles,visible};
+    const heldInwardZoom=!!(live.heldInwardZoom&&live.interacting&&(live.zoom??0)>0&&
+      this.perturbationActive&&methodForScale(request.unitsPerPixel,request.tuning)!==Method.Direct&&
+      (request.family??'mandelbrot')==='mandelbrot'&&!request.angle&&!live.angle&&request.colors.mode===0&&
+      request.colors.supersample===1&&!needsEndpoints(request.colors)&&(request.colors.capped??0)===0);
+    return {x:mapped.x*request.width,y:mapped.y*request.height,zoom:live.zoom??0,covered:hints.rectangles,visible,heldInwardZoom};
   }
 
   render(request: RenderRequest): Promise<RenderStats> {
@@ -2186,6 +2212,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
   }
 
   private async renderTarget(request: RenderRequest): Promise<RenderStats> {
+    const targetStartingSerial=this.partialSerial;
     this.batchFeedback.enterTarget();
 
     const { device } = this.ctx;
@@ -2472,8 +2499,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     };
     const progressive = grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
     const continuationCapacity=continuationLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize));
-    const continuationSupported=request.followView && colors.mode===0 && grid===1 &&
-      device.limits.maxStorageBuffersPerShaderStage>=8 && continuationCapacity>0;
+    const continuationSupported=device.limits.maxStorageBuffersPerShaderStage>=8 && continuationCapacity>=grid*grid;
+    if(request.maxIterations>=MANDATORY_CONTINUATION_ITERATIONS&&!continuationSupported)
+      throw Error('This GPU cannot safely render million-iteration requests. Reduce the iteration limit.');
     const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height);
     this.aborted = false;
     this.partialRegions = 0;
@@ -2601,7 +2629,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       // Only the continuation route consults its separate, bounded feedback.
       const continuedBudget=costly?this.batchFeedback.budget(minimum,batchTuning.batchTargetMs,
         freshWork?request.width*request.height:Math.min(request.width*request.height,minimum)):ordinaryBudget;
-      const spatialBudget=costly?Math.min(continuedBudget,continuationCapacity):ordinaryBudget;
+      const spatialBudget=costly?Math.min(continuedBudget,Math.floor(continuationCapacity/(grid*grid))):ordinaryBudget;
       // A direct-iteration wave can exceed the allowance even at minimum size;
       // shrinking it further loses occupancy without making it finish sooner.
       const gpuControlled=!!request.followView&&family==='mandelbrot'&&ordinary&&
@@ -2644,11 +2672,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
       // Fail closed if region selection ever exceeds the admitted capacity;
       // silently falling back here would undo the cold dispatch guard.
-      const shape=costly ? continuationRegion(width,rows,region.stride,limit) : null;
+      const shape=costly ? continuationRegion(width,rows,region.stride,limit,grid) : null;
       let regionPipeline=calculatePipeline;
       if(shape){
         const preparing=performance.now();
-        regionPipeline=await this.ensureContinuationPipeline(pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox');
+        regionPipeline=await this.ensureContinuationPipeline(ordinarySpecialized ? pipelineKind==='approx'?'ordinaryApprox':'ordinaryPlain' : pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox');
         this.pipelineWaitMs+=performance.now()-preparing;
         if(this.abortRequested||!request.isCurrent!()||continuationOrbit!==this.orbitBuffer)throw new DOMException('Superseded continuation','AbortError');
         this.requireLiveMethod(request);
@@ -2700,7 +2728,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
           const control=new Uint32Array(resume?4:CONTINUATION_HEADER_BYTES/4);
-          const operations=resumedContinuationOperations(sliceOperations,resume?unfinished:shape.lanes);
+          const stationarySlice=!!request.followView&&request.maxIterations>=MANDATORY_CONTINUATION_ITERATIONS&&family==='mandelbrot'&&ordinary&&
+            method!==Method.Direct&&!this.isInteracting(request);
+          const operations=resumedContinuationOperations(sliceOperations,resume?unfinished:shape.lanes,stationarySlice);
           control.set([operations,resume?1:0,shape.columns,0]);
           device.queue.writeBuffer(scratch!,0,control);
           device.queue.writeBuffer(this.statsBuffer,28,new Uint32Array(1));
@@ -2708,12 +2738,13 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           const sample=this.timing.begin();
           const pass=encoder.beginComputePass({label:'calculate-region',timestampWrites:this.timing.writes(sample)});
           pass.setPipeline(regionPipeline);pass.setBindGroup(0,bind);pass.setBindGroup(1,scratchBind!);
-          pass.dispatchWorkgroups(Math.ceil(width/region.stride/8),Math.ceil(rows/region.stride/4));pass.end();
+          pass.dispatchWorkgroups(Math.ceil(shape.columns/8),Math.ceil(Math.ceil(rows/region.stride)*grid/4));pass.end();
           this.timing.resolve(encoder,sample);
           // Read the existing survivor/completion counters in this submission.
           encoder.copyBufferToBuffer(this.statsBuffer,0,continuationReadback!,0,56);
           device.queue.submit([encoder.finish()]);
-          if(!resume)submittedVisits+=visits;
+          this.ctx.lastNumericalWork=Object.freeze({route:'continued',method:method===Method.Direct?'direct':'perturbation',family,maxIterations:request.maxIterations,width,height:rows,stride:region.stride,sampleGrid:grid,operations,submittedAt:new Date().toISOString()});
+          if(!resume)submittedVisits+=shape.lanes;
           if(sample){
             sliceExpected++;
             this.timing.collect(sample,ms=>{sliceReported++;sliceGpuMs+=ms;learnRegion();},
@@ -2758,7 +2789,12 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
               !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
           if(!serviceAppearance()){this.retarget=true;completed=false;break;}
           const live=this.currentView;
-          if(request.followView&&live&&!this.sameView(request,this.workRequest(live))&&performance.now()-targetStarted>=(live.tuning?.targetResidencyMs??tuning.targetResidencyMs)){
+          // An unfinished first slice is not a publication. Keep its bounded
+          // continuation until some completed samples can be shown; otherwise
+          // each inward scale change discards every unfinished lane.
+          if(request.followView&&live&&!this.sameView(request,this.workRequest(live))&&
+              !(this.partialSerial===targetStartingSerial&&this.inwardPreparationContinues(request,live))&&
+              performance.now()-targetStarted>=(live.tuning?.targetResidencyMs??tuning.targetResidencyMs)){
             const next=this.workRequest(live);
             const saved:PendingContinuation={scratch:scratch!,capacity:scratchCapacity,region,view:request,
               identity:continuationIdentity,unfinished,operations:sliceOperations};
@@ -2818,6 +2854,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           this.timing.resolve(encoder,sample);
           if(progressive)shade(encoder,width,stripeRows);
           device.queue.submit([encoder.finish()]);
+          this.ctx.lastNumericalWork=Object.freeze({route:'ordinary',method:method===Method.Direct?'direct':'perturbation',family,maxIterations:request.maxIterations,width,height:stripeRows,stride:region.stride,sampleGrid:grid,operations:null,submittedAt:new Date().toISOString()});
           submittedVisits+=stripeVisits*grid*grid;
           if(sample){
             timingExpected++;

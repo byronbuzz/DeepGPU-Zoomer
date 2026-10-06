@@ -11,6 +11,8 @@ export interface GpuCapabilities {
 
 export interface GpuContext {
   device: GPUDevice;
+  /** Most recent numerical submission, shared by viewport, preview and export. */
+  lastNumericalWork?: Readonly<{route:string;method:string;family:string;maxIterations:number;width:number;height:number;stride:number;sampleGrid:number;operations:number|null;submittedAt:string}>;
   capabilities: GpuCapabilities;
   /** Resolves if the device is ever lost, so pipelines can be rebuilt. */
   lost: Promise<GPUDeviceLostInfo>;

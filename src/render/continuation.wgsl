@@ -1,7 +1,7 @@
-// Mode 0, grid 1 only. Loop arithmetic below matches iterateWide verbatim.
-// Wide is 48 bytes/alignment 16; this state is 304 bytes/alignment 16.
+// Each lane owns one sub-sample, including its derivative and endpoint state.
+// Wide is 48 bytes/alignment 16; six Wide slots make this state 352 bytes.
 struct WideContinuation {
-    delta: Wide, z: Wide, injection: Wide, checkpointZ: Wide, checkpointDelta: Wide,
+    delta: Wide, z: Wide, injection: Wide, checkpointZ: Wide, checkpointDelta: Wide, derivative: Wide,
     n: u32, referenceIndex: u32, skipped: u32, skips: u32, rebases: u32,
     checkpointReference: u32, checkpointPower: u32, checkpointLength: u32, haveCheckpoint: u32, reserved: u32,
     zValue: vec2<f32>, z2: f32, reserved2: u32,
@@ -41,16 +41,18 @@ fn retireContinuedSample(stateIndex: u32) {
 
 // Direct uses the first three Wide slots for c, z and its Brent checkpoint.
 fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
-    var offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.resolution,0));
+    var offset = hdrMul(Hdr(vec2<f32>(u.scaleMantissa,0.0),vec2<f32>(u.scaleLow,0.0),u.scaleExponent),hdr(pixel-0.5*u.domainResolution,0));
     if (u.rotationCos.x != 1.0 || u.rotationSin.x != 0.0) {
         offset = hdrMul(offset, Hdr(vec2<f32>(u.rotationCos.x,u.rotationSin.x),vec2<f32>(u.rotationCos.y,u.rotationSin.y),0));
     }
     var c = hdrAdd(hdrNorm(Hdr(u.centre,u.centreLow,0)),offset);
-    let detectCycle = u.mode == 0u && u.cappedPattern == 0u;
+    let wantDerivative = sampleMode() == 1u;
+    let detectCycle = !wantDerivative && sampleCappedPattern() == 0u;
     if (continuation.resume == 0u && detectCycle && analyticMandelbrotInterior(wideFromHdr(c))) {
         return emptySample();
     }
     var z = hdrZero();
+    var derivative = hdrZero();
     var checkpoint = hdrZero();
     var n = 0u; var cyclePower = 0u; var cycleLength = 0u;
     var termination = SAMPLE_LIMIT;
@@ -58,12 +60,17 @@ fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
         let saved = continuation.states[stateIndex];
         c = hdrFromWide(saved.delta); z = hdrFromWide(saved.z);
         checkpoint = hdrFromWide(saved.injection);
+        derivative = hdrFromWide(saved.derivative);
         n = saved.n; cyclePower = saved.referenceIndex; cycleLength = saved.skipped;
     }
     var z2 = dot(hdrValue(z),hdrValue(z));
     var escaped = z2 > ESCAPE_R2;
     var executed = 0u;
     while (n < u.maxIterations && !escaped) {
+        if (wantDerivative) {
+            derivative = hdrMul(derivative,hdrMulPlain(z,vec2<f32>(2.0,0.0)));
+            derivative = hdrAdd(derivative,HDR_ONE);
+        }
         z = hdrAdd(hdrMul(z,z),c); n += 1u;
         z2 = dot(hdrValue(z),hdrValue(z)); escaped = z2 > ESCAPE_R2;
         if (detectCycle && !escaped) {
@@ -81,19 +88,19 @@ fn iterateDirectContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
         executed += 1u;
         if (executed >= continuation.operations && n < u.maxIterations && !escaped) {
             let zeroWide = Wide(vec4<f32>(0.0),vec4<f32>(0.0),0);
-            continuation.states[stateIndex] = WideContinuation(wideFromHdr(c),wideFromHdr(z),wideFromHdr(checkpoint),zeroWide,zeroWide,
+            continuation.states[stateIndex] = WideContinuation(wideFromHdr(c),wideFromHdr(z),wideFromHdr(checkpoint),zeroWide,zeroWide,wideFromHdr(derivative),
                 n,cyclePower,cycleLength,0u,0u,0u,0u,0u,0u,0u,hdrValue(z),z2,0u);
             atomicOr(&continuation.pendingBits[stateIndex / 32u],1u << (stateIndex % 32u));
             atomicAdd(&stats[7],1u);
             return Sample(false, n, hdrValue(z), -1.0, 0.0, 0u, 0u, 0u, SAMPLE_PENDING);
         }
     }
-    return Sample(escaped, n, hdrValue(z), z2, 0.0, 0u, 0u, 0u, select(termination, SAMPLE_ESCAPE, escaped));
+    return Sample(escaped, n, hdrValue(z), z2, hdrLog2(derivative), 0u, 0u, 0u, select(termination, SAMPLE_ESCAPE, escaped));
 }
 fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     if (DIRECT) { return iterateDirectContinued(pixel,stateIndex); }
-    let wantDerivative = false;
-    let fromCentre = pixel - 0.5 * u.resolution;
+    let wantDerivative = sampleMode() == 1u;
+    let fromCentre = pixel - 0.5 * u.domainResolution;
     var pixelDelta = wideMul(Wide(u.wideScale, vec4<f32>(0.0), u.scaleExponent),
         Wide(vec4<f32>(fromCentre.x, 0.0, 0.0, 0.0), vec4<f32>(fromCentre.y, 0.0, 0.0, 0.0), 0));
     if (u.rotationCos.x != 1.0 || u.rotationSin.x != 0.0) {
@@ -106,7 +113,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     var delta = injection;
     if (!JULIA) { delta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }
     var z = wideAdd(wideNorm(Wide(u.wideCentreX, u.wideCentreY, 0)), pixelDelta);
-    if (continuation.resume == 0u && !JULIA && u.mode == 0u && u.cappedPattern == 0u &&
+    if (continuation.resume == 0u && !JULIA && sampleMode() == 0u && sampleCappedPattern() == 0u &&
         analyticMandelbrotInterior(z)) {
         // The caller already represents a determined capped sample as (-1,0).
         // n=0 records that no recurrence iterations were executed.
@@ -128,7 +135,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     var zValue = wideValue(z);
     var z2 = dot(zValue, zValue);
     var escaped = z2 > ESCAPE_R2;
-    let detectPeriodic = !APPROX && u.cappedPattern == 0u;
+    let detectPeriodic = !APPROX && sampleMode() == 0u && sampleCappedPattern() == 0u && !wantDerivative;
     var checkpointZ = z;
     var checkpointDelta = delta;
     var checkpointReference = referenceIndex;
@@ -140,6 +147,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     if (continuation.resume != 0u) {
         let saved = continuation.states[stateIndex];
         delta = saved.delta; z = saved.z; injection = saved.injection;
+        derivative = hdrFromWide(saved.derivative);
         checkpointZ = saved.checkpointZ; checkpointDelta = saved.checkpointDelta;
         checkpointReference = saved.checkpointReference; checkpointPower = saved.checkpointPower;
         checkpointLength = saved.checkpointLength; haveCheckpoint = saved.haveCheckpoint != 0u;
@@ -179,7 +187,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
                 var twiceReference = reference;
                 twiceReference.e += 1;
                 // Factored quadratic difference, shared with the Julia path.
-                delta = wideMul(delta, wideAdd(twiceReference, delta));
+                delta = wideRecurrenceMul(delta, wideAdd(twiceReference, delta));
                 if (!JULIA) { delta = wideAdd(delta, injection); }
                 referenceIndex += 1u;
                 reference = wideReference(referenceIndex, false);
@@ -216,7 +224,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
         }
         executed += 1u;
         if (executed >= continuation.operations && n < u.maxIterations && !escaped) {
-            continuation.states[stateIndex] = WideContinuation(delta, z, injection, checkpointZ, checkpointDelta,
+            continuation.states[stateIndex] = WideContinuation(delta, z, injection, checkpointZ, checkpointDelta, wideFromHdr(derivative),
                 n, referenceIndex, skipped, skips, rebases,
                 checkpointReference, checkpointPower, checkpointLength, select(0u,1u,haveCheckpoint), 0u,
                 zValue, z2, 0u);
@@ -227,4 +235,65 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
         }
     }
     return Sample(escaped, n, zValue, z2, hdrLog2(derivative), skipped, skips, rebases, select(termination, SAMPLE_ESCAPE, escaped));
+}
+
+
+// One invocation and checkpoint per actual sub-sample. A pending lane never
+// publishes its field, endpoint or completion counters.
+@compute @workgroup_size(8, 4)
+fn computeContinued(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= continuation.columns) { return; }
+    let size = vec2<u32>(u32(u.resolution.x),u32(u.resolution.y));
+    let grid = sampleGrid();
+    let stride = max(1u,u.sampleStep);
+    let position = gid.xy / grid;
+    let sub = gid.xy % grid;
+    let col = position.x * stride + u.columnOffset;
+    let row = position.y * stride + u.rowOffset;
+    if (col >= min(size.x,u.columnLimit) || row >= min(size.y,u.rowLimit)) { return; }
+    let stateIndex = gid.y * continuation.columns + gid.x;
+    if (continuation.resume != 0u && (atomicLoad(&continuation.pendingBits[stateIndex/32u]) & (1u << (stateIndex%32u))) == 0u) { return; }
+    let at = fieldIndex(col*grid+sub.x,row*grid+sub.y);
+    let previous = field[at];
+    let determined = previous.y >= 0.0;
+    let resolved = previous.x >= -1.0 || previous.x <= -(f32(u.maxIterations)+2.0) ||
+        (previous.x == -2.0 && previous.y >= f32(u.maxIterations));
+    let skipKnown = determined && ((u.reuseField == 2u && resolved) ||
+        (u.reuseField != 2u && (u.reuseField != 0u || u.sampleStep > 1u)));
+    if (continuation.resume != 0u && determined && (u.reuseField != 2u || resolved)) {
+        retireContinuedSample(stateIndex); return;
+    }
+    if (continuation.resume == 0u && skipKnown) { atomicAdd(&stats[6],1u); return; }
+    let step = 1.0/f32(grid);
+    let jitter = (vec2<f32>(sub)+vec2<f32>(0.5))*step;
+    let global = vec2<f32>(f32(col)+u.domainOrigin.x,f32(row)+u.domainOrigin.y);
+    let pixel = vec2<f32>(global.x,u.domainResolution.y-1.0-global.y)+jitter;
+    let s = iterateWideContinued(pixel,stateIndex);
+    if (s.z2 < 0.0) { return; }
+    if (continuation.resume != 0u) { atomicAnd(&continuation.pendingBits[stateIndex/32u],~(1u << (stateIndex%32u))); }
+    var entry = vec2<f32>(0.0);
+    if (sampleMode() == 1u) {
+        entry = vec2<f32>(heightOf(s),select(0.0,1.0,s.escaped));
+    } else {
+        var classification = -(f32(u.maxIterations)+2.0);
+        if (s.termination == SAMPLE_ANALYTIC_INTERIOR) { classification = -1.0; }
+        if (s.termination == SAMPLE_NUMERICAL_PERIODIC) { classification = -2.0; }
+        entry = vec2<f32>(select(classification,f32(s.n),s.escaped),
+            select(s.z2,f32(u.maxIterations),s.termination == SAMPLE_NUMERICAL_PERIODIC));
+    }
+    field[at] = entry;
+    if (sampleRetainEndpoints()) { endpoints[at] = vec4<f32>(s.z,f32(s.n),s.z2); }
+    let plain = s.n-s.skipped;
+    let beforeSkipped = atomicAdd(&stats[0],s.skipped);
+    let beforeSkips = atomicAdd(&stats[1],s.skips);
+    let beforeRebases = atomicAdd(&stats[2],s.rebases);
+    let beforePlain = atomicAdd(&stats[3],plain);
+    atomicAdd(&stats[4],select(0u,1u,!s.escaped));
+    atomicAdd(&stats[5],1u);
+    atomicAdd(&stats[12],select(0u,1u,s.termination == SAMPLE_LIMIT));
+    atomicAdd(&stats[13],select(0u,1u,s.termination == SAMPLE_NUMERICAL_PERIODIC));
+    if (beforeSkipped > 0xffffffffu-s.skipped) { atomicAdd(&stats[8],1u); }
+    if (beforeSkips > 0xffffffffu-s.skips) { atomicAdd(&stats[9],1u); }
+    if (beforeRebases > 0xffffffffu-s.rebases) { atomicAdd(&stats[10],1u); }
+    if (beforePlain > 0xffffffffu-plain) { atomicAdd(&stats[11],1u); }
 }

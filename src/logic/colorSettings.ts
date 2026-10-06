@@ -1,3 +1,5 @@
+import { FRACTALS_PALETTES } from './importedPalettes';
+
 /** Maximum custom stops — must match MAX_STOPS in the shaders. */
 export const MAX_STOPS = 8;
 
@@ -188,4 +190,20 @@ export const PRESETS: Preset[] = [
   { name: "Spectral", stops: ["#9e0142", "#f46d43", "#ffffbf", "#66c2a5", "#5e4fa2"] },
   { name: "Coolwarm", stops: ["#3b4cc0", "#8db0fe", "#dddcdc", "#f4987a", "#b40426"] },
   { name: "Cubehelix", stops: ["#000000", "#1a354c", "#a07949", "#d3c1d9", "#ffffff"] },
+  { name: "Prismatica", stops: ["#210638", "#7133c8", "#bda5ff", "#f5f0ff", "#ad8be9", "#6421a3", "#230638"] },
+  { name: "Forest Brass", stops: ["#030d08", "#205b42", "#81b49b", "#eee8be", "#bf9a27", "#745d09", "#090d05"] },
+  { name: "Rosewood Ribbon", stops: ["#ffe2e5", "#ee6875", "#af263a", "#3e252a", "#702e39", "#f37789", "#ffdee6"] },
+  { name: "Harbour Mist", stops: ["#1b0c30", "#283f6c", "#3f788f", "#72a6a8", "#adcbbd", "#e8f2e9"] },
+  { name: "Copper Current", stops: ["#6ce5ee", "#167da4", "#4b2637", "#c8694b", "#ffe5b7", "#ba5649", "#244a70", "#6de5ef"] },
+  { name: "Lime Frost", stops: ["#142006", "#658211", "#c1d84e", "#f4ffe0", "#87c4d7", "#274d78", "#060d25"] },
+  { name: "Plum Porcelain", stops: ["#e3eaf6", "#f0edf2", "#a475a5", "#441046", "#180921", "#7c417d", "#e9ddeb"] },
+  { name: "Patina Gold", stops: ["#f1ffff", "#8dd5dc", "#3c707d", "#163e43", "#337c6d", "#abc8b5", "#e3b474", "#f6f1dc"] },
+  { name: "Blush Fire", stops: ["#10070a", "#822039", "#ed7197", "#fff0db", "#f5a570", "#b64336", "#350a1b", "#0c0508"] },
+  { name: "Arctic Glass", stops: ["#e2fcff", "#64d5e3", "#237f97", "#071632", "#155474", "#51c8dd", "#e3fbff"] },
+  { name: "Signal Flare", stops: ["#06152c", "#16687a", "#d3e65c", "#f59b2a", "#611505", "#0d0504", "#ffc34a", "#30638a"] },
+  { name: "Sea Fern", stops: ["#efffff", "#d4efeb", "#a0d3bf", "#69b18d", "#328246", "#174b1e"] },
+  { name: "Rose Glacier", stops: ["#ffe5ef", "#dd80ad", "#952353", "#220b24", "#173969", "#7ea8d9", "#e6dce8"] },
+  { name: "Lagoon Satin", stops: ["#fff8d2", "#efd574", "#a78c55", "#605769", "#165653", "#36b9a4", "#b5fff0"] },
+  { name: "Mint Eclipse", stops: ["#050b0b", "#123a32", "#236e60", "#5dc4a4", "#baffdf", "#edf9f0", "#050a09"] },
+  ...FRACTALS_PALETTES,
 ];

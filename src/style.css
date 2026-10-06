@@ -66,3 +66,13 @@ button:active:not(:disabled),#toggle:active:not(:disabled){background:var(--acce
 #toggle{color:#fff}#toggle:hover:not(:disabled),#toggle:active:not(:disabled){background:var(--accent);border-color:var(--accent);color:#fff}
 .panel-actions{display:flex;flex-direction:column;gap:12px;margin:12px 0}.panel-actions>.row,.panel-actions>.full-width,.panel-actions>.linked-location{margin:0}#stop-delete{margin-top:12px}
 .main-action-row{margin:12px 0}.location-field{margin-bottom:12px}
+
+/* Open dropdowns share the tab header's colour and adjustable opacity. */
+.location-options{background:var(--control)}
+@supports (appearance:base-select){
+  select,select::picker(select){appearance:base-select}
+  select{display:flex;align-items:center;justify-content:space-between}
+  select::picker(select){background:var(--control);color:#e7e9ed;border:1px solid var(--accent);border-radius:5px;padding:0;margin-block:4px;max-height:min(320px,60dvh);overflow:auto;box-shadow:none}
+  select option{background:transparent;padding:8px 9px;font:inherit;color:inherit}
+  select option:hover,select option:focus-visible,select option:checked{background:rgb(var(--accent-rgb) / .25)}
+}

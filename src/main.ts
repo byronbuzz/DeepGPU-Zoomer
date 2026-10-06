@@ -13,6 +13,7 @@ import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
 import { dynamicLimitForZoom } from './dynamic';
 import { setupRangeControls } from './range-controls';
+import { setupSelectControls } from './select-controls';
 import { setImageColourSampler } from './colour-picker';
 import { DEFAULT_ROTATION_SECONDS, PALETTE_ROTATION_MULTIPLIER, advanceColourRotation, rotationSecondsFromSlider, rotationSecondsToSlider, rotationDurationLabel } from './colour-rotation';
 import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, POINTER_RATIOS, THROUGHPUT_PRESETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
@@ -48,6 +49,7 @@ let rotating=false,rotationSliderHeld=false,controlDown=false,rotationPointerAng
 const rotationKeys=new Set<string>();
 let juliaReturn:SavedView|null=null;
 let gpuContext:GpuContext|undefined, previewEngine:WebGpuRenderer|undefined;
+let gpuLost=false,gpuErrorDetails:string|undefined;
 
 let previewEnabled=false, selecting=false, previewBusy=false, previewPending=false, previewEpoch=0;
 let selectedJulia:{x:string;y:string}|null=null;
@@ -69,6 +71,7 @@ let syncAppearance=()=>{};
 let messageDismissTimer=0,messageFadeTimer=0,messageVersion=0;
 let wheelSave:ReturnType<typeof setTimeout>|undefined,appearanceSave:ReturnType<typeof setTimeout>|undefined;
 function message(text:string,transient=true){
+  if(gpuLost){text='GPU connection lost. Save the error details, then reload this page to reconnect.';transient=false;}
   const target=el('message'),version=++messageVersion;
   clearTimeout(messageDismissTimer);clearTimeout(messageFadeTimer);target.classList.remove('message-fading');target.textContent=text;
   if(!text||!transient)return;
@@ -300,14 +303,16 @@ function toggleJuliaPreview(){
   canvas.focus();
 }
 async function computeJuliaPreview(){
-  if(stopped||previewBusy||!previewPending||!previewEnabled||!selectedJulia||!gpuContext)return;
+  if(gpuLost||stopped||previewBusy||!previewPending||!previewEnabled||!selectedJulia||!gpuContext)return;
   previewBusy=true;previewPending=false;
   const epoch=previewEpoch,lifetime=previewLifetime,selected={...selectedJulia},size={...previewSize},iterations=view.iterations;
     const sameTarget=()=>!stopped && previewEnabled && view.family==='mandelbrot' && previewLifetime===lifetime && selectedJulia?.x===selected.x && selectedJulia.y===selected.y && previewSize.width===size.width && previewSize.height===size.height && view.iterations===iterations;
     const current=()=>sameTarget() && previewEpoch===epoch;
   try{
     // One persistent small renderer, with its own fields/history/uniforms.
-    if(!previewEngine){previewEngine=new WebGpuRenderer(gpuContext,previewCanvas);await previewEngine.init();}
+    if(!previewEngine){const renderer=new WebGpuRenderer(gpuContext,previewCanvas);
+      try{await renderer.init();if(gpuLost){void renderer.dispose();return;}previewEngine=renderer;}
+      catch(e){void renderer.dispose();throw e;}}
     if(!current())return;
     const requestedColors={...renderColors(colors),mode:0,supersample:1};
     const calculationCurrent=()=>sameTarget()&&(!needsEndpoints({...colors,mode:0,supersample:1})||needsEndpoints(requestedColors)||!!previewEngine?.endpointChannelsRequired?.());
@@ -340,12 +345,14 @@ function request():RenderRequest{
   const interacting=moving();
   const heldZoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
   const zoom=heldZoom||(performance.now()-lastInteraction<180?wheelDirection:0);
+  const heldInwardZoom=heldZoom>0;
   const margin=zoom<0?overscanCssPx(speed,tuning.overscanBase,tuning.overscanMax):0;
   const overscanPixels={x:Math.floor(margin*width/Math.max(1,innerWidth)/2)*2,
     y:Math.floor(margin*height/Math.max(1,innerHeight)/2)*2};
-  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.unitsPerPixel(height),width,height,maxIterations:view.iterations,colors:{...renderColors(colors),...(colors.oversampling&&!interacting?{supersample:1}:{})},stationaryOversampling:colors.oversampling===true&&!interacting,family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting,followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,zoomRate:speed,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,beforePreparation:()=>g===generation?updateDynamicBeforePreparation():null,tuning:normalizeTuning({...tuning,throughput:interacting?tuning.throughput:2}),isCurrent:()=>generation===g};
+  return {centerX:camera.x,centerY:camera.y,angle:camera.angle,unitsPerPixel:camera.unitsPerPixel(height),width,height,maxIterations:view.iterations,colors:{...renderColors(colors),...(colors.oversampling&&!interacting?{supersample:1}:{})},stationaryOversampling:colors.oversampling===true&&!interacting,family:view.family,juliaX:new Decimal(view.jx),juliaY:new Decimal(view.jy),useApprox:true,interacting,followView:true,publishPartial:!refreshHolding,presentationOwner:'animation',betweenBatches:computeJuliaPreview,focus:{x:pointer.x/innerWidth,y:pointer.y/innerHeight},zoom,heldInwardZoom,zoomRate:speed,overscanPixels,dynamicIterations:dynamicEnabled,provisionalNavigationCap,beforePreparation:()=>g===generation?updateDynamicBeforePreparation():null,tuning:normalizeTuning({...tuning,throughput:interacting?tuning.throughput:2}),isCurrent:()=>generation===g};
 }
 async function compute(){
+  if(gpuLost)return;
   if(busy||!engine||error||stopped||refreshPending)return;busy=true;dirty=false;const g=generation;
   try{
     const result=await engine.render(request());
@@ -368,7 +375,7 @@ async function recolorStopped(){
 function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;if(resetTimer){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;}preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());syncTuningLabels();preparing();return true;}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
-  if(!document.hidden){
+  if(!document.hidden&&!gpuLost){
     advanceColourMotion(dt);
     if(controlDown&&rotationKeys.size&&dt){const turn=(rotationKeys.has('ArrowRight')?1:0)-(rotationKeys.has('ArrowLeft')?1:0);if(turn)setRotation(camera.angle+turn*dt*.06);}
     const zoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
@@ -429,7 +436,14 @@ document.addEventListener('keydown',e=>{
   try{if(key==='j')toggleJuliaPreview();else switchJuliaView();}catch(err){message(String(err));}
 });
 window.addEventListener('blur',()=>{stop();persist();});document.addEventListener('visibilitychange',()=>{stop();persist();previousTime=0;});window.addEventListener('resize',()=>resize());
-el<HTMLSelectElement>('family').onchange=e=>{const family=(e.target as HTMLSelectElement).value as Family;if(family===view.family)return;if(family==='mandelbrot'&&juliaReturn){switchJuliaView();return;}if(family==='julia')juliaReturn=snapshot();load({...snapshot(),...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations,angle:camera.angle});};
+el<HTMLSelectElement>('family').onchange=e=>{
+  const control=e.currentTarget as HTMLSelectElement,family=control.value as Family;
+  if(family===view.family)return;
+  const keepFocus=document.activeElement===control||control.contains(document.activeElement);
+  if(family==='mandelbrot'&&juliaReturn)switchJuliaView();
+  else{if(family==='julia')juliaReturn=snapshot();load({...snapshot(),...HOME,family,x:family==='julia'?'0':HOME.x,jx:view.jx,jy:view.jy,iterations:view.iterations,angle:camera.angle});}
+  if(keepFocus)control.focus({preventScroll:true});
+};
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
 el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(String(err));}};
 el('stop-refinement').onclick=stopRefinement;
@@ -516,9 +530,13 @@ function applyAppearance(c:ColorSettings,persistLater=true){
   }
   if(persistLater){clearTimeout(appearanceSave);appearanceSave=setTimeout(()=>persist(false),250);}
 }
-const paletteController=setupPaletteEditor(()=>colors,applyAppearance);
+const paletteController=setupPaletteEditor(()=>colors,applyAppearance,()=>{
+  rotatePalette=rotateLight=false;paletteRotationElapsed=lightRotationElapsed=0;
+  colourRotationEditing.clear();syncColourMotion();
+});
 syncAppearance=paletteController.sync;
 setupRangeControls();
+setupSelectControls();
 function syncColourMotion(){
   const control=el<HTMLInputElement>('rotation-speed');control.value=String(rotationSecondsToSlider(rotationSeconds));
   const label=rotationDurationLabel(rotationSeconds);el('rotation-speed-value').textContent=label;control.setAttribute('aria-valuetext',`${label} per light rotation; ${rotationDurationLabel(rotationSeconds*PALETTE_ROTATION_MULTIPLIER)} per palette cycle`);
@@ -572,6 +590,13 @@ el('full-reset').onclick=()=>{
   el<HTMLButtonElement>('reset').focus();
 };
 const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,viewport:()=>({width:canvas.width,height:canvas.height}),captureQuality:(snapshot,width,height)=>engine?.captureMatchingQuality(snapshot,width,height)??null});
+el('gpu-error-details').onclick=()=>{
+  if(!gpuErrorDetails)return;
+  const url=URL.createObjectURL(new Blob([gpuErrorDetails+'\n'],{type:'application/json'}));
+  const link=document.createElement('a');link.href=url;
+  link.download=`deepgpu-zoomer-gpu-error-${new Date().toISOString().replace(/[:.]/g,'-')}.json`;
+  link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+};
 void (async()=>{
   let rememberedAppearance=savedDefaults?.appearance??DEFAULT_COLORS;
   if(!savedDefaults&&!defaultsRead.error)try{const remembered=validateView(JSON.parse(localStorage.getItem('gpu-zoomer-view')||'null'));rememberedAppearance=remembered.appearance??DEFAULT_COLORS;}catch{}
@@ -580,6 +605,22 @@ void (async()=>{
   load({...HOME,iterations:savedDefaults?.baseIterations??HOME.iterations,appearance:validateColors(rememberedAppearance)},false);
   if(location.hash){openLocationLink(false);}else if(defaultsRead.error)message(defaultsRead.error);else if(locations.storageError)message('Saved locations could not be read. Saving and deletion are disabled to preserve the stored data.');else if(locations.recoveryError)message('Default locations could not be added. Your existing saved locations were kept.');
   resize();requestAnimationFrame(tick);
-  try{const ctx=await acquireGpu();gpuContext=ctx;resize();const renderer=new WebGpuRenderer(ctx,canvas);await renderer.init();engine=renderer;dirty=true;ctx.lost.then(info=>{if(info.reason!=='destroyed'){engine.abort();error='GPU connection lost. Reload this page to reconnect.';message(error);stop();setPreview(false);}});}
-  catch(e){error=String(e);message(error);throw e;}
+  try{const ctx=await acquireGpu();gpuContext=ctx;
+    // Attach before pipeline initialization, so early loss is also recorded.
+    void ctx.lost.then(info=>{if(info.reason==='destroyed')return;
+      gpuLost=true;
+      gpuErrorDetails=JSON.stringify({recordedAt:new Date().toISOString(),reason:info.reason,message:info.message,
+        build:document.querySelector<HTMLScriptElement>('script[type="module"][src]')?.src,
+        browser:navigator.userAgent,capabilities:ctx.capabilities,
+        lastSubmittedNumericalWork:ctx.lastNumericalWork??null,
+        note:'Last submitted numerical work is context, not proof of the cause of device loss.',
+        view:snapshot()},null,2);
+      el('gpu-error-details').hidden=false;generation++;engine?.abort();cancelPreviewWork();
+      error='GPU connection lost. Save the error details, then reload this page to reconnect.';
+      stop();setPreview(false);message(error,false);
+    });
+    resize();const renderer=new WebGpuRenderer(ctx,canvas);
+    try{await renderer.init();if(gpuLost){void renderer.dispose();return;}engine=renderer;dirty=true;}
+    catch(e){void renderer.dispose();throw e;}
+  }catch(e){if(!gpuLost){error=String(e);message(error,false);}console.error(e);}
 })();

@@ -7,6 +7,8 @@ export interface Demand {
   covered: { x: number; y: number; width: number; height: number; spacing?: number }[];
   /** Visible area inside an overscanned work field; deficits here take priority. */
   visible?: {x:number;y:number;width:number;height:number};
+  /** During held inward zoom, oldest service favours gaps still on screen. */
+  heldInwardZoom?: boolean;
   /** Forecast changes ranking only; current coverage and sample ownership remain authoritative. */
 }
 export interface RegionTuning {
@@ -187,9 +189,16 @@ export class PendingRegions {
       const x=((k&1)<<1)|((k>>2)&1), y=(((k>>1)&1)<<1)|((k>>3)&1);
       demand={...demand,x:(x+.5)*this.width/4,y:(y+.5)*this.height/4};
     }
+    const v=demand.visible;
+    const visibleOldest=oldest&&!rows&&demand.heldInwardZoom&&demand.zoom>0&&v&&
+      v.width>0&&v.height>0&&[v.x,v.y,v.width,v.height].every(Number.isFinite)?v:undefined;
+    const intersectsVisible=(r:Region)=>!!visibleOldest&&r.x<visibleOldest.x+visibleOldest.width&&
+      r.x+r.width>visibleOldest.x&&r.y<visibleOldest.y+visibleOldest.height&&r.y+r.height>visibleOldest.y;
+    const older=(a:Region,b:Region)=>visibleOldest&&intersectsVisible(a)!==intersectsVisible(b)
+      ? intersectsVisible(a) : a.order<b.order;
     let index = 0;
     for (let i=1; i<this.pending.length; i++) {
-      if (oldest ? this.pending[i].order < this.pending[index].order :
+      if (oldest ? older(this.pending[i],this.pending[index]) :
         this.score(this.pending[i],demand,pointerRadius) > this.score(this.pending[index],demand,pointerRadius)) index=i;
     }
     let region = this.pending.splice(index,1)[0];
@@ -204,8 +213,8 @@ export class PendingRegions {
       const a = {...region}, b = {...region};
       if (horizontal) { a.width=half; b.x+=half; b.width-=half; }
       else { a.height=half; b.y+=half; b.height-=half; }
-      const first = rows || oldest || this.score(a.stride===originalStride?a:{...a,stride:originalStride},demand,pointerRadius) >=
-        this.score(b.stride===originalStride?b:{...b,stride:originalStride},demand,pointerRadius);
+      const first = rows || (oldest ? !visibleOldest||intersectsVisible(a)||!intersectsVisible(b) : this.score(a.stride===originalStride?a:{...a,stride:originalStride},demand,pointerRadius) >=
+        this.score(b.stride===originalStride?b:{...b,stride:originalStride},demand,pointerRadius));
       region = first ? a : b;
       this.pending.push({...(first ? b : a),stride:originalStride, order:this.turns});
       // A coarse neighbour may have determined the parent's density. Once the

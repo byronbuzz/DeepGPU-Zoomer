@@ -1,5 +1,5 @@
-/** WGSL WideContinuation: five 48-byte Wide values plus exact-cycle state. */
-export const CONTINUATION_STATE_BYTES = 304;
+/** WGSL WideContinuation: six 48-byte Wide values plus exact-cycle state. */
+export const CONTINUATION_STATE_BYTES = 352;
 export const CONTINUATION_MAX_LANES = 4096;
 export const CONTINUATION_HEADER_BYTES = 16 + CONTINUATION_MAX_LANES / 8;
 /** Mandatory safeguard for cold, expensive work.
@@ -7,11 +7,13 @@ export const CONTINUATION_HEADER_BYTES = 16 + CONTINUATION_MAX_LANES / 8;
  * Cheap, measured work can still use the ordinary bulk dispatch path.
  */
 export const COLD_CONTINUATION_OPERATIONS = 4096;
+/** Million-iteration requests never establish safety from an average cheap probe. */
+export const MANDATORY_CONTINUATION_ITERATIONS = 1_000_000;
 export const CONTINUATION_DISPATCH_OPERATIONS = CONTINUATION_MAX_LANES*256;
 
 export function continuationOperations(maxIterations:number, msPerVisit:number, targetMs:number):number {
   const cold=!Number.isFinite(msPerVisit)||msPerVisit<=0;
-  return maxIterations>COLD_CONTINUATION_OPERATIONS&&(cold||msPerVisit>targetMs)?COLD_CONTINUATION_OPERATIONS:0;
+  return maxIterations>COLD_CONTINUATION_OPERATIONS&&(maxIterations>=MANDATORY_CONTINUATION_ITERATIONS||cold||msPerVisit>targetMs)?COLD_CONTINUATION_OPERATIONS:0;
 }
 
 /** A measured allowance must not be raised by the old unmeasured batch floor. */
@@ -21,8 +23,10 @@ export function measuredContinuationBudget(msPerVisit:number,targetMs:number):nu
 }
 
 /** Resume saved work in independently bounded slices. */
-export function resumedContinuationOperations(admitted:number,lanes:number):number {
-  const perLane=Math.floor(CONTINUATION_DISPATCH_OPERATIONS/Math.max(1,lanes));
+export function resumedContinuationOperations(admitted:number,lanes:number,stationary=false):number {
+  // Settled work can amortize its counter fence across a larger bounded slice.
+  // Keep the per-pixel bound and the motion dispatch allowance unchanged.
+  const perLane=Math.floor(CONTINUATION_DISPATCH_OPERATIONS*(stationary?2:1)/Math.max(1,lanes));
   return Math.max(1,Math.min(admitted,COLD_CONTINUATION_OPERATIONS,perLane));
 }
 
@@ -31,21 +35,10 @@ export function continuationLaneLimit(storageBytes:number):number {
     Math.floor((storageBytes-CONTINUATION_HEADER_BYTES)/CONTINUATION_STATE_BYTES)));
 }
 
-export function continuationRegion(width:number,height:number,stride:number,limit:number) {
-  const columns=Math.ceil(width/stride),rows=Math.ceil(height/stride);
+export function continuationRegion(width:number,height:number,stride:number,limit:number,grid=1) {
+  const columns=Math.ceil(width/stride)*grid,rows=Math.ceil(height/stride)*grid;
   const lanes=columns*rows,bytes=CONTINUATION_HEADER_BYTES+lanes*CONTINUATION_STATE_BYTES;
   if(!Number.isSafeInteger(lanes)||lanes<1||lanes>CONTINUATION_MAX_LANES||bytes>limit)throw Error('Continuation region exceeds GPU scratch capacity');
   return {columns,rows,lanes,bytes};
 }
 
-/** Adapt the shared entry point to resume saved sample state. */
-export function continuationEntry(source:string) {
-  const call='let s = iterateAny(pixel, distanceMode);';
-  const known='let previous = field[fieldIndex(col, row)];';
-  const skip='if (skipKnown) {';
-  if(source.split(call).length!==2||source.split(known).length!==2||source.split(skip).length!==2)throw Error('Continuation shader entry no longer matches');
-  return source.replace(call,'let s = iterateWideContinued(pixel, stateIndex);\n            if (s.z2 < 0.0) { return; }\n            if (continuation.resume != 0u) { atomicAnd(&continuation.pendingBits[stateIndex / 32u], ~(1u << (stateIndex % 32u))); }')
-    .replace(known,known+'\n    let stateIndex = position.y * continuation.columns + position.x;\n    if (continuation.resume != 0u && (atomicLoad(&continuation.pendingBits[stateIndex / 32u]) & (1u << (stateIndex % 32u))) == 0u) { return; }')
-    .replace(skip,
-      'if (continuation.resume != 0u && determined && (u.reuseField != 2u || resolved)) {\n        retireContinuedSample(stateIndex);\n        return;\n    }\n    if (continuation.resume == 0u && skipKnown) {');
-}

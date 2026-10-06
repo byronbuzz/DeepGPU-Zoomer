@@ -29,7 +29,7 @@ export function randomizePalette(c:ColorSettings,all:boolean,harmonious:boolean)
   return withStops(c,stops.map(s=>s.locked?s:{...s,color:randomColor(hue,harmonious)}));
 }
 
-export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings)=>void){
+export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings)=>void,onResetColouring?:()=>void){
   const el=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
   let selected=0,dragging=false,dragDistance=0,dragRemembered=false,colourEditRemembered=false,highlightEditRemembered=false;const undo:ColorSettings[]=[],redo:ColorSettings[]=[];
   const remember=()=>{undo.push(validateColors(get()));if(undo.length>100)undo.shift();redo.length=0;};
@@ -109,6 +109,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
   el('random-palette').onclick=()=>{closePicker();commit(randomizePalette(get(),true,false));};
   el('palette-undo').onclick=()=>{const c=undo.pop();if(c){closePicker();closeHighlight();redo.push(validateColors(get()));commit(c,false);}};
   el('palette-redo').onclick=()=>{const c=redo.pop();if(c){closePicker();closeHighlight();undo.push(validateColors(get()));commit(c,false);}};
+  el('reset-colouring').onclick=()=>{closePicker();closeHighlight();dragging=false;selected=0;onResetColouring?.();commit(DEFAULT_COLORS);};
   for(const [id,key] of [['color-formula','formula'],['color-effect','effect'],['capped-mode','capped']] as const)el<HTMLSelectElement>(id).onchange=e=>commit({...get(),[key]:Number((e.target as HTMLSelectElement).value)});
   el<HTMLInputElement>('distance-mode').onchange=e=>commit({...get(),mode:(e.target as HTMLInputElement).checked?1:0});
   el<HTMLInputElement>('oversampling').onchange=e=>commit({...get(),oversampling:(e.target as HTMLInputElement).checked});
