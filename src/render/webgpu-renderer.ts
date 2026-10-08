@@ -25,8 +25,9 @@ import quadFastSource from "../arithmetic/quad-fast.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
 import continuationSource from "./continuation.wgsl?raw";
-import { MANDATORY_CONTINUATION_ITERATIONS, continuationRegion, continuationOperations, resumedContinuationOperations, continuationLaneLimit, measuredContinuationBudget, COLD_CONTINUATION_OPERATIONS, CONTINUATION_HEADER_BYTES } from "./continuation";
+import { MANDATORY_CONTINUATION_ITERATIONS, continuationRegion, continuationOperations, resumedContinuationOperations, continuationLaneLimit, measuredContinuationBudget, COLD_CONTINUATION_OPERATIONS, CONTINUATION_HEADER_BYTES, CONTINUATION_STATE_BYTES } from "./continuation";
 import { PendingContinuationSlot, translatedContinuationRegion, type ContinuationIdentity, type PendingContinuation } from './pending-continuation';
+import { SurvivorCohort, SURVIVOR_CAPACITY } from './survivor-cohort';
 import reuseSource from "./reuse.wgsl?raw";
 import qualityResolveSource from "./quality-resolve.wgsl?raw";
 import { oversampledView } from "./quality";
@@ -763,8 +764,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return this[field]!;
   }
 
-  private async ensureContinuationPipeline(kind:'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|'julia'|'juliaApprox') {
-    await this.oncePipeline('continuation-'+kind,()=>this.continuationPipelines.has(kind),async()=>{
+  private async ensureContinuationPipeline(kind:'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|'julia'|'juliaApprox',pooled=false,coordinates=pooled) {
+    const key=(pooled?'pooled-':coordinates?'cohort-':'')+kind;
+    await this.oncePipeline('continuation-'+key,()=>this.continuationPipelines.has(key),async()=>{
       const device=this.ctx.device;
       if(device.limits.maxStorageBuffersPerShaderStage<8)throw Error('Continuation requires eight storage bindings');
       this.continuationModule??=await compileShader(device,
@@ -772,14 +774,31 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         'continuation');
       this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
         {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
-      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')?1:0,ORDINARY:kind.startsWith('ordinary')?1:0,APPROX:kind==='approx'||kind==='ordinaryApprox'||kind==='juliaApprox'?1:0};
-      const pipeline=await device.createComputePipelineAsync({label:'continuation-'+kind,
+      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')?1:0,ORDINARY:kind.startsWith('ordinary')?1:0,APPROX:kind==='approx'||kind==='ordinaryApprox'||kind==='juliaApprox'?1:0,POOL_COORDINATES:coordinates?1:0};
+      const pipeline=await device.createComputePipelineAsync({label:'continuation-'+key,
         layout:device.createPipelineLayout({bindGroupLayouts:[this.bindLayout!,this.continuationLayout]}),
-        compute:{module:this.continuationModule,entryPoint:'computeContinued',constants}});
+        compute:{module:this.continuationModule,entryPoint:pooled?'computePooled':'computeContinued',constants}});
       if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
-      this.continuationPipelines.set(kind,pipeline);
+      this.continuationPipelines.set(key,pipeline);
     });
-    return this.continuationPipelines.get(kind)!;
+    return this.continuationPipelines.get(key)!;
+  }
+
+  private async ensureSurvivorCollector() {
+    const key='collect-survivors';
+    await this.oncePipeline(key,()=>this.continuationPipelines.has(key),async()=>{
+      if(!this.continuationModule)throw Error('Continuation module is unavailable');
+      const device=this.ctx.device;
+      const empty=device.createBindGroupLayout({entries:[]});
+      const states=device.createBindGroupLayout({entries:[0,1].map(binding=>
+        ({binding,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage' as const}}))});
+      const pipeline=await device.createComputePipelineAsync({label:key,
+        layout:device.createPipelineLayout({bindGroupLayouts:[empty,states]}),
+        compute:{module:this.continuationModule,entryPoint:'collectSurvivors'}});
+      if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+      this.continuationPipelines.set(key,pipeline);
+    });
+    return this.continuationPipelines.get(key)!;
   }
 
   private async ensureRenderPipeline(kind:'blit'|'retain'|'retainFloat') {
@@ -2696,8 +2715,122 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     if(!carryEligible)this.clearContinuationWork();
     let carriedRegion=carryEligible?this.pendingContinuation.claim(continuationIdentity,request,this.regionDemand(request).visible):undefined;
     if(carriedRegion){scratch=carriedRegion.scratch;scratchCapacity=carriedRegion.capacity;this.continuationCarried++;}
+    const poolEligible=!!(progressive&&request.followView&&ordinary&&family==='mandelbrot'&&
+      method!==Method.Direct&&request.maxIterations>=MANDATORY_CONTINUATION_ITERATIONS&&
+      !request.angle&&!request.exportDomain&&!request.stationaryOversampling&&!this.retainEndpoints&&
+      colors.mode===0&&(colors.capped??0)===0);
+    const cohort=new SurvivorCohort();
+    let pool:GPUBuffer|undefined,poolBind:GPUBindGroup|undefined;
+    let pooledPipeline:GPUComputePipeline|undefined,collectorPipeline:GPUComputePipeline|undefined;
+    type Cost={expected:number;reported:number;gpuMs:number;unavailable:boolean;notify:()=>void};
+    const newCost=():Cost=>({expected:0,reported:0,gpuMs:0,unavailable:false,notify:()=>{}});
+    let poolCost=newCost();
+    type Prefix={visits:number;wallMs:number;cost:()=>Omit<Cost,'notify'>;notify:(f:()=>void)=>void};
+    let prefixes:Prefix[]=[];
+    let observedCompletions=0;
+    const poolCurrent=()=>epoch===this.publicationEpoch&&continuationOrbit===this.orbitBuffer&&
+      request.isCurrent!()&&!this.abortRequested;
+    const collectTiming=(sample:ReturnType<GpuTiming['begin']>,cost:Cost)=>{
+      if(sample){cost.expected++;this.timing.collect(sample,
+        ms=>{cost.reported++;cost.gpuMs+=ms;cost.notify();},
+        ()=>{cost.reported++;cost.unavailable=true;cost.notify();});}
+      else cost.unavailable=true;
+    };
+    const flushPool=async()=>{
+      if(!cohort.lanes)return;
+      const started=performance.now(),records=prefixes,metric=poolCost;
+      let unfinished=cohort.lanes,published=observedCompletions;
+      do{
+        this.requireLiveMethod(request);
+        if(!poolCurrent()){completed=false;this.aborted=true;return;}
+        const stride=cohort.regions[0].stride;
+        u32[54]=stride;u32[26]=request.height;u32[40]=0;u32[42]=0;u32[43]=request.width;
+        device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+        const stationarySlice=!this.isInteracting(request);
+        const operations=resumedContinuationOperations(COLD_CONTINUATION_OPERATIONS,unfinished,stationarySlice);
+        // Do not overwrite byte 12: it is the independently computed append count.
+        device.queue.writeBuffer(pool!,0,new Uint32Array([operations,1,cohort.lanes]));
+        device.queue.writeBuffer(this.statsBuffer,28,new Uint32Array(1));
+        const encoder=device.createCommandEncoder({label:'calculate-pooled-survivors'});
+        const sample=this.timing.begin();
+        const pass=encoder.beginComputePass({label:'calculate-pooled-survivors',timestampWrites:this.timing.writes(sample)});
+        pass.setPipeline(pooledPipeline!);pass.setBindGroup(0,bind);pass.setBindGroup(1,poolBind!);
+        pass.dispatchWorkgroups(Math.ceil(cohort.lanes/32));pass.end();
+        this.timing.resolve(encoder,sample);
+        encoder.copyBufferToBuffer(this.statsBuffer,0,continuationReadback!,0,56);
+        encoder.copyBufferToBuffer(pool!,12,continuationReadback!,56,4);
+        device.queue.submit([encoder.finish()]);collectTiming(sample,metric);
+        this.ctx.lastNumericalWork=Object.freeze({route:'continued',method:'perturbation',family,
+          maxIterations:request.maxIterations,width:cohort.lanes,height:1,stride,sampleGrid:1,operations,
+          submittedAt:new Date().toISOString()});
+        await continuationReadback!.mapAsync(GPUMapMode.READ);
+        let completedSamples:number;
+        try{
+          const counters=new Uint32Array(continuationReadback!.getMappedRange());
+          if(counters[14]!==cohort.lanes)throw Error('Survivor collection count mismatch');
+          completedSamples=counters[5]+counters[6];unfinished=counters[7];
+          if(unfinished>cohort.lanes)throw Error('Invalid survivor completion count');
+        }finally{continuationReadback!.unmap();}
+        observedCompletions=completedSamples;
+        if(!poolCurrent()){completed=false;this.aborted=true;return;}
+        if(completedSamples>published){
+          // Each write is submitted before the next rectangle rewrites the
+          // shared uniform buffer. No additional CPU/GPU fence is needed.
+          for(const region of cohort.regions){
+            u32[54]=region.stride;u32[26]=region.y+region.height;
+            u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+region.width;
+            device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
+            const encoder=device.createCommandEncoder({label:'shade-pooled-survivors'});
+            shade(encoder,region.width,region.height);device.queue.submit([encoder.finish()]);
+          }
+          published=completedSamples;this.incomingFrame=frame;this.partialSerial++;this.partialRegions++;
+          if(request.presentationOwner!=='animation')this.reproject(this.currentView??request);
+        }
+        if(!unfinished)break;
+        await yieldToEvents();
+        if(!poolCurrent()){completed=false;this.aborted=true;return;}
+        await request.betweenBatches?.();
+        if(!poolCurrent()){completed=false;this.aborted=true;return;}
+        if(!serviceAppearance()){this.retarget=true;completed=false;return;}
+        const live=this.currentView;
+        if(request.followView&&live&&!this.sameView(request,this.workRequest(live))&&
+          performance.now()-targetStarted>=(live.tuning?.targetResidencyMs??tuning.targetResidencyMs)){
+          this.retarget=true;completed=false;return;
+        }
+      }while(unfinished);
+      for(const region of cohort.regions){
+        this.determined.add({x:region.x,y:region.y,width:region.width,height:region.height,spacing:region.stride});
+        if(!this.determinedRegion||region.width*region.height>=this.determinedRegion.width*this.determinedRegion.height)
+          this.determinedRegion={x:region.x,y:region.y,width:region.width,height:region.height};
+        if(region.stride===1){exactCoverage+=region.width*region.height;this.exactCompletedSamples=exactCoverage;}
+      }
+      // Train on the ENTIRE cohort (prefixes + compaction + tail), without
+      // inventing a per-region allocation of shared GPU time.
+      const visits=records.reduce((n,r)=>n+r.visits,0);
+      const wallMs=records.reduce((n,r)=>n+r.wallMs,0)+performance.now()-started;
+      const measurement=this.batchFeedback.submit(visits,cohort.regions[0].stride,(this.currentView?.tuning??tuning).batchTargetMs);
+      const probe={msPerVisit:wallMs/visits};continuationProbe=probe;
+      this.batchMsPerSample=this.batchMsPerSample ? .75*this.batchMsPerSample+.25*probe.msPerVisit : probe.msPerVisit;
+      let applied=false;
+      const learn=()=>{
+        if(applied)return;
+        const costs=[metric,...records.map(r=>r.cost())];
+        if(costs.some(c=>c.unavailable)){
+          applied=true;this.batchFeedback.observe(measurement,wallMs,'fallback');
+        }else if(costs.every(c=>c.reported===c.expected)){
+          applied=true;const ms=costs.reduce((n,c)=>n+c.gpuMs,0);
+          this.batchFeedback.observe(measurement,ms,'gpu');
+          if(ms>0){probe.msPerVisit=ms/visits;gpuCost.msPerVisit=gpuCost.msPerVisit>0?.75*gpuCost.msPerVisit+.25*probe.msPerVisit:probe.msPerVisit;}
+        }
+      };
+      metric.notify=learn;for(const record of records)record.notify(learn);learn();
+      cohort.clear();prefixes=[];poolCost=newCost();
+    };
     // The ordinary wall estimator is independent of continuation feedback.
-    try { while (this.pending.size||carriedRegion) {
+    try { while (this.pending.size||carriedRegion||cohort.lanes) {
+      if(cohort.ready(performance.now(),!!(this.pending.size||carriedRegion))){
+        await flushPool();if(!completed)break;continue;
+      }
       this.requireLiveMethod(request);
       const carry=carriedRegion;carriedRegion=undefined;
       const batchTuning=this.currentView?.tuning??tuning;
@@ -2775,6 +2908,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         oldest:batchTuning.oldestWeight,pointerRadius:batchTuning.pointerRadius,pointerRefinement:batchTuning.pointerRefinement},
         gpuControlled&&interacting&&zoom!==0);
       if(!region)break;
+      // Serialize density transitions and intersecting output owners before
+      // their cold field checks; skipKnown alone cannot prevent a write race.
+      if(cohort.conflicts(region)){await flushPool();if(!completed)break;}
       const ownsExact=!carry;
       const width=region.width, rows=region.height;
       const m = this.reuseMapping, old = this.reusableView;
@@ -2792,7 +2928,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       let regionPipeline=calculatePipeline;
       if(shape){
         const preparing=performance.now();
-        regionPipeline=await this.ensureContinuationPipeline(ordinarySpecialized ? pipelineKind==='approx'?'ordinaryApprox':'ordinaryPlain' : pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox');
+        const kind=ordinarySpecialized ? pipelineKind==='approx'?'ordinaryApprox':'ordinaryPlain' : pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox';
+        regionPipeline=await this.ensureContinuationPipeline(kind,false,poolEligible&&!carry);
+        if(poolEligible&&!carry){pooledPipeline=await this.ensureContinuationPipeline(kind,true);collectorPipeline=await this.ensureSurvivorCollector();}
         this.pipelineWaitMs+=performance.now()-preparing;
         if(this.abortRequested||!request.isCurrent!()||continuationOrbit!==this.orbitBuffer)throw new DOMException('Superseded continuation','AbortError');
         this.requireLiveMethod(request);
@@ -2810,6 +2948,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
       }
       let batchStarted=0;
+      let deferred=false;
       if(shape){
         const measurement=carry?null:this.batchFeedback.submit(visits,region.stride,batchTuning.batchTargetMs);
         const learnBatch=(ms:number,kind:'gpu'|'fallback')=>{
@@ -2818,7 +2957,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         const regionStarted=performance.now();
         const probe={msPerVisit:0};
         let sliceExpected=0,sliceReported=0,sliceGpuMs=0,sliceUnavailable=false,slicesFinished=false,costApplied=false,regionWallMs=0;
+        let deferredNotify=()=>{};
         const learnRegion=()=>{
+          if(deferred){deferredNotify();return;}
           if(!slicesFinished||costApplied)return;
           // Carried work has already paid part of its cost in the old target.
           if(carry){costApplied=true;return;}
@@ -2835,7 +2976,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           }
         };
         let resume=!!carry,unfinished=carry?.unfinished??0,
-          publishedCompleted=submittedVisits;
+          publishedCompleted=observedCompletions;
         if(carry)submittedVisits+=unfinished;
         do {
           this.requireLiveMethod(request);
@@ -2875,6 +3016,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
             completedSamples=counters[5]+counters[6];
             unfinished=counters[7];
           } finally { continuationReadback!.unmap(); }
+          observedCompletions=completedSamples;
           if(epoch!==this.publicationEpoch||continuationOrbit!==this.orbitBuffer||
               !request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
           if(progressive&&completedSamples>publishedCompleted){
@@ -2922,16 +3064,38 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
             this.retarget=true;completed=false;break;
           }
           resume=true;
+          if(poolEligible&&!carry&&cohort.accepts(region,unfinished,shape.lanes)){
+            if(!pool){
+              pool=storageBuffer(device,(CONTINUATION_HEADER_BYTES+SURVIVOR_CAPACITY*CONTINUATION_STATE_BYTES)/4,'pooled-survivors',GPUBufferUsage.COPY_SRC);
+              poolBind=device.createBindGroup({layout:this.continuationLayout!,entries:[{binding:0,resource:{buffer:pool}}]});
+            }
+            if(!cohort.lanes)device.queue.writeBuffer(pool,0,new Uint32Array(CONTINUATION_HEADER_BYTES/4));
+            // FIFO order: copy the source before its next cold header reset.
+            device.queue.writeBuffer(scratch!,8,new Uint32Array([shape.lanes]));
+            const collectorBind=device.createBindGroup({layout:collectorPipeline!.getBindGroupLayout(1),entries:[
+              {binding:0,resource:{buffer:scratch!}},{binding:1,resource:{buffer:pool}}]});
+            const emptyBind=device.createBindGroup({layout:collectorPipeline!.getBindGroupLayout(0),entries:[]});
+            const encoder=device.createCommandEncoder({label:'collect-survivors'}),sample=this.timing.begin();
+            const pass=encoder.beginComputePass({label:'collect-survivors',timestampWrites:this.timing.writes(sample)});
+            pass.setPipeline(collectorPipeline!);pass.setBindGroup(0,emptyBind);pass.setBindGroup(1,collectorBind);
+            pass.dispatchWorkgroups(Math.ceil(shape.lanes/64));pass.end();this.timing.resolve(encoder,sample);
+            device.queue.submit([encoder.finish()]);collectTiming(sample,poolCost);
+            cohort.add(region,unfinished,shape.lanes,performance.now());deferred=true;
+            prefixes.push({visits,wallMs:performance.now()-regionStarted,
+              cost:()=>({expected:sliceExpected,reported:sliceReported,gpuMs:sliceGpuMs,unavailable:sliceUnavailable}),
+              notify:f=>{deferredNotify=f;}});
+            break;
+          }
         }while(unfinished);
         if(!completed)break;
         regionWallMs=performance.now()-regionStarted;
-        if(!carry){probe.msPerVisit=regionWallMs/visits;continuationProbe=probe;}
-        slicesFinished=true;learnRegion();
+        if(!carry&&!deferred){probe.msPerVisit=regionWallMs/visits;continuationProbe=probe;}
+        slicesFinished=!deferred;learnRegion();
         // A bounded probe must provide an exit to ordinary bulk rendering for
         // cheap work. Include its fences, as the ordinary estimator does; do
         // not include pipeline compilation or reference preparation.
         const observed=regionWallMs/visits;
-        if(!carry&&Number.isFinite(observed)&&observed>0)this.batchMsPerSample=this.batchMsPerSample
+        if(!carry&&!deferred&&Number.isFinite(observed)&&observed>0)this.batchMsPerSample=this.batchMsPerSample
           ? .75*this.batchMsPerSample+.25*observed : observed;
       }else{
         // Keep this scheduler selection intact. Only established inward motion
@@ -3028,7 +3192,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if(method!==Method.Direct&&completed&&request.isCurrent!()&&!this.abortRequested)this.perturbationActive=true;
       // PendingRegions still owns the carried rectangle's exact obligations.
       // Its later known-sample visit counts this area once, without duplicating it.
-      if(ownsExact&&region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
+      if(ownsExact&&!deferred&&region.stride===1){exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;}
       if(!shape){
         const elapsed=performance.now()-batchStarted;
         if(request.interacting&&(request.zoom??0)<0)
@@ -3057,9 +3221,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         this.retarget=true; completed=false; break;
       }
     }
-      if(completed&&carriedRegion)throw Error('Unfinished continuation at final coverage.');
+      if(completed&&(carriedRegion||cohort.lanes))throw Error('Unfinished continuation at final coverage.');
     }finally{
-      scratch?.destroy();continuationReadback?.destroy();
+      scratch?.destroy();pool?.destroy();continuationReadback?.destroy();
     }
     if (!request.isCurrent!()||this.abortRequested) completed = false;
     if(completed&&!serviceAppearance()){this.retarget=true;completed=false;}

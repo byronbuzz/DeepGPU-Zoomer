@@ -7,11 +7,14 @@ struct WideContinuation {
     zValue: vec2<f32>, z2: f32, reserved2: u32,
 };
 struct ContinuationRegion {
-    operations: u32, resume: u32, columns: u32, reserved: u32,
+    operations: u32, resume: u32, columns: u32, reserved: atomic<u32>,
     pendingBits: array<atomic<u32>, 128>,
     states: array<WideContinuation>,
 };
 @group(1) @binding(0) var<storage, read_write> continuation: ContinuationRegion;
+// Statically used only by collectSurvivors, whose layout has no main bindings.
+@group(1) @binding(1) var<storage, read_write> collected: ContinuationRegion;
+override POOL_COORDINATES: bool = false;
 // Another density obligation may have finished this exact sample while its
 // checkpoint was parked. Retire this logical visit once, preserving the work
 // already performed without overwriting the determined field.
@@ -238,20 +241,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
 }
 
 
-// One invocation and checkpoint per actual sub-sample. A pending lane never
-// publishes its field, endpoint or completion counters.
-@compute @workgroup_size(8, 4)
-fn computeContinued(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= continuation.columns) { return; }
-    let size = vec2<u32>(u32(u.resolution.x),u32(u.resolution.y));
-    let grid = sampleGrid();
-    let stride = max(1u,u.sampleStep);
-    let position = gid.xy / grid;
-    let sub = gid.xy % grid;
-    let col = position.x * stride + u.columnOffset;
-    let row = position.y * stride + u.rowOffset;
-    if (col >= min(size.x,u.columnLimit) || row >= min(size.y,u.rowLimit)) { return; }
-    let stateIndex = gid.y * continuation.columns + gid.x;
+fn continueSample(col: u32, row: u32, sub: vec2<u32>, grid: u32, stateIndex: u32) {
     if (continuation.resume != 0u && (atomicLoad(&continuation.pendingBits[stateIndex/32u]) & (1u << (stateIndex%32u))) == 0u) { return; }
     let at = fieldIndex(col*grid+sub.x,row*grid+sub.y);
     let previous = field[at];
@@ -269,7 +259,15 @@ fn computeContinued(@builtin(global_invocation_id) gid: vec3<u32>) {
     let global = vec2<f32>(f32(col)+u.domainOrigin.x,f32(row)+u.domainOrigin.y);
     let pixel = vec2<f32>(global.x,u.domainResolution.y-1.0-global.y)+jitter;
     let s = iterateWideContinued(pixel,stateIndex);
-    if (s.z2 < 0.0) { return; }
+    if (s.z2 < 0.0) {
+        // The save constructor zeros these slots, so restore the address on
+        // EVERY suspension, including subsequent pooled slices.
+        if (POOL_COORDINATES) {
+            continuation.states[stateIndex].reserved = col;
+            continuation.states[stateIndex].reserved2 = row;
+        }
+        return;
+    }
     if (continuation.resume != 0u) { atomicAnd(&continuation.pendingBits[stateIndex/32u],~(1u << (stateIndex%32u))); }
     var entry = vec2<f32>(0.0);
     if (sampleMode() == 1u) {
@@ -296,4 +294,43 @@ fn computeContinued(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (beforeSkips > 0xffffffffu-s.skips) { atomicAdd(&stats[9],1u); }
     if (beforeRebases > 0xffffffffu-s.rebases) { atomicAdd(&stats[10],1u); }
     if (beforePlain > 0xffffffffu-plain) { atomicAdd(&stats[11],1u); }
+}
+
+// One invocation and checkpoint per actual sub-sample. A pending lane never
+// publishes its field, endpoint or completion counters.
+@compute @workgroup_size(8, 4)
+fn computeContinued(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= continuation.columns) { return; }
+    let size = vec2<u32>(u32(u.resolution.x),u32(u.resolution.y));
+    let grid = sampleGrid();
+    let stride = max(1u,u.sampleStep);
+    let position = gid.xy / grid;
+    let sub = gid.xy % grid;
+    let col = position.x * stride + u.columnOffset;
+    let row = position.y * stride + u.rowOffset;
+    if (col >= min(size.x,u.columnLimit) || row >= min(size.y,u.rowLimit)) { return; }
+    continueSample(col, row, sub, grid, gid.y * continuation.columns + gid.x);
+}
+
+@compute @workgroup_size(32)
+fn computePooled(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let index = gid.x;
+    if (index >= continuation.columns ||
+        (atomicLoad(&continuation.pendingBits[index / 32u]) & (1u << (index % 32u))) == 0u) { return; }
+    let saved = continuation.states[index];
+    if (saved.reserved >= u32(u.resolution.x) || saved.reserved2 >= u32(u.resolution.y)) { return; }
+    continueSample(saved.reserved, saved.reserved2, vec2<u32>(0u), 1u, index);
+}
+
+@compute @workgroup_size(64)
+fn collectSurvivors(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let index = gid.x;
+    if (index >= continuation.columns ||
+        (atomicLoad(&continuation.pendingBits[index / 32u]) & (1u << (index % 32u))) == 0u) { return; }
+    let destination = atomicAdd(&collected.reserved, 1u);
+    // Host admission guarantees capacity; the independently copied append
+    // count detects any disagreement instead of accepting incomplete coverage.
+    if (destination >= 256u) { return; }
+    collected.states[destination] = continuation.states[index];
+    atomicOr(&collected.pendingBits[destination / 32u], 1u << (destination % 32u));
 }
