@@ -25,10 +25,12 @@ import quadFastSource from "../arithmetic/quad-fast.wgsl?raw";
 import perturbationSource from "./perturbation.wgsl?raw";
 import wideSource from "./wide.wgsl?raw";
 import continuationSource from "./continuation.wgsl?raw";
-import { MANDATORY_CONTINUATION_ITERATIONS, continuationRegion, continuationOperations, resumedContinuationOperations, continuationLaneLimit, measuredContinuationBudget, COLD_CONTINUATION_OPERATIONS, CONTINUATION_HEADER_BYTES, CONTINUATION_STATE_BYTES } from "./continuation";
+import { MANDATORY_CONTINUATION_ITERATIONS, continuationRegion, continuationOperations, resumedContinuationOperations, continuationLaneLimit, coldCohortOperations, measuredContinuationBudget, COLD_CONTINUATION_OPERATIONS, CONTINUATION_HEADER_BYTES, CONTINUATION_STATE_BYTES } from "./continuation";
 import { PendingContinuationSlot, translatedContinuationRegion, type ContinuationIdentity, type PendingContinuation } from './pending-continuation';
 import { SurvivorCohort, SURVIVOR_CAPACITY } from './survivor-cohort';
 import reuseSource from "./reuse.wgsl?raw";
+import capValidationSource from "./cap-validation.wgsl?raw";
+import { capRegionResolved, type CapCertificate } from './cap-certificate';
 import qualityResolveSource from "./quality-resolve.wgsl?raw";
 import { oversampledView } from "./quality";
 import { boundedRetainedView, createSampleGridAnchor, planRetainedView, sourceAlignedRetainedView, sampleGridRemap, knownRemappedRegion, type SampleGridAnchor, type SampleGridRemap } from "./sample-grid";
@@ -510,6 +512,7 @@ export class WebGpuRenderer {
   private sampleKey = "";
   private admittedSamples: AdmittedSamples | null = null;
   private reusePipeline: GPUComputePipeline | null = null;
+  private capValidationPipeline: GPUComputePipeline | null = null;
   private reuseUniform: GPUBuffer | null = null;
   private cachedStats: RenderStats | null = null;
   private cachedRequest = "";
@@ -1165,7 +1168,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   private commitHistory(request: NonNullable<WebGpuRenderer["lastFrame"]>,candidate:GPUTexture) {
     const live=this.currentView,view=live??request;
     const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.samePresentation(frame,request)||
-      !!(live?.dynamicIterations&&live.followView&&live.provisionalNavigationCap&&
+      !!(live&&
         this.presentationCompatible(request,live)&&this.presentationCompatible(frame,live));
     const bounds = (frame: FrameView) => {
       if((frame.angle??0)!==(view.angle??0))return [0,0,0,0];
@@ -1676,7 +1679,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const frame=this.completedFrame,descriptor=this.fieldDescriptor;
     // Most presentation calls cannot upgrade a completed field. Reject them
     // before planning numerical geometry or inspecting the precision method.
-    if(!request.dynamicIterations||!request.followView||!frame||!descriptor||!this.fieldComplete||this.aborted||
+    if(!request.followView||!frame||!descriptor||!this.fieldComplete||this.aborted||
       !this.currentImageValid||!this.fieldBuffer||!this.fieldView||!this.fieldKey||
       request.maxIterations<=frame.maxIterations)return null;
     const work=this.workRequest(request),family=request.family??'mandelbrot';
@@ -1691,10 +1694,49 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       !this.samePresentation({...frame,maxIterations:request.maxIterations},work))return null;
     return frame;
   }
-  /** Prior-cap imagery remains display-only while an automatic cap catches up. */
+  /** Scan actual numerical samples once instead of scheduling empty regions.
+   * Only a current whole-field result can remove the new cap's obligations. */
+  private async validateCapField(request:RenderRequest):Promise<CapCertificate> {
+    const device=this.ctx.device,field=this.fieldBuffer!,epoch=this.publicationEpoch;
+    const bytes=Math.ceil(request.width/8)*Math.ceil(request.height/8)*4;
+    const current=()=>epoch===this.publicationEpoch&&field===this.fieldBuffer&&
+      !this.abortRequested&&request.isCurrent!()&&!this.deviceLost;
+    await this.oncePipeline('cap-validation',()=>!!this.capValidationPipeline,async()=>{
+      const module=await compileShader(device,capValidationSource,'cap-validation');
+      this.capValidationPipeline=await device.createComputePipelineAsync({label:'cap-validation',layout:'auto',
+        compute:{module,entryPoint:'validateCap'}});
+    });
+    if(!current())throw new DOMException('Superseded cap validation','AbortError');
+    let uniform:GPUBuffer|undefined,flag:GPUBuffer|undefined;
+    try{
+      const data=await checkedGpu(device,()=>{
+        uniform=device.createBuffer({label:'cap-validation-geometry',size:16,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
+        flag=device.createBuffer({label:'cap-validation-result',size:bytes,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC});
+        device.queue.writeBuffer(uniform,0,new Uint32Array([request.width,request.height,request.maxIterations,0]));
+        const encoder=device.createCommandEncoder({label:'validate-reused-cap'}),pass=encoder.beginComputePass();
+        pass.setPipeline(this.capValidationPipeline!);
+        pass.setBindGroup(0,device.createBindGroup({layout:this.capValidationPipeline!.getBindGroupLayout(0),entries:[
+          {binding:0,resource:{buffer:field}}, {binding:1,resource:{buffer:uniform}}, {binding:2,resource:{buffer:flag}},
+        ]}));
+        pass.dispatchWorkgroups(Math.ceil(request.width/8),Math.ceil(request.height/8));pass.end();
+        device.queue.submit([encoder.finish()]);
+        return readBuffer(device,flag,bytes);
+      });
+      if(!current())throw new DOMException('Superseded cap validation','AbortError');
+      const unresolved=new Uint32Array(data);
+      if(unresolved.byteLength!==bytes)throw Error('Invalid cap validation tile count');
+      return {width:request.width,height:request.height,unresolved};
+    }finally{uniform?.destroy();flag?.destroy();}
+  }
+  /** Prior-cap imagery remains display-only while the new cap catches up. */
   private presentationCompatible(frame:WebGpuRenderer["lastFrame"],request:RenderRequest):frame is NonNullable<WebGpuRenderer["lastFrame"]>{
     if(!frame)return false;
     if(Boolean(this.samePresentation(frame,request)))return true;
+    // Retained textures may be cropped or bounded at a different resolution.
+    // Their reprojection is checked by the presentation caller; their old cap
+    // remains intact and cannot certify numerical coverage or completion.
+    if(request.followView&&!request.interacting&&frame.maxIterations!==request.maxIterations&&
+      this.samePresentation({...frame,maxIterations:request.maxIterations},request))return true;
     if(!request.dynamicIterations)return false;
     const held=this.completedFrame;
     const base=this.capUpgradeBase(request)??
@@ -2572,7 +2614,9 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       reference:method===Method.Direct?null:this.refSamples,
       approximation:u32[20]>0?this.laBuffer:null};
     const capMapping=fieldStale&&this.fieldBuffer?
-      automaticCapRemap(this.admittedSamples,admitted,!!(request.dynamicIterations&&request.followView&&request.provisionalNavigationCap)):null;
+      automaticCapRemap(this.admittedSamples,admitted,
+        !!(request.dynamicIterations&&request.followView&&request.provisionalNavigationCap),
+        !!request.followView&&!this.isInteracting(request)):null;
     const lowerCap=capMapping&&this.admittedSamples!.maxIterations>request.maxIterations?request.maxIterations:0;
     const inPlaceCapUpgrade=fieldStale&&!!capMapping&&!!this.capUpgradeBase(request);
     const capUpgrade=inPlaceCapUpgrade||!!capMapping;
@@ -2602,8 +2646,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
     }
     this.admittedSamples=admitted;
+    const capCertificate=capMapping&&ordinary&&request.followView&&!this.isInteracting(request)
+      ?await this.validateCapField(request):null;
+    const capFieldResolved=!!capCertificate&&capRegionResolved(capCertificate,{x:0,y:0,width:request.width,height:request.height});
     this.exactTotalSamples=request.width*request.height;
-    this.exactCompletedSamples=fieldStale?0:this.exactTotalSamples;
+    this.exactCompletedSamples=fieldStale&&!capFieldResolved?0:this.exactTotalSamples;
 
     const pipelineStarted=performance.now();
     let calculatePipeline=await calculationPreparation;
@@ -2632,15 +2679,18 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       method, grid,
     };
     const progressive = grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
-    const continuationCapacity=continuationLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize));
+    const cohortEligible=!!request.followView&&ordinary&&family==='mandelbrot'&&pipelineKind==='approx'&&
+      !request.angle&&!request.exportDomain&&!request.stationaryOversampling;
+    const continuationCapacity=Math.min(cohortEligible?32768:4096,
+      continuationLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize)));
     const continuationSupported=device.limits.maxStorageBuffersPerShaderStage>=8 && continuationCapacity>=grid*grid;
     if(request.maxIterations>=MANDATORY_CONTINUATION_ITERATIONS&&!continuationSupported)
       throw Error('This GPU cannot safely render million-iteration requests. Reduce the iteration limit.');
     const shade=(encoder:GPUCommandEncoder,width:number,height:number)=>this.encodeShadePass(encoder,bind,width,height);
     this.aborted = false;
     this.partialRegions = 0;
-    let completed = true, cpuReused = 0, submittedVisits=0;
-    let exactCoverage=fieldStale?0:request.width*request.height;
+    let completed = true, cpuReused = capFieldResolved?request.width*request.height:0, submittedVisits=0;
+    let exactCoverage=fieldStale&&!capFieldResolved?0:request.width*request.height;
     u32[40] = 0; u32[42] = 0; u32[43] = request.width;
     device.queue.writeBuffer(this.uniformBuffer, 0, uniforms);
     if (fieldStale && !inPlaceCapUpgrade) {
@@ -2678,12 +2728,17 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     };
     const settledPreviewEligible=progressive&&ordinary&&family==='mandelbrot'&&!!request.followView;
     let singlePreview=settledPreviewEligible&&!this.isInteracting(request);
-    if (!fieldStale) this.pending.reset(0,0);
-    if (fieldStale) {
+    if (!fieldStale||capFieldResolved) this.pending.reset(0,0);
+    if (fieldStale&&!capFieldResolved) {
       // Settled ordinary views need one broad preview before exact refinement.
       // Motion keeps the full density ladder so new visible areas can catch up.
       this.pending.reset(request.width,request.height,previewStride,request.followView,singlePreview);
       this.determined=new CoverageRegions(); this.determinedRegion=null;  this.streamTargets++;
+    }
+    if(capFieldResolved){
+      this.determined=new CoverageRegions();
+      this.determinedRegion={x:0,y:0,width:request.width,height:request.height};
+      this.determined.add({...this.determinedRegion,spacing:1});
     }
     const targetStarted=performance.now();
     const serviceAppearance=()=>{
@@ -2871,13 +2926,16 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       // Off disables the optional override, not the first-work safeguard. A
       // cold high-cap region cannot establish its cost by first running to cap.
       const sliceOperations=carry?.operations??(continuationSupported ? continuationOperations(request.maxIterations,
-        this.batchMsPerSample,batchTuning.batchTargetMs) : 0);
+        this.batchMsPerSample,batchTuning.batchTargetMs,cohortEligible) : 0);
       const costly=sliceOperations>0;
       syncFeedbackPolicy(sliceOperations);
       // Only the continuation route consults its separate, bounded feedback.
       const continuedBudget=costly?this.batchFeedback.budget(minimum,batchTuning.batchTargetMs,
-        freshWork?request.width*request.height:Math.min(request.width*request.height,minimum)):ordinaryBudget;
-      const spatialBudget=costly?Math.min(continuedBudget,Math.floor(continuationCapacity/(grid*grid))):ordinaryBudget;
+        // A current GPU certificate permits normal measured growth while
+        // resolved regions are skipped. The lane and operation bounds below
+        // still apply to every unresolved region, even a single long-tail pixel.
+        freshWork||capCertificate?request.width*request.height:Math.min(request.width*request.height,minimum)):ordinaryBudget;
+      const spatialBudget=costly?Math.min(cohortEligible?continuationCapacity:continuedBudget,Math.floor(continuationCapacity/(grid*grid))):ordinaryBudget;
       // A direct-iteration wave can exceed the allowance even at minimum size;
       // shrinking it further loses occupancy without making it finish sooner.
       const gpuControlled=!!request.followView&&family==='mandelbrot'&&ordinary&&
@@ -2914,12 +2972,18 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const ownsExact=!carry;
       const width=region.width, rows=region.height;
       const m = this.reuseMapping, old = this.reusableView;
-      const fullyKnown = !capUpgrade && m && old && m.denominator === 1 &&
+      const fullyKnown = !!(capCertificate&&capRegionResolved(capCertificate,region)) || !capUpgrade && m && old && m.denominator === 1 &&
         m.offsetX + region.x * m.step >= 0 && m.offsetY + region.y * m.step >= 0 &&
         m.offsetX + (region.x + width - 1) * m.step < old.width &&
         m.offsetY + (region.y + rows - 1) * m.step < old.height &&
         (this.reusableComplete || grid===1&&knownRemappedRegion(region,m,old,this.reusableKnownRectangles));
-      if (!carry&&fullyKnown) { if(region.stride===1){cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;} continue; }
+      if (!carry&&fullyKnown) {
+        if(region.stride===1){
+          cpuReused += width * rows;exactCoverage+=width*rows;this.exactCompletedSamples=exactCoverage;
+          this.determined.add({x:region.x,y:region.y,width,height:rows,spacing:1});
+        }
+        continue;
+      }
       const visits=Math.ceil(width/region.stride)*Math.ceil(rows/region.stride);
       const limit=Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize);
       // Fail closed if region selection ever exceeds the admitted capacity;
@@ -2987,7 +3051,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           const control=new Uint32Array(resume?4:CONTINUATION_HEADER_BYTES/4);
           const stationarySlice=!!request.followView&&request.maxIterations>=MANDATORY_CONTINUATION_ITERATIONS&&family==='mandelbrot'&&ordinary&&
             method!==Method.Direct&&!this.isInteracting(request);
-          const operations=resumedContinuationOperations(sliceOperations,resume?unfinished:shape.lanes,stationarySlice);
+          const operations=cohortEligible&&!resume?coldCohortOperations(shape.lanes,stationarySlice):
+            resumedContinuationOperations(sliceOperations,resume?unfinished:shape.lanes,stationarySlice);
           control.set([operations,resume?1:0,shape.columns,0]);
           device.queue.writeBuffer(scratch!,0,control);
           device.queue.writeBuffer(this.statsBuffer,28,new Uint32Array(1));

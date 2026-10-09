@@ -2,7 +2,7 @@
 
 # DeepGPU Zoomer
 
-**The fastest, deepest and smoothest WebGPU Fractal Zoomer in the world! (probably)... Explore Mandelbrot and Julia sets in real-time - in your browser - to depths of 10^-400 and beyond.**
+**Explore Mandelbrot and Julia sets in your browser with WebGPU, progressive rendering and deep-zoom perturbation.**
 
 ![DeepGPU Zoomer showing a blue and gold Mandelbrot set, Julia preview, PNG export and colour controls](public/gallery/images/screenshot-2026-10-03-212953.png)
 
@@ -16,9 +16,9 @@
 
 ## ✨ Introduction
 
-Dive into the dazzling world of Mandelbrot and Julia fractals, where every zoom reveals another ocean of spirals, filaments and miniature sets. Put your AMD/nVidia GPU to work and follow your curiosity into extraordinary depths, right in your browser. 
+Dive into the dazzling world of Mandelbrot and Julia fractals, where every zoom reveals another ocean of spirals, filaments and miniature sets. Put your GPU to work and follow your curiosity into extraordinary depths, right in your browser.
 
-WebGPU handles parallel pixel calculation and presentation. At deeper scales, an arbitrary-precision reference orbit runs in a background worker, while GPU perturbation methods calculate the surrounding detail. Coordinates retain their decimal digits throughout navigation and saved views.
+WebGPU handles parallel pixel calculation and presentation. At deeper scales, an arbitrary-precision reference orbit runs in a background worker, while GPU perturbation methods calculate the surrounding detail. The camera uses depth-dependent decimal precision, and saved views serialize decimal coordinate strings.
 
 | 🔭 Explore | 🎨 Make it yours | 💾 Keep the view |
 | --- | --- | --- |
@@ -100,7 +100,7 @@ The **Advanced** tab keeps the main detail controls together:
 | Control | What it changes | Factory setting |
 | --- | --- | --- |
 | Throughput | Work scheduling during navigation: Smooth, Balanced or Detailed | **Smooth** |
-| Pointer priority | Relative attention to the pointer area while other regions also receive work | **4×** |
+| Pointer priority | Relative attention to the pointer area: Off (1×), 2× or 4× | **2×** |
 | 2× Pointer refinement | Additional local detail around the pointer during interaction | **Off** |
 | 2× oversampling | A stationary image calculated at twice the width and height, then resolved for display | **Off** |
 | BLA precision | Mandelbrot approximation tolerance; a larger displayed exponent is stricter | **2¹⁴** |
@@ -212,8 +212,8 @@ Several mechanisms work together to keep useful pixels on screen:
 - **Pending-region scheduling.** Rectangular work regions balance pointer attention, distributed coverage and older pending work. Uncovered gaps are progressively filled instead of repeatedly replacing the whole image.
 - **Measured batch sizes.** Available GPU timestamps and completion feedback inform work sizing. Navigation throughput chooses a scheduling policy; stationary refinement uses Detailed.
 - **Overscan and retained coverage.** Samples outside the visible area can help with motion and rotated views, subject to bounded field sizes. Rotated views can reuse displayed imagery, but exact numerical-grid remapping is restricted to unrotated grids.
-- **Reference and iteration reuse.** Compatible reference trajectories can be extended, while already escaped samples can remain useful across eligible changes in the iteration cap.
-- **Bounded continuation.** Expensive cold work can advance in bounded portions while retaining its orbit state between submissions.
+- **Reference and iteration reuse.** Compatible reference trajectories can be extended, while already escaped samples can remain useful across eligible increases and decreases in the iteration cap. Stationary cap changes can refine underneath retained imagery; only valid numerical samples count toward completion at the new cap.
+- **Bounded continuation and measured BLA admission.** Eligible ordinary, unrotated Mandelbrot BLA work starts with bounded portions and can use ordinary dispatch after measured feedback, including above one million iterations. Other paths retain their existing admission policy. Operation bounds are not elapsed-time guarantees; long GPU submissions can delay new detail and cancellation.
 - **Coherent publication.** A published image is paired with its camera, dimensions and appearance metadata before the renderer yields, so subsequent presentation knows which view it is showing.
 
 Responsiveness and convergence depend on the scene, resolution, iteration demand and device. Throughput labels are preferences rather than frame-rate guarantees.
@@ -232,7 +232,7 @@ Large images are rendered in bounded, padded tiles assembled into scanline strip
 
 Locations, appearance and preferences are stored in browser-local storage. Exact links serialize decimal coordinate strings in the URL fragment. A link preserves the view and appearance, while device-local navigation and panel preferences remain local. Ordinary startup uses Home; pasted location links open their views immediately.
 
-There is no application analytics client, remote rendering call or automatic upload of saved locations or PNGs. Sharing a copied link is your choice. Browser storage belongs to the origin and browser profile, so clearing it removes locally saved preferences and locations.
+Rendering and PNG encoding run locally, with no automatic upload of saved locations or PNGs. The GitHub Pages site loads a Google Analytics visit tag; its configuration omits URL queries and fragments from the reported page and referrer URLs. The tag is disabled on other origins, including localhost. Sharing a copied link is your choice. Browser storage belongs to the origin and browser profile, so clearing it removes locally saved preferences and locations.
 
 <a id="references"></a>
 

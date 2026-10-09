@@ -59,7 +59,7 @@ export const DEFAULT_TUNING: Readonly<TuningSettings> = Object.freeze({
   dynamicDepthGain: 5000,
   // Fixed crossover into perturbation rendering.
   directExponent: 14.75, batchTargetMs: 8,
-  pointerPriority: 2, pointerWeight: 12, distributedWeight: 3, oldestWeight: 3,
+  pointerPriority: 1, pointerWeight: 2, distributedWeight: 1, oldestWeight: 1,
   pointerRadius: 32, blaPrecisionLog2: -14,
 });
 
@@ -82,7 +82,7 @@ export function mandelbrotBlaEpsilon(tuning?: Partial<TuningSettings>): number {
   return stepped(tuning?.blaPrecisionLog2, DEFAULT_TUNING.blaPrecisionLog2, -24, -14, 1);
 }
 
-export const POINTER_RATIOS = [1, 2, 4, 8, 16] as const;
+export const POINTER_RATIOS = [1, 2, 4] as const;
 const LEGACY_POINTER_RATIOS = [1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64] as const;
 function nearestPointerLevel(ratio:number):number {
   return POINTER_RATIOS.reduce((best,current,index)=>

@@ -95,7 +95,7 @@ The user selects one of three navigation throughput policies:
 | Balanced | 2× | 128 ms |
 | Detailed | 4× | 32 ms |
 
-These are internal workload settings, not measured latency promises. The main application uses the selection while interacting, and Detailed while stationary. Pointer priority selects relative service weights of 1, 2, 4, 8 or 16 against the other service classes; Off corresponds to equal weighting. The factory setting is 4× pointer priority, with Smooth navigation and pointer refinement disabled.
+These are internal workload settings, not measured latency promises. The main application uses the selection while interacting, and Detailed while stationary. Pointer priority selects relative service weights of 1, 2 or 4 against the other service classes; Off corresponds to equal weighting. The factory setting is 2× pointer priority, with Smooth navigation and pointer refinement disabled.
 
 Measured GPU cost and completion feedback adapt eligible work sizes. Established inward work can publish aligned stripes. Ordinary Mandelbrot kernels use a **16×4** workgroup specialization where applicable. GPU timing is used when supported.
 
@@ -103,7 +103,7 @@ Analytic cardioid and bulb checks avoid eligible Mandelbrot interior work. Exact
 
 ## Bounded continuation
 
-Eligible expensive cold work retains recurrence state across bounded GPU submissions. Each portion limits loop operations and then yields; its operation limit is not a wall-clock guarantee. This permits progress on long-running samples without requiring one unbounded submission.
+Eligible expensive cold work retains recurrence state across bounded GPU submissions. Each portion limits loop operations and then yields; its operation limit is not a wall-clock guarantee. Eligible ordinary, unrotated Mandelbrot BLA work can switch to ordinary dispatch after measured feedback, including above one million iterations. Other paths retain their existing admission policy. Long GPU submissions can delay fresh detail and cancellation.
 
 Continuation state has its own ownership and compatibility rules. Cross-view carry is narrower than ordinary image reuse: eligible ordinary, unrotated Mandelbrot work can transfer compatible continuation state. [continuation.ts](../src/render/continuation.ts) and [pending-continuation.ts](../src/render/pending-continuation.ts) define its execution and ownership model.
 
@@ -145,7 +145,7 @@ The initial collection is the owner's 12 locations in [default-locations.json](.
 
 Location backups use a versioned `deepgpu-zoomer-locations` JSON envelope; restoration also accepts a legacy location array. Every incoming view is validated before merging. Restoration preserves destination entries and is safe to repeat. Unreadable stored location data disables saving and deletion rather than replacing it. Locations and settings remain origin-local; moving to another port or hosted site requires a backup and restore to transfer browser-saved entries.
 
-Application state lives in browser local storage. Rendering and PNG encoding use local CPU/GPU resources. There is no application upload, analytics or remote rendering client; application and worker files are loaded from the serving origin.
+Application state lives in browser local storage. Rendering and PNG encoding use local CPU/GPU resources, with no automatic upload of saved locations or PNGs and no remote rendering client. The GitHub Pages origin loads a Google Analytics visit tag through [analytics.js](../public/analytics.js); its configuration omits queries and fragments from reported page and referrer URLs. The tag is disabled on other origins, including localhost. Application and worker files are loaded from the serving origin.
 
 ## Static deployment
 

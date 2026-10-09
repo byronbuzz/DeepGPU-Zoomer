@@ -124,7 +124,7 @@ Once movement stops, the main view automatically uses **Detailed** scheduling un
 
 ### Pointer controls
 
-Pointer priority offers **Off, 2×, 4×, 8× and 16×**. It weights work near the pointer relative to distributed and older pending work. Off means equal service weighting; it does not stop rendering. The factory setting is **4×**.
+Pointer priority offers **Off, 2× and 4×**. It weights work near the pointer relative to distributed and older pending work. Off means 1×, or equal service weighting; it does not stop rendering. The factory setting is **2×**.
 
 **2× Pointer refinement** increases local detail around the pointer during interaction. It is independent of priority and is off by default.
 
@@ -172,7 +172,7 @@ Use **Cancel export** or close the export panel to cancel. Large images are gene
 | Rotation speed / Palette cycle at that speed | 10 seconds / 40 seconds |
 | Default locations | 12 editable, deletable saved views |
 | Throughput / stationary refinement | Smooth / Detailed |
-| Pointer priority / 2× Pointer refinement | 4× / Off |
+| Pointer priority / 2× Pointer refinement | 2× / Off |
 | 2× oversampling / Distance lighting | Off / Off |
 | BLA precision / Dynamic gain | 2¹⁴ / 5,000 |
 | Colour formula / Effect / Capped points | Smooth escape / None / Solid black |
@@ -192,6 +192,6 @@ Use **Cancel export** or close the export panel to cancel. Large images are gene
 | A link does not open | Use the complete URL produced by Copy Link, including its fragment. Invalid links leave the current view unchanged. |
 | Saved locations appear missing | Confirm the same browser profile, hostname and port. Local storage is separate for each origin. |
 
-The application computes and exports locally. Its code does not upload locations, send analytics or use a rendering service. Loading the application and its worker assets still uses the serving origin.
+The application computes and exports locally, with no automatic upload of saved locations or PNGs and no remote rendering service. The GitHub Pages site loads a Google Analytics visit tag; its configuration omits queries and fragments from reported page and referrer URLs. The tag is disabled on other origins, including localhost. Loading the application and its worker assets still uses the serving origin.
 
 Before moving to a new candidate, port or version, use **Advanced → Backup locations** and keep the downloaded JSON file. Use **Restore locations** in the new version and verify the names before retiring the old version. Restoring merges locations without overwriting name conflicts. The 12 default locations come from the owner's 3 October 2026 backup and are added once, preserving existing saved entries.

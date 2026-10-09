@@ -8,7 +8,7 @@ struct WideContinuation {
 };
 struct ContinuationRegion {
     operations: u32, resume: u32, columns: u32, reserved: atomic<u32>,
-    pendingBits: array<atomic<u32>, 128>,
+    pendingBits: array<atomic<u32>, 1024>,
     states: array<WideContinuation>,
 };
 @group(1) @binding(0) var<storage, read_write> continuation: ContinuationRegion;
