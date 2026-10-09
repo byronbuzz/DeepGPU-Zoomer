@@ -18,11 +18,12 @@ test('missing, invalid or expensive feedback remains bounded after BLA opt-in',(
  assert.equal(policy.coldCohortOperations(32768,false),64);
  assert.equal(policy.resumedContinuationOperations(4096,1,false),4096);
 });
-test('renderer opt-in uses the already qualified narrow cohort eligibility',()=>{
+test('renderer opt-in uses measured BLA admission separately from cohort eligibility',()=>{
  const source=ts.createSourceFile('renderer.ts',fs.readFileSync(root+'/src/render/webgpu-renderer.ts','utf8'),ts.ScriptTarget.Latest,true),calls=[];
  (function visit(n){if(ts.isCallExpression(n)&&n.expression.getText(source)==='continuationOperations')calls.push(n);ts.forEachChild(n,visit);})(source);
- assert.equal(calls.length,1);assert.equal(calls[0].arguments.length,4);assert.equal(calls[0].arguments[3].getText(source),'cohortEligible');
+ assert.equal(calls.length,1);assert.equal(calls[0].arguments.length,4);assert.equal(calls[0].arguments[3].getText(source),'measuredBlaEligible');
  // Existing cohort-policy tests exercise the actual predicate for Julia,
  // exports, endpoints/nonordinary channels, oversampling, rotation and plain paths.
+ // Rotated admission has its own execution-policy tests.
  const shader=fs.readFileSync(root+'/src/render/continuation.wgsl','utf8');assert.match(shader,/pendingBits: array<atomic<u32>, 1024>/);
 });

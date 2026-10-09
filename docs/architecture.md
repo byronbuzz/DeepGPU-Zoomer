@@ -103,7 +103,7 @@ Analytic cardioid and bulb checks avoid eligible Mandelbrot interior work. Exact
 
 ## Bounded continuation
 
-Eligible expensive cold work retains recurrence state across bounded GPU submissions. Each portion limits loop operations and then yields; its operation limit is not a wall-clock guarantee. Eligible ordinary, unrotated Mandelbrot BLA work can switch to ordinary dispatch after measured feedback, including above one million iterations. Other paths retain their existing admission policy. Long GPU submissions can delay fresh detail and cancellation.
+Eligible expensive cold work retains recurrence state across bounded GPU submissions. Each portion limits loop operations and then yields; its operation limit is not a wall-clock guarantee. Eligible ordinary Mandelbrot BLA work, including rotated views, can switch to ordinary dispatch after measured feedback, including above one million iterations. Other paths retain their existing admission policy. Long GPU submissions can delay fresh detail and cancellation.
 
 Continuation state has its own ownership and compatibility rules. Cross-view carry is narrower than ordinary image reuse: eligible ordinary, unrotated Mandelbrot work can transfer compatible continuation state. [continuation.ts](../src/render/continuation.ts) and [pending-continuation.ts](../src/render/pending-continuation.ts) define its execution and ownership model.
 

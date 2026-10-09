@@ -2679,8 +2679,11 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       method, grid,
     };
     const progressive = grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
-    const cohortEligible=!!request.followView&&ordinary&&family==='mandelbrot'&&pipelineKind==='approx'&&
-      !request.angle&&!request.exportDomain&&!request.stationaryOversampling;
+    // Measured ordinary dispatch does not transfer recurrence state between
+    // views. Rotated fields keep the incumbent cold cohort and carry guards.
+    const measuredBlaEligible=!!request.followView&&ordinary&&family==='mandelbrot'&&pipelineKind==='approx'&&
+      !request.exportDomain&&!request.stationaryOversampling;
+    const cohortEligible=measuredBlaEligible&&!request.angle;
     const continuationCapacity=Math.min(cohortEligible?32768:4096,
       continuationLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize)));
     const continuationSupported=device.limits.maxStorageBuffersPerShaderStage>=8 && continuationCapacity>=grid*grid;
@@ -2926,7 +2929,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       // Off disables the optional override, not the first-work safeguard. A
       // cold high-cap region cannot establish its cost by first running to cap.
       const sliceOperations=carry?.operations??(continuationSupported ? continuationOperations(request.maxIterations,
-        this.batchMsPerSample,batchTuning.batchTargetMs,cohortEligible) : 0);
+        this.batchMsPerSample,batchTuning.batchTargetMs,measuredBlaEligible) : 0);
       const costly=sliceOperations>0;
       syncFeedbackPolicy(sliceOperations);
       // Only the continuation route consults its separate, bounded feedback.

@@ -23,7 +23,8 @@ test('host bitmap, GPU bitmap and maximum state layout agree; oversampling retai
 const renderer=ts.createSourceFile('renderer.ts',fs.readFileSync(root+'/src/render/webgpu-renderer.ts','utf8'),ts.ScriptTarget.Latest,true),declarations=new Map();
 (function walk(n){if(ts.isVariableDeclaration(n)&&ts.isIdentifier(n.name))declarations.set(n.name.text,n);ts.forEachChild(n,walk);})(renderer);
 const eligibleExpression=declarations.get('cohortEligible').initializer.getText(renderer);
-const eligible=new Function('request','ordinary','family','pipelineKind',`return ${eligibleExpression};`);
+const measuredExpression=declarations.get('measuredBlaEligible').initializer.getText(renderer);
+const eligible=new Function('request','ordinary','family','pipelineKind',`const measuredBlaEligible=${measuredExpression};return ${eligibleExpression};`);
 test('new cohort policy excludes Julia, export, slope, oversampling and non-BLA arithmetic',()=>{
  const request={followView:true},ordinary=true,family='mandelbrot',kind='approx';assert.equal(eligible(request,ordinary,family,kind),true);
  for(const [r,o,f,k]of [[{...request,followView:false},true,family,kind],[request,false,family,kind],[request,true,'julia',kind],[request,true,family,'plain'],[{...request,angle:1},true,family,kind],[{...request,exportDomain:{}},true,family,kind],[{...request,stationaryOversampling:true},true,family,kind]])assert.equal(eligible(r,o,f,k),false);
