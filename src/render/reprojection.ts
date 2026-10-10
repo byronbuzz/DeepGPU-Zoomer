@@ -47,6 +47,18 @@ const MAX_SHRINK = 1 / 64;
 /** Beyond this many screens of travel there is nothing left to reuse. */
 const MAX_PAN_SCREENS = 4;
 
+// Presentation consumes Number/Float32 quotients, not reference precision.
+// Keep both operands intact: absolute deep spans can underflow as Numbers.
+// This constructor never changes the precision used by coordinate arithmetic.
+const DisplayDecimal = Decimal.clone({precision: 24, rounding: Decimal.ROUND_HALF_UP});
+export function displayRatio(numerator: Decimal, denominator: Decimal): number {
+  return new DisplayDecimal(numerator).div(denominator).toNumber();
+}
+
+function nearGuard(value: number, limit: number): boolean {
+  return Math.abs(value-limit)<=limit*1e-14;
+}
+
 /**
  * How to draw `last` under `next`, or null when it is not worth reusing.
  *
@@ -66,6 +78,22 @@ export function reprojectionFor(
   /** Presentation only: keep a finite held-colour map after numerical reuse expires. */
   presentationOnly = false,
 ): Reprojection | null {
+  return projectFrame(last, next, coarseFallback, presentationOnly, false);
+}
+
+/** Display only. Numerical coverage and scheduling retain reprojectionFor. */
+export function displayReprojectionFor(
+  last: FrameView,
+  next: FrameView,
+  coarseFallback = false,
+  presentationOnly = false,
+): Reprojection | null {
+  return projectFrame(last, next, coarseFallback, presentationOnly, true);
+}
+
+function projectFrame(last: FrameView, next: FrameView, coarseFallback: boolean,
+  presentationOnly: boolean, display: boolean): Reprojection | null {
+  const ratio = display ? displayRatio : (a: Decimal, b: Decimal) => a.div(b).toNumber();
   if (last.width <= 0 || last.height <= 0 || next.width <= 0 || next.height <= 0) {
     return null;
   }
@@ -75,8 +103,12 @@ export function reprojectionFor(
   const nextSpanY = next.unitsPerPixel.times(next.height);
   if (lastSpanX.isZero() || lastSpanY.isZero()) return null;
 
-  const scaleY = nextSpanY.div(lastSpanY).toNumber();
-  const scaleX = next.unitsPerPixel.times(next.width).div(lastSpanX).toNumber();
+  const scaleY = ratio(nextSpanY, lastSpanY);
+  const scaleX = ratio(next.unitsPerPixel.times(next.width), lastSpanX);
+  // Bounded division must not change an exact reuse-cutoff decision.
+  if(display&&!presentationOnly&&[scaleX,scaleY].some(scale=>
+    nearGuard(scale,MAX_MAGNIFY)||!coarseFallback&&nearGuard(scale,MAX_SHRINK)))
+    return projectFrame(last,next,coarseFallback,presentationOnly,false);
   if (![scaleX, scaleY].every(scale => Number.isFinite(scale) && scale > 0 &&
       (presentationOnly || coarseFallback || scale >= MAX_SHRINK) &&
       (presentationOnly || scale <= MAX_MAGNIFY))) return null;
@@ -85,8 +117,10 @@ export function reprojectionFor(
     // Same orientation, including the zero-angle identity path.
     const {c,s}=rotationBasis(last.angle??0);
     const dxWorld=next.centerX.minus(last.centerX),dyWorld=next.centerY.minus(last.centerY);
-    const dx=(last.angle??0)===0?dxWorld.div(lastSpanX).toNumber():dxWorld.times(c).plus(dyWorld.times(s)).div(lastSpanX).toNumber();
-    const dy=(last.angle??0)===0?last.centerY.minus(next.centerY).div(lastSpanY).toNumber():dxWorld.times(s).minus(dyWorld.times(c)).div(lastSpanY).toNumber();
+    const dx=ratio((last.angle??0)===0?dxWorld:dxWorld.times(c).plus(dyWorld.times(s)),lastSpanX);
+    const dy=ratio((last.angle??0)===0?last.centerY.minus(next.centerY):dxWorld.times(s).minus(dyWorld.times(c)),lastSpanY);
+    if(display&&!presentationOnly&&[dx,dy].some(value=>nearGuard(Math.abs(value),MAX_PAN_SCREENS)))
+      return projectFrame(last,next,coarseFallback,presentationOnly,false);
     if (!Number.isFinite(dx)||!Number.isFinite(dy)||
         !presentationOnly&&(Math.abs(dx)>MAX_PAN_SCREENS||Math.abs(dy)>MAX_PAN_SCREENS))return null;
     return {scaleX,scaleY,offsetX:0.5*(1-scaleX)+dx,offsetY:0.5*(1-scaleY)+dy};
@@ -96,14 +130,16 @@ export function reprojectionFor(
   // the imaginary axis upwards, hence the negation.
   const old=rotationBasis(last.angle??0),relative=rotationBasis((next.angle??0)-(last.angle??0));
   const worldX=next.centerX.minus(last.centerX),worldY=next.centerY.minus(last.centerY);
-  const dx=worldX.times(old.c).plus(worldY.times(old.s)).div(lastSpanX).toNumber();
-  const dy=worldX.times(old.s).minus(worldY.times(old.c)).div(lastSpanY).toNumber();
+  const dx=ratio(worldX.times(old.c).plus(worldY.times(old.s)),lastSpanX);
+  const dy=ratio(worldX.times(old.s).minus(worldY.times(old.c)),lastSpanY);
+  if(display&&!presentationOnly&&[dx,dy].some(value=>nearGuard(Math.abs(value),MAX_PAN_SCREENS)))
+    return projectFrame(last,next,coarseFallback,presentationOnly,false);
   if (!Number.isFinite(dx) || !Number.isFinite(dy)) return null;
   if (!presentationOnly&&(Math.abs(dx) > MAX_PAN_SCREENS || Math.abs(dy) > MAX_PAN_SCREENS)) return null;
 
   // Cross terms use complex units per pixel and the opposite source axis.
-  const crossX=next.unitsPerPixel.times(next.height).div(lastSpanX).toNumber()*relative.s;
-  const crossY=-next.unitsPerPixel.times(next.width).div(lastSpanY).toNumber()*relative.s;
+  const crossX=ratio(next.unitsPerPixel.times(next.height),lastSpanX)*relative.s;
+  const crossY=-ratio(next.unitsPerPixel.times(next.width),lastSpanY)*relative.s;
   const diagonalY=scaleY*relative.c;
   const diagonalX=scaleX*relative.c;
   return {

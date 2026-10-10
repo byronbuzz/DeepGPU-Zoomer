@@ -24,7 +24,7 @@ WebGPU handles parallel pixel calculation and presentation. At deeper scales, an
 | --- | --- | --- |
 | Mandelbrot and quadratic Julia sets | Editable gradients with 2–8 colour stops | Named locations stored in your browser |
 | Pointer-directed zoom, pan and rotation | 25 colour formulas and 20 optional effects | Exact links with coordinates and appearance |
-| Live Julia preview and 12 editable default locations | Lighting, hue rotation and capped-point patterns | Tiled PNG export at custom resolutions |
+| Live Julia preview and 15 editable default locations | Lighting, hue rotation and capped-point patterns | Tiled PNG export at custom resolutions |
 | Progressive detail and optional 2× oversampling | Movable controls and a custom panel accent | Your own saved startup preferences |
 
 [Browse the gallery](https://byronbuzz.github.io/DeepGPU-Zoomer/gallery/) for some captured views, with full-resolution PNGs. You can also open it from Advanced in the explorer.

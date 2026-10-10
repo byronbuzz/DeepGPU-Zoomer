@@ -6,6 +6,8 @@ export type LocationIdentity=Pick<Choice,'kind'|'name'>;
 export type SavedLocation={name:string;view:SavedView};
 const STORAGE_KEY='gpu-zoomer-locations';
 const DEFAULT_LOCATIONS_KEY='gpu-zoomer-default-locations-2026-10-03-v1';
+const DEEP_DEFAULT_LOCATIONS_KEY='gpu-zoomer-default-locations-2026-10-10-v1';
+const DEEP_DEFAULT_LOCATION_NAMES=new Set(['Inferno 10^800','Inferno 10^900','Eon 10^1000']);
 const BACKUP_FORMAT='deepgpu-zoomer-locations';
 const nameKey=(name:string)=>name.toLocaleLowerCase();
 
@@ -51,11 +53,13 @@ export function setupLocations(snapshot:()=>SavedView,navigate:(view:SavedView)=
   let pending:(()=>void)|null=null,confirmationSource=save;
   try{saved=readSavedLocations();}catch{writable=false;}
   if(writable)try{
-    if(localStorage.getItem(DEFAULT_LOCATIONS_KEY)!=='1'){
-      const defaults=parseLocationBackup(JSON.parse(defaultLocationsJson));
+    const initialDefaults=localStorage.getItem(DEFAULT_LOCATIONS_KEY)!=='1';
+    if(initialDefaults||localStorage.getItem(DEEP_DEFAULT_LOCATIONS_KEY)!=='1'){
+      const defaults=parseLocationBackup(JSON.parse(defaultLocationsJson)).filter(item=>initialDefaults||DEEP_DEFAULT_LOCATION_NAMES.has(item.name));
       const merged=mergeSavedLocations(saved,defaults);
       localStorage.setItem(STORAGE_KEY,JSON.stringify(merged.locations));saved=merged.locations;
       localStorage.setItem(DEFAULT_LOCATIONS_KEY,'1');
+      localStorage.setItem(DEEP_DEFAULT_LOCATIONS_KEY,'1');
     }
   }catch{recoveryError=true;}
   const sync=()=>{remove.disabled=selected?.kind!=='saved'||!writable||restoring;save.disabled=!writable||restoring;backup.disabled=!writable;restoreBackup.disabled=!writable||restoring;restoreBackup.textContent=restoring?'Restoring…':'Restore locations';};

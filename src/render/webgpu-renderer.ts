@@ -38,7 +38,7 @@ import { planNumericalView, containsNumericalView, learnOutwardDelay, outwardHor
 import { PendingRegions, CoverageRegions, type Demand } from "./regions";
 import type { FrameView } from "./reprojection";
 import { splitQuad } from "../arithmetic/quad";
-import { mapUv, reprojectionFor, type Reprojection } from "./reprojection";
+import { mapUv, reprojectionFor, displayReprojectionFor, displayRatio, type Reprojection } from "./reprojection";
 import { rotationBasis } from "../rotation";
 import { ReferenceWorkerClient } from "./reference-worker-client";
 import { MAX_REFERENCE_ITERATIONS, REFERENCE_CHUNK_ITERATIONS, REFERENCE_FORMAT_VERSION, referenceIdentity,
@@ -1330,6 +1330,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     destination?: GPUTexture,
     allowAppearanceFallback=false,
     completedSnapshot=false,
+    freshMapping?: Reprojection | null,
   ) {
     const { device } = this.ctx;
     if(!destination && (!this.screenHold || this.screenHoldSize.width!==this.canvas.width || this.screenHoldSize.height!==this.canvas.height)){
@@ -1353,7 +1354,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const secondaryFrame=completedSnapshot?null:source===this.history?this.coverageFrame:this.historyValid?this.lastFrame:null;
     const secondaryTexture=completedSnapshot?null:source===this.history?this.coverageHistory:this.history;
     const coverage = secondaryTexture && secondaryFrame && matchesView(secondaryFrame) && this.currentView
-      ? reprojectionFor(secondaryFrame, this.currentView, true, true) : null;
+      ? displayReprojectionFor(secondaryFrame, this.currentView, true, true) : null;
     const frontFrame=source===this.history?this.lastFrame:      source===this.target?this.incomingFrame??this.completedFrame:null;
     const transforms = new Float32Array(36);
     transforms[32]=frontFrame?.stationaryOversampling?frontFrame.colors.gamma:0;
@@ -1376,7 +1377,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     }
     const fresh = this.incomingFrame, view = this.currentView;
     if (fresh && view && this.target && this.presentationCompatible(fresh,view)) {
-      const m = reprojectionFor(fresh, view)??reprojectionFor(fresh,view,true,true);
+      const m = (freshMapping===undefined?displayReprojectionFor(fresh,view):freshMapping)
+        ??displayReprojectionFor(fresh,view,true,true);
       if (m) {
         transforms.set([m.scaleX, m.scaleY, m.offsetX, m.offsetY], 12);
         transforms.set([m.crossX??0,m.crossY??0],28);
@@ -1388,9 +1390,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       }
     }
     const pixelUnit=this.currentView?.unitsPerPixel;
-    transforms[20]=pixelUnit ? frontFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
-    transforms[21]=pixelUnit ? secondaryFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
-    transforms[22]=pixelUnit ? this.incomingFrame?.unitsPerPixel.div(pixelUnit).toNumber()??1 : 1;
+    transforms[20]=pixelUnit && frontFrame ? displayRatio(frontFrame.unitsPerPixel,pixelUnit) : 1;
+    transforms[21]=pixelUnit && secondaryFrame ? displayRatio(secondaryFrame.unitsPerPixel,pixelUnit) : 1;
+    transforms[22]=pixelUnit && this.incomingFrame ? displayRatio(this.incomingFrame.unitsPerPixel,pixelUnit) : 1;
     if(frontFrame?.proxy) transforms[9]=-1;
     device.queue.writeBuffer(this.xformBuffer, 0, transforms);
 
@@ -1544,15 +1546,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     const compatible = (frame: WebGpuRenderer["lastFrame"]) => this.presentationCompatible(frame,request);
     const heldCompatible=(frame:WebGpuRenderer["lastFrame"])=>!!(heldAppearance&&this.appearanceHoldFrame&&this.samePresentation(frame,this.appearanceHoldFrame));
     const stale=allowStaleAppearance&&this.historyValid&&this.stalePresentationCompatible(last,request);
-    const incomingAvailable = compatible(this.incomingFrame) && reprojectionFor(this.incomingFrame!, request);
+    const incomingCompatible = compatible(this.incomingFrame);
+    const incomingMapping = incomingCompatible ? displayReprojectionFor(this.incomingFrame!,request) : null;
+    const incomingAvailable = incomingMapping!==null;
     if (!compatible(last) && !heldCompatible(last) && !stale && !incomingAvailable) return false;
 
-    let mapping = compatible(last)||heldCompatible(last)||stale ? reprojectionFor(last, request) : null;
+    let mapping = compatible(last)||heldCompatible(last)||stale
+      ? last===this.incomingFrame&&incomingCompatible ? incomingMapping : displayReprojectionFor(last,request) : null;
     if (!mapping) {
       const heldMap=compatible(last)||heldCompatible(last)||stale?
-        reprojectionFor(last,request,true,true):null;
+        displayReprojectionFor(last,request,true,true):null;
       if (!incomingAvailable && !heldMap &&
-          (!compatible(this.coverageFrame)||!reprojectionFor(this.coverageFrame!,request,true,true)))return false;
+          (!compatible(this.coverageFrame)||!displayReprojectionFor(this.coverageFrame!,request,true,true)))return false;
       // Relaxed geometry is presentation-only; the numerical remap and
       // determined-sample coverage continue using their strict contracts.
       mapping=heldMap??{scaleX:0,scaleY:0,offsetX:-1,offsetY:-1};
@@ -1574,6 +1579,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
       mapping,
       undefined,
       heldAppearance||stale,
+      false,
+      incomingMapping,
     );
     this.ctx.device.queue.submit([encoder.finish()]);
     this.lastPresentedKey=presentationKey;
