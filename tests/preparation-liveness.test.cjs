@@ -56,6 +56,7 @@ function select(node) {
 }
 for (const name of methodNames) select(renderer.members.find(n => ts.isMethodDeclaration(n) && n.name?.text === name));
 const source = [...picked.values()].map(n => n.getText(sf)).join('\n') +
+  '\nconst viewportRadii = new ExactGeometryCache(1);\n' +
   '\nconst LIMB_PROFILES=[8,16,32,64,128,256]; class LiveDemandChanged extends Error {}\n' +
   `class Probe { ${methods} } exports.Probe=Probe; exports.limbsForScale=limbsForScale; exports.blaTableEpsilon=blaTableEpsilon;`;
 const exportsObject = {};
@@ -65,6 +66,7 @@ const context = {
   ...load('src/logic/colorSettings.ts'), ...load('src/render/sample-grid.ts'),
   ...load('src/render/numerical-grid.ts'), ...load('src/render/quality.ts'),
   ...load('src/render/reference-orbit.ts'),
+  ...load('src/render/exact-geometry-cache.ts'),
 };
 vm.runInNewContext(ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },

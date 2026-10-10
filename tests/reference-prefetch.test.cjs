@@ -19,6 +19,7 @@ const {coordinateToFixed}=load('src/coordinate'),{CoverageRegions}=load('src/ren
 const {createSampleGridAnchor}=load('src/render/sample-grid');
 const {planNumericalView,containsNumericalView,outwardPadding,outwardHorizonMs}=load('src/render/numerical-grid');
 const {oversampledView}=load('src/render/quality');
+const {ExactGeometryCache}=load('src/render/exact-geometry-cache');
 const sourceFile=path.join(root,'src/render/webgpu-renderer.ts');
 const sf=ts.createSourceFile(sourceFile,fs.readFileSync(sourceFile,'utf8'),ts.ScriptTarget.Latest,true);
 const renderer=sf.statements.find(n=>ts.isClassDeclaration(n)&&n.name?.text==='WebGpuRenderer');
@@ -33,6 +34,7 @@ const declarations=globals.map(name=>{
 });
 declarations.push(sf.statements.find(n=>ts.isEnumDeclaration(n)&&n.name.text==='Method').getText(sf));
 declarations.push(sf.statements.find(n=>ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>d.name.getText(sf)==='LIMB_PROFILES')).getText(sf));
+declarations.push(sf.statements.find(n=>ts.isVariableStatement(n)&&n.declarationList.declarations.some(d=>d.name.getText(sf)==='viewportRadii')).getText(sf));
 const compiled=ts.transpileModule(`${declarations.join('\n')}\nclass Probe {${actual}}\nexports.Probe=Probe;`,
  {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
 const boundary=new Error('GPU boundary');
@@ -56,7 +58,7 @@ function makeProbe(options={}){
   cancelled.push(message);const call=this.current;this.current=null;
   if(call){call.cancelled=true;call.gate.reject(new DOMException(message,'AbortError'));}
  }};
- const context={exports:{},performance,DOMException,Set,Map,Float32Array,Uint32Array,ArrayBuffer,Decimal,
+ const context={exports:{},performance,DOMException,Set,Map,Float32Array,Uint32Array,ArrayBuffer,Decimal,ExactGeometryCache,
   DEFAULT_TUNING,mandelbrotBlaEpsilon,needsEndpoints,coordinateToFixed,CoverageRegions,
   createSampleGridAnchor,planNumericalView,containsNumericalView,outwardPadding,outwardHorizonMs,oversampledView,
   MAX_REFERENCE_ITERATIONS:orbit.MAX_REFERENCE_ITERATIONS,REFERENCE_CHUNK_ITERATIONS:orbit.REFERENCE_CHUNK_ITERATIONS,

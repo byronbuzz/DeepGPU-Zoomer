@@ -16,6 +16,7 @@ import {MIN_BATCH_SAMPLES,ordinaryStripeRows,learnOrdinaryStripeCost} from './or
  */
 
 import Decimal from "decimal.js";
+import { ExactGeometryCache } from './exact-geometry-cache';
 import { assertCoordinatePreparation, coordinateToFixed } from "../coordinate";
 import { checkedGpu, validateRenderSize, compileShader, readBuffer, storageBuffer, type GpuContext } from "../gpu/device";
 import { GpuTiming } from "../gpu/timing";
@@ -242,6 +243,7 @@ export function binaryExponent(value: Decimal): number {
   return exponent;
 }
 
+const viewportRadii = new ExactGeometryCache<Decimal>(1);
 /** Exact far-corner distance from the retained reference to this viewport. */
 export function referenceViewportRadius(
   request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle" | "exportDomain">,
@@ -249,16 +251,23 @@ export function referenceViewportRadius(
   refY: Decimal,
 ): Decimal {
   const domain = renderDomain(request);
-  if(request.angle){
-    const {c,s}=rotationBasis(request.angle),halfX=request.unitsPerPixel.times(domain.width/2),halfY=request.unitsPerPixel.times(domain.height/2);
-    const dx=request.centerX.minus(refX),dy=request.centerY.minus(refY);
-    return Decimal.max(...[-1,1].flatMap(x=>[-1,1].map(y=>Decimal.hypot(
-      dx.plus(halfX.times(x*c)).minus(halfY.times(y*s)),
-      dy.plus(halfX.times(x*s)).plus(halfY.times(y*c))))));
-  }
-  const x = request.unitsPerPixel.times(domain.width / 2).plus(request.centerX.minus(refX).abs());
-  const y = request.unitsPerPixel.times(domain.height / 2).plus(request.centerY.minus(refY).abs());
-  return Decimal.hypot(x, y);
+  const radius = viewportRadii.get(
+    [request.centerX, request.centerY, request.unitsPerPixel, refX, refY],
+    [domain.width, domain.height, request.angle ?? 0],
+    () => {
+      if(request.angle){
+        const {c,s}=rotationBasis(request.angle),halfX=request.unitsPerPixel.times(domain.width/2),halfY=request.unitsPerPixel.times(domain.height/2);
+        const dx=request.centerX.minus(refX),dy=request.centerY.minus(refY);
+        return Decimal.max(...[-1,1].flatMap(x=>[-1,1].map(y=>Decimal.hypot(
+          dx.plus(halfX.times(x*c)).minus(halfY.times(y*s)),
+          dy.plus(halfX.times(x*s)).plus(halfY.times(y*c))))));
+      }
+      const x = request.unitsPerPixel.times(domain.width / 2).plus(request.centerX.minus(refX).abs());
+      const y = request.unitsPerPixel.times(domain.height / 2).plus(request.centerY.minus(refY).abs());
+      return Decimal.hypot(x, y);
+    },
+  );
+  return new Decimal(radius);
 }
 
 export function approximationDeltaBound(family: "mandelbrot" | "julia", request: Pick<RenderRequest, "centerX" | "centerY" | "unitsPerPixel" | "width" | "height" | "angle" | "exportDomain">, refX: Decimal, refY: Decimal): Decimal {

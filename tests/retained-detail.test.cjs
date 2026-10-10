@@ -19,7 +19,8 @@ function load(file, dependencies = {}) {
   return result;
 }
 const rotation = load('src/rotation.ts');
-const reprojection = load('src/render/reprojection.ts', {'../rotation': rotation});
+const geometry = fs.existsSync(path.join(root, 'src/render/exact-geometry-cache.ts')) ? load('src/render/exact-geometry-cache.ts') : {};
+const reprojection = load('src/render/reprojection.ts', {'../rotation': rotation, './exact-geometry-cache': geometry});
 const grid = load('src/render/sample-grid.ts');
 const numerical = load('src/render/numerical-grid.ts', {'./sample-grid': grid});
 const {CoverageRegions} = load('src/render/regions.ts');

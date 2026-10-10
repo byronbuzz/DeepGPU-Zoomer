@@ -94,6 +94,7 @@ for (const n of picked.values()) {
 const read = p => fs.readFileSync(root + '/' + p, 'utf8');
 const text = read('src/tuning.ts') + '\n' +
     read('src/rotation.ts') + '\n' +
+    read('src/render/exact-geometry-cache.ts').replace(/^import .*$/gm, '') + '\n' +
     read('src/render/reprojection.ts').replace(/^import .*$/gm, '') + '\n' +
     [...topPicked.values()].map(n => n.getText(sf)).join('\n') +
     '\nclass Probe {\n' + methods + '\n}\nexports.Probe=Probe;';

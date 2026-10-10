@@ -10,7 +10,8 @@ function load(file,deps={}) {
     (result,name=>deps[name]||require(name));return result;
 }
 const rotation=load('src/rotation.ts');
-const {displayRatio,displayReprojectionFor:display,reprojectionFor:strict,mapUv}=load('src/render/reprojection.ts',{'../rotation':rotation});
+const geometry=load('src/render/exact-geometry-cache.ts');
+const {displayRatio,displayReprojectionFor:display,reprojectionFor:strict,mapUv}=load('src/render/reprojection.ts',{'../rotation':rotation,'./exact-geometry-cache':geometry});
 Decimal.set({precision:1224});
 const frame=(patch={})=>({centerX:new Decimal('-0.73'),centerY:new Decimal('0.22'),unitsPerPixel:new Decimal('6.3945444226946017480748652290689295782854792611856107253406561911e-868'),width:1760,height:990,angle:0,...patch});
 function compare(last,next,coarse=false,held=false) {

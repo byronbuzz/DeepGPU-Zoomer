@@ -9,6 +9,7 @@
 
 import Decimal from "decimal.js";
 import { rotationBasis } from "../rotation";
+import { ExactGeometryCache } from './exact-geometry-cache';
 
 /** A frame that was rendered, and the view it was rendered for. */
 export interface FrameView {
@@ -46,6 +47,7 @@ const MAX_SHRINK = 1 / 64;
 
 /** Beyond this many screens of travel there is nothing left to reuse. */
 const MAX_PAN_SCREENS = 4;
+const numericalMappings = new ExactGeometryCache<Reprojection | null>(4);
 
 // Presentation consumes Number/Float32 quotients, not reference precision.
 // Keep both operands intact: absolute deep spans can underflow as Numbers.
@@ -78,7 +80,14 @@ export function reprojectionFor(
   /** Presentation only: keep a finite held-colour map after numerical reuse expires. */
   presentationOnly = false,
 ): Reprojection | null {
-  return projectFrame(last, next, coarseFallback, presentationOnly, false);
+  const mapping = numericalMappings.get(
+    [last.centerX, last.centerY, last.unitsPerPixel, next.centerX, next.centerY, next.unitsPerPixel],
+    [last.width, last.height, last.angle ?? 0, next.width, next.height, next.angle ?? 0,
+      coarseFallback, presentationOnly],
+    () => projectFrame(last, next, coarseFallback, presentationOnly, false),
+  );
+  // Callers retain the original fresh-object contract, including on cache hits.
+  return mapping === null ? null : {...mapping};
 }
 
 /** Display only. Numerical coverage and scheduling retain reprojectionFor. */
