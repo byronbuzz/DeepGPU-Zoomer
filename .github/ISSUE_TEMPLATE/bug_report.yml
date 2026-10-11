@@ -1,0 +1,31 @@
+name: Bug report
+description: Report a reproducible defect in DeepGPU Zoomer
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the actual behavior and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include a view or share link if useful, plus zoom depth, iteration limit and relevant settings. Avoid private saved-location data.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Browser, OS, and GPU
+      placeholder: "Browser/version; operating system; GPU/driver"
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Additional evidence
+      description: Screenshots, console errors or reproducible timing comparisons. Remove secrets and personal information.
