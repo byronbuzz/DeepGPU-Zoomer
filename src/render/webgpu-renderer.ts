@@ -17,6 +17,7 @@ import {MIN_BATCH_SAMPLES,ordinaryStripeRows,learnOrdinaryStripeCost} from './or
 
 import Decimal from "decimal.js";
 import { ExactGeometryCache } from './exact-geometry-cache';
+import { coordinatePower } from './coordinate-power';
 import { assertCoordinatePreparation, coordinateToFixed } from "../coordinate";
 import { checkedGpu, validateRenderSize, compileShader, readBuffer, storageBuffer, type GpuContext } from "../gpu/device";
 import { GpuTiming } from "../gpu/timing";
@@ -230,11 +231,11 @@ export function binaryExponent(value: Decimal): number {
   const magnitude = value.abs();
   const decimalExponent = magnitude.e;
   const leading = magnitude
-    .div(new Decimal(10).pow(decimalExponent))
+    .div(coordinatePower(10, decimalExponent))
     .toSignificantDigits(16)
     .toNumber();
   let exponent = Math.floor(Math.log2(leading) + decimalExponent * Math.LOG2E * Math.LN10);
-  let power = new Decimal(2).pow(exponent);
+  let power = coordinatePower(2, exponent);
   if (magnitude.lt(power)) {
     exponent--;
     power = power.div(2);
@@ -296,7 +297,7 @@ export function linearBlaPolicy(request: Pick<RenderRequest,'family'|'useApprox'
 function splitExponent(value: Decimal): { mantissa: number; exponent: number } {
   if (value.isZero()) return { mantissa: 0, exponent: 0 };
   const exponent = binaryExponent(value);
-  const mantissa = Number(value.div(new Decimal(2).pow(exponent)).toFixed(12));
+  const mantissa = Number(value.div(coordinatePower(2, exponent)).toFixed(12));
   return { mantissa, exponent };
 }
 
@@ -308,7 +309,7 @@ function splitComplex(x: Decimal, y: Decimal) {
   const magnitude = Decimal.max(x.abs(), y.abs());
   if (magnitude.isZero()) return { x: 0, y: 0, exponent: 0 };
   const exponent = binaryExponent(magnitude);
-  const divisor = new Decimal(2).pow(exponent);
+  const divisor = coordinatePower(2, exponent);
   return {
     x: Number(x.div(divisor).toFixed(12)),
     y: Number(y.div(divisor).toFixed(12)),
@@ -2594,16 +2595,16 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     u32[37] = method;
     f32[38] = request.centerX.toNumber();
     f32[39] = request.centerY.toNumber();
-    const power = new Decimal(2).pow(scale.exponent);
-    f32[44] = request.centerX.minus(this.refX).div(new Decimal(2).pow(offset.exponent)).minus(f32[4]).toNumber();
-    f32[45] = request.centerY.minus(this.refY).div(new Decimal(2).pow(offset.exponent)).minus(f32[5]).toNumber();
+    const power = coordinatePower(2, scale.exponent);
+    const offsetPower = coordinatePower(2, offset.exponent);
+    f32[44] = request.centerX.minus(this.refX).div(offsetPower).minus(f32[4]).toNumber();
+    f32[45] = request.centerY.minus(this.refY).div(offsetPower).minus(f32[5]).toNumber();
     f32[46] = request.unitsPerPixel.div(power).minus(f32[2]).toNumber();
     u32[47] = family === "julia" ? 1 : 0;
     f32[48] = request.juliaX?.toNumber() ?? 0; f32[49] = request.juliaY?.toNumber() ?? 0;
     f32[50] = request.juliaX?.minus(f32[48]).toNumber() ?? 0; f32[51] = request.juliaY?.minus(f32[49]).toNumber() ?? 0;
     f32[52] = request.centerX.minus(f32[38]).toNumber(); f32[53] = request.centerY.minus(f32[39]).toNumber();
     if (family === "julia" || method !== Method.Direct) {
-      const offsetPower = new Decimal(2).pow(offset.exponent);
       [request.unitsPerPixel.div(power), request.centerX.minus(this.refX).div(offsetPower),
         request.centerY.minus(this.refY).div(offsetPower), request.centerX, request.centerY,
         request.juliaX ?? new Decimal(0), request.juliaY ?? new Decimal(0)].forEach((value, i) => f32.set(splitQuad(value), 56 + i * 4));
