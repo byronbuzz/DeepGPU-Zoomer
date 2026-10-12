@@ -14,7 +14,7 @@
     "decimal.js": "10.6.0"
   },
   "devDependencies": {
-    "@webgpu/types": "0.1.71",
+    "@webgpu/types": "0.1.74",
     "typescript": "5.9.3",
     "vite": "5.4.21"
   }
