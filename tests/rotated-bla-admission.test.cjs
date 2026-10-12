@@ -13,19 +13,22 @@ function predicates(request,ordinary=true,family='mandelbrot',pipelineKind='appr
  assert.ok(admission,'measured admission must have its own eligibility');
  const cohort=declarations.get('cohortEligible');
  return new Function('request','ordinary','family','pipelineKind',
-  `const measuredBlaEligible=${admission.initializer.getText(source)};return {admission:measuredBlaEligible,cohort:${cohort.initializer.getText(source)}};`)(request,ordinary,family,pipelineKind);
+  `const ordinaryBlaEligible=${declarations.get('ordinaryBlaEligible').initializer.getText(source)};const measuredBlaEligible=${admission.initializer.getText(source)};return {admission:measuredBlaEligible,cohort:${cohort.initializer.getText(source)}};`)(request,ordinary,family,pipelineKind);
 }
 test('rotation changes measured admission without widening cold-cohort eligibility',()=>{
  for(const angle of [Math.PI/6,-Math.PI/4,Math.PI,Math.PI*2]){
-  const p=predicates({followView:true,angle});
-  assert.equal(p.admission,true);assert.equal(p.cohort,false);
+  for(const [family,kind] of [['mandelbrot','approx'],['julia','juliaApprox']]){
+  const p=predicates({followView:true,angle},true,family,kind);
+  assert.equal(p.admission,family==='mandelbrot');assert.equal(p.cohort,false);
   assert.equal(ctx.exports.continuationOperations(1963041,0,8,p.admission),4096,'cold work remains bounded');
-  assert.equal(ctx.exports.continuationOperations(1963041,.000001,8,p.admission),0,'measured rotated work may use ordinary');
+  assert.equal(ctx.exports.continuationOperations(1963041,.000001,8,p.admission),family==='mandelbrot'?0:4096,'only Mandelbrot measured rotated work may use ordinary');
   assert.equal(ctx.exports.continuationOperations(1963041,9,8,p.admission),4096,'expensive feedback retains continuation');
+  }
  }
  assert.deepEqual(predicates({followView:true,angle:0}),{admission:true,cohort:true});
+ assert.deepEqual(predicates({followView:true,angle:0},true,'julia','juliaApprox'),{admission:false,cohort:false},'Julia retains incumbent cold lanes and rejects measured bulk admission');
 });
-test('rotated Julia, exports, oversampling, endpoints and non-BLA paths retain the high-cap mandate',()=>{
+test('mismatched Julia pipeline, exports, oversampling, endpoints and non-BLA paths retain the high-cap mandate',()=>{
  const request={followView:true,angle:Math.PI/6};
  for(const [r,o,f,k]of [[{...request,followView:false},true,'mandelbrot','approx'],[request,false,'mandelbrot','approx'],[request,true,'julia','approx'],[request,true,'mandelbrot','plain'],[{...request,exportDomain:{}},true,'mandelbrot','approx'],[{...request,stationaryOversampling:true},true,'mandelbrot','approx']]){
   const p=predicates(r,o,f,k);assert.equal(p.admission,false);assert.equal(p.cohort,false);

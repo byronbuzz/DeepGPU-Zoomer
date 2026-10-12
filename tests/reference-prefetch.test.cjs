@@ -155,7 +155,7 @@ test('a missed first grid cancels speculation and uses the exact ordinary foregr
 });
 
 test('ordinary held centre-focused eligibility and occupied-worker guards prevent speculative collisions',async()=>{
- const changes=[{followView:false},{interacting:false},{heldInwardZoom:false},{zoom:0},{zoom:-1},{family:'julia'},
+ const changes=[{followView:false},{interacting:false},{heldInwardZoom:false},{zoom:0},{zoom:-1},
   {angle:1},{exportDomain:{width:32,height:24,x:0,y:0}},{stationaryOversampling:true},{useApprox:false},
   {colors:{mode:1,supersample:1,capped:0}},{colors:{mode:0,supersample:2,capped:0}},
   {colors:{mode:0,supersample:1,capped:1}},{focus:{x:.4,y:.5}},{focus:{x:.5,y:.4}},

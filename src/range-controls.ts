@@ -16,7 +16,7 @@ export const RANGE_DEFAULTS: Record<string, number> = {
   'light-elevation': DEFAULT_COLORS.lightElevation,
   'ambient-light': DEFAULT_COLORS.ambientLight,
   'specular-strength': DEFAULT_COLORS.specularStrength,
-  'panel-opacity': 0.6,
+  'panel-opacity': 0.7,
   'rotation-speed': rotationSecondsToSlider(DEFAULT_ROTATION_SECONDS),
   'tuning-throughput': DEFAULT_TUNING.throughput,
   'tuning-depth-gain': DEFAULT_TUNING.dynamicDepthGain,

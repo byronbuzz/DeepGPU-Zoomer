@@ -1,4 +1,4 @@
-import { DEFAULT_COLORS, PRESETS, FORMULAS, EFFECTS, CAPPED, validateColors, stopPositions, cycleFromSlider, cycleToSlider, type ColorSettings } from './logic/colorSettings';
+import { DEFAULT_COLORS, PRESETS, FORMULAS, EFFECTS, CAPPED, MAX_STOPS, hexToRgb, isBlackStop, validateColors, stopPositions, cycleFromSlider, cycleToSlider, type ColorSettings } from './logic/colorSettings';
 import { setupColourPicker } from './colour-picker';
 
 type Stop={position:number;color:string;locked:boolean};
@@ -22,11 +22,57 @@ function randomColor(hue:number,harmonious:boolean){
   const f=(n:number)=>{const k=(n+h*12)%12,a=s*Math.min(l,1-l);return Math.round(255*(l-a*Math.max(-1,Math.min(k-3,9-k,1)))).toString(16).padStart(2,'0');};
   return '#'+f(0)+f(8)+f(4);
 }
+const MIN_STOP_GAP=.05;
+/** Split available slack into random gaps without rejection loops. */
+function spacedOffsets(count:number,length:number){
+  const slack=Math.max(0,length-count*MIN_STOP_GAP);
+  const cuts=[0,...Array.from({length:count-1},()=>Math.random()*slack),slack].sort((a,b)=>a-b);
+  return Array.from({length:count},(_,i)=>i*MIN_STOP_GAP+cuts[i]);
+}
+function randomStops(locked:Stop[],count:number):Stop[]{
+  const fresh=(position:number):Stop=>({position,color:'',locked:false});
+  if(!locked.length){const rotation=Math.random();return spacedOffsets(count,1).map(p=>fresh((p+rotation)%1));}
+  const ordered=[...locked].sort((a,b)=>a.position-b.position);
+  const gaps=ordered.map((s,i)=>{const length=(ordered[(i+1)%ordered.length].position+(i===ordered.length-1?1:0))-s.position;
+    return {start:s.position,length,capacity:Math.max(0,Math.floor((length+1e-12)/MIN_STOP_GAP)-1),count:0};});
+  // Locked stops can already violate spacing. Keep them exact and add only
+  // where space remains; never retry indefinitely to satisfy impossible locks.
+  for(let added=locked.length;added<count;added++){
+    const available=gaps.filter(g=>g.count<g.capacity);if(!available.length)break;
+    available[Math.floor(Math.random()*available.length)].count++;
+  }
+  return [...locked,...gaps.flatMap(g=>spacedOffsets(g.count+1,g.length).slice(1).map(p=>fresh((g.start+p)%1)))];
+}
+function colourDistance(a:string,b:string){const x=hexToRgb(a),y=hexToRgb(b);return Math.hypot(...x.map((v,i)=>v-y[i]))/Math.sqrt(3);}
+function randomBlackStops(stops:Stop[],wanted:number){
+  const black=stops.map(s=>s.locked&&isBlackStop(s.color));
+  const adjacent=(a:number,b:number)=>Math.abs(a-b)===1||Math.abs(a-b)===stops.length-1;
+  const eligible=stops.map((_,i)=>i).filter(i=>!stops[i].locked&&!black.some((b,j)=>b&&adjacent(i,j)));
+  const missing=Math.max(0,wanted-black.filter(Boolean).length);
+  if(missing>=2){const pairs=eligible.flatMap((a,i)=>eligible.slice(i+1).filter(b=>!adjacent(a,b)).map(b=>[a,b]));
+    if(pairs.length){for(const i of pairs[Math.floor(Math.random()*pairs.length)])black[i]=true;return black;}}
+  if(missing&&eligible.length)black[eligible[Math.floor(Math.random()*eligible.length)]]=true;
+  return black;
+}
 export function randomizePalette(c:ColorSettings,all:boolean,harmonious:boolean):ColorSettings{
-  let stops=paletteStops(c);const hue=Math.random();
-  if(all){const locked=stops.filter(s=>s.locked);const count=Math.max(2,locked.length,2+Math.floor(Math.random()*7));
-    stops=[...locked,...Array.from({length:count-locked.length},()=>({position:Math.random(),color:'#000000',locked:false}))];}
-  return withStops(c,stops.map(s=>s.locked?s:{...s,color:randomColor(hue,harmonious)}));
+  // Exclusive probabilities: one black 50%, two black 25%, no black 25%.
+  const chance=Math.random(),wanted=chance<.5?1:chance<.75?2:0,hue=Math.random();
+  let stops=paletteStops(c);
+  if(all){const locked=stops.filter(s=>s.locked);stops=randomStops(locked,Math.max(locked.length,6+Math.floor(Math.random()*(MAX_STOPS-5))));}
+  stops.sort((a,b)=>a.position-b.position);
+  const black=randomBlackStops(stops,wanted);
+  stops.forEach((s,i)=>{if(!s.locked)s.color=black[i]?'#000000':'';});
+  stops.forEach((s,i)=>{
+    if(s.locked||black[i])return;
+    const neighbours=[stops[(i+stops.length-1)%stops.length],stops[(i+1)%stops.length]];
+    const suitable=(colour:string)=>!isBlackStop(colour)&&neighbours.every(n=>!n.color||colourDistance(colour,n.color)>=.1);
+    for(let attempt=0;attempt<24;attempt++){const colour=randomColor(hue,harmonious);if(suitable(colour)){s.color=colour;return;}}
+    // Cube corners guarantee a distant alternative for at most two neighbours,
+    // even with constant/randomly unlucky RNG output.
+    s.color=['#ffffff','#ff0000','#00ff00','#0000ff','#ffff00','#ff00ff','#00ffff'].find(suitable)!;
+  });
+  // Preserve even a locked stop at exactly 1 without endpoint normalization.
+  return validateColors({...c,palette:5,repeating:true,stops:stops.map(s=>s.color),positions:stops.map(s=>s.position),locks:stops.map(s=>s.locked)});
 }
 
 export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings)=>void,onResetColouring?:()=>void){
@@ -79,7 +125,7 @@ export function setupPaletteEditor(get:()=>ColorSettings,change:(c:ColorSettings
     el<HTMLInputElement>('oversampling').checked=c.oversampling===true;
   }
   function syncFields(){const c=get(),stops=paletteStops(c);selected=Math.max(0,Math.min(selected,stops.length-1));const s=stops[selected];colourPicker.sync(s.color);highlightPicker.sync(c.highlightColour);highlightButton.style.background=c.highlightColour;el<HTMLInputElement>('stop-lock').checked=s.locked;el('selected-stop-label').textContent=`Stop ${selected+1}`;el<HTMLButtonElement>('stop-delete').disabled=c.stops.length<=2;}
-  el('palette-strip').onpointerdown=e=>{if(e.target!==el('palette-strip')||get().stops.length>=8)return;const r=el('palette-strip').getBoundingClientRect();const position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));update(s=>[...s,{position,color:s[selected].color,locked:false}],get().stops.length);};
+  el('palette-strip').onpointerdown=e=>{if(e.target!==el('palette-strip')||get().stops.length>=MAX_STOPS)return;const r=el('palette-strip').getBoundingClientRect();const position=Math.max(0,Math.min(1,(e.clientX-r.x)/r.width));update(s=>[...s,{position,color:s[selected].color,locked:false}],get().stops.length);};
   const liveColour=(value:string)=>{if(!/^#[0-9a-f]{6}$/i.test(value))return;if(!colourEditRemembered){remember();colourEditRemembered=true;}const stops=paletteStops(get());stops[selected].color=value;const next=withSelectedStop(get(),stops,selected);selected=next.selected;change(next.colors);sync();};
   const colourPicker=setupColourPicker(el('stop-color-swatch'),el<HTMLInputElement>('stop-color'),liveColour);
   const highlightButton=el<HTMLButtonElement>('highlight-colour-toggle'),highlightPopover=el('highlight-colour-popover');

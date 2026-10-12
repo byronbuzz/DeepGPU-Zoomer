@@ -1,11 +1,12 @@
 import type { GpuContext } from '../gpu/device';
 import type { RenderRequest } from '../render/webgpu-renderer';
+import { validateView, type SavedView } from '../state';
 import { displayPixels } from './display';
 import { checkedExportDimensions } from './layout';
 import { canReuseExportPixels, encodeCapturedExport, renderPng, snapshotExportRequest, type CapturedExport } from './render';
 
 /** Modeless panel: opening and saving do not own the live camera or render loop. */
-export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;request:()=>RenderRequest;viewport:()=>{width:number;height:number};captureQuality?:(snapshot:RenderRequest,width:number,height:number)=>Promise<CapturedExport>|null}){
+export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;request:()=>RenderRequest;scene:()=>SavedView;viewport:()=>{width:number;height:number};captureQuality?:(snapshot:RenderRequest,width:number,height:number)=>Promise<CapturedExport>|null}){
   const get=<T extends HTMLElement>(id:string)=>document.getElementById(id) as T;
   const panel=get<HTMLElement>('png-export'),open=get<HTMLButtonElement>('screenshot');
   const close=get<HTMLButtonElement>('png-export-close'),save=get<HTMLButtonElement>('png-save');
@@ -65,14 +66,18 @@ export function setupPngExportPanel(options:{context:()=>GpuContext|undefined;re
       if(!custom&&!presetAvailable)throw Error('Display size unavailable. Enter custom dimensions.');
       const choice=readChoice();ctx=options.context();if(!ctx)throw Error('The GPU is not ready to export.');
       const snapshot=snapshotExportRequest(options.request());
+      // Both snapshots belong to this synchronous Save action, before any await.
+      // Keep the exact camera span and user appearance rather than deriving them
+      // from the rounded pixel scale or export-only supersampling policy.
+      const scene=validateView(options.scene());
       exportController=new AbortController();const signal=exportController.signal;
       saving=true;describe();slider.disabled=width.disabled=height.disabled=true;
       // Capture submits a detached readback before yielding, so later navigation
       // cannot replace the selected high-resolution image underneath this save.
       const captured=snapshot.colors.oversampling&&canReuseExportPixels(choice)?options.captureQuality?.(snapshot,choice.width,choice.height):null;
       let blob:Blob;
-      if(captured){status.textContent='Saving completed quality image…';blob=await encodeCapturedExport(await captured,signal);}
-      else blob=await renderPng(ctx,snapshot,choice,signal,text=>{if(!signal.aborted)status.textContent=text;});
+      if(captured){status.textContent='Saving completed quality image…';blob=await encodeCapturedExport(await captured,signal,scene);}
+      else blob=await renderPng(ctx,snapshot,choice,signal,text=>{if(!signal.aborted)status.textContent=text;},scene);
       signal.throwIfAborted();
       const url=URL.createObjectURL(blob),link=document.createElement('a');
       link.href=url;link.download=`webgpu-zoomer-${choice.width}x${choice.height}.png`;

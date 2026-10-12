@@ -252,9 +252,13 @@ fn loadCoefficient(base: u32, slot: u32) -> Hdr {
 
 fn loadSkip(entry: u32) -> Skip {
     let base = entry * SKIP_FLOATS;
+    // Julia has no parameter delta, so its iteration-only skips need only A.
+    // Keep the shared transport layout and validity-radius offsets unchanged.
+    var b = hdrZero();
+    if (!JULIA) { b = loadCoefficient(base, 1u); }
     return Skip(
         loadCoefficient(base, 0u),
-        loadCoefficient(base, 1u),
+        b,
         la[base + 10u]
     );
 }
@@ -267,6 +271,7 @@ fn hdrFromWide(value: Wide) -> Hdr {
 }
 
 fn applySkip(skip: Skip, w: Wide, d: Wide) -> Wide {
+    if (JULIA) { return wideFromHdr(hdrMul(skip.a, hdrFromWide(w))); }
     return wideFromHdr(hdrAdd(hdrMul(skip.a, hdrFromWide(w)), hdrMul(skip.b, hdrFromWide(d))));
 }
 

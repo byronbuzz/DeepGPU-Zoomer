@@ -5,9 +5,13 @@ import { WebGpuRenderer, Method, type RenderRequest } from './render/webgpu-rend
 import { DEFAULT_COLORS, needsEndpoints, renderColors, validateColors, type ColorSettings } from './logic/colorSettings';
 import { Camera, HOME, MAX_ITERATIONS, homePosition, validateView, encodeView, decodeView, depthLabel, iterationFromSlider, iterationToSlider, type SavedView, type Family } from './state';
 import { setupLocations, type LocationIdentity } from './locations';
+import { NavigationHistory, sameNavigationLocation, type NavigationView } from './navigation-history';
 import { setupPanels, normalizePanelSettings } from './panels';
 import { DEFAULTS_STORAGE_KEY, readDefaults, saveDefaults, type SavedDefaults } from './defaults';
 import { setupPngExportPanel } from './export/panel';
+import { setupPngSceneImport } from './export/import';
+import { setupPngImageDisplay } from './export/png-image';
+import { setupClipboardLink } from './clipboard-link';
 import { setupPaletteEditor } from './palette-editor';
 import { RefinementTimer } from './refinement-time';
 import { RefiningStatus } from './refining-status';
@@ -16,16 +20,18 @@ import { setupRangeControls } from './range-controls';
 import { setupSelectControls } from './select-controls';
 import { setImageColourSampler } from './colour-picker';
 import { DEFAULT_ROTATION_SECONDS, PALETTE_ROTATION_MULTIPLIER, advanceColourRotation, rotationSecondsFromSlider, rotationSecondsToSlider, rotationDurationLabel } from './colour-rotation';
-import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, POINTER_RATIOS, THROUGHPUT_PRESETS, loadTuning, modifiedTuningCount, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
+import { DEFAULT_TUNING, EDITABLE_TUNING_KEYS, POINTER_RATIOS, THROUGHPUT_PRESETS, loadTuning, normalizeTuning, overscanCssPx, saveTuning, type EditableTuningKey, type TuningSettings } from './tuning';
 
 const el = <T extends HTMLElement>(id:string) => document.getElementById(id) as T;
 const canvas=el<HTMLCanvasElement>('fractal');
+const pngImageDisplay=setupPngImageDisplay(el('loaded-png'),canvas);
+let pngAnimationCameraRevision:number|null=null;
 const camera=new Camera();
 const defaultsRead=readDefaults();
 let savedDefaults:SavedDefaults|null=defaultsRead.value;
 let view:SavedView={...HOME}, colors={...DEFAULT_COLORS}, engine:WebGpuRenderer;
-setImageColourSampler((x,y)=>engine?engine.captureDisplayedColour(x,y):Promise.reject(new Error('Image is not ready')),
-  (x,y)=>engine?engine.captureDisplayedColourPatch(x,y):Promise.reject(new Error('Image is not ready')));
+setImageColourSampler((x,y)=>pngImageDisplay.active?pngImageDisplay.sampleColour(x,y):engine?engine.captureDisplayedColour(x,y):Promise.reject(new Error('Image is not ready')),
+  (x,y)=>pngImageDisplay.active?pngImageDisplay.samplePatch(x,y):engine?engine.captureDisplayedColourPatch(x,y):Promise.reject(new Error('Image is not ready')));
 let tuning:TuningSettings=savedDefaults?.tuning??(defaultsRead.error?{...DEFAULT_TUNING}:loadTuning());
 const DYNAMIC_STORAGE_KEY='gpu-zoomer-dynamic-v1';
 let dynamicEnabled=true;
@@ -62,8 +68,18 @@ const keys=new Set<string>();
 // when releasing Shift changes the reported key (for example '+' to '=').
 const heldKeyActions=new Map<string,string>();
 function keyIdentity(e:KeyboardEvent){return e.code||e.key;}
-const locationHistory:{view:SavedView;identity:LocationIdentity|null}[]=[];
-function syncBack(){el<HTMLButtonElement>('location-back').disabled=locationHistory.length===0;}
+type NavigationEntry={view:NavigationView;identity:LocationIdentity|null};
+type NavigationCheckpoint={view:Omit<NavigationView,'x'|'y'|'span'>;x:Decimal;y:Decimal;span:Decimal;identity:LocationIdentity|null};
+const locationHistory=new NavigationHistory<NavigationEntry>();
+function syncBack(){const button=el<HTMLButtonElement>('location-back'),disabled=locationHistory.count===0;if(button.disabled!==disabled)button.disabled=disabled;}
+// Camera arithmetic replaces these Decimal values; serialize only after a successful change.
+function navigationCheckpoint():NavigationCheckpoint{return {view:{family:view.family,jx:view.jx,jy:view.jy,iterations:view.iterations,angle:camera.angle},x:camera.x,y:camera.y,span:camera.span,identity:locations.identity()};}
+function navigationEntry(before:NavigationCheckpoint):NavigationEntry{return {view:{...before.view,x:before.x.toString(),y:before.y.toString(),span:before.span.toString()},identity:before.identity};}
+function prepareNavigation(){locationHistory.settle(performance.now(),moving());return locationHistory.capture(navigationCheckpoint);}
+function recordNavigation(before:NavigationCheckpoint|null,revision:number,time=performance.now()){
+  if(camera.revision===revision)return;
+  locationHistory.changed(before?navigationEntry(before):null,time);syncBack();
+}
 const refinementTime=new RefinementTimer(performance.now());
 const refiningStatus=new RefiningStatus();
 const freshness=el('freshness'),depth=el('depth');
@@ -90,6 +106,7 @@ function colourPreparationLabel(progress=engine?.progress()){
 }
 function setText(target:HTMLElement,value:string){if(target.textContent!==value)target.textContent=value;}
 function preparing(time=performance.now()){
+  if(pngImageDisplay.active&&pngAnimationCameraRevision===null){setText(freshness,'Loaded PNG');return;}
   const numericalPending=lastRevision!==camera.revision||completedQuality!==1;
   const progress=engine?.progress();
   const actual=numericalPending?(dirty&&!busy?0:progress?.percentage??0):100;
@@ -230,7 +247,9 @@ function syncControls(){
 }
 function load(next:SavedView,record=true,remember=record){
   const valid=validateView(next);
-  if(remember){locationHistory.push({view:snapshot(),identity:locations.identity()});if(locationHistory.length>32)locationHistory.shift();syncBack();}
+  if(remember){const checkpoint=prepareNavigation(),before=checkpoint?navigationEntry(checkpoint):null;locationHistory.jumped(before&&!sameNavigationLocation(before.view,valid)?before:null);}
+  else locationHistory.restored();
+  syncBack();
   locations.clear();
   clearTimeout(baseEditTimer);baseEditing=false;
   stop();refiningStatus.reset();stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;stopSnapshotPending=false;retainedPartialCaptured=false;preparingColourData=false;view=valid;baseIterations=valid.iterations;colors=validateColors(valid.appearance??savedDefaults?.appearance??DEFAULT_COLORS);camera.load(valid);resetDynamicAnchor();generation++;
@@ -251,7 +270,8 @@ function changed(kind:'held'|'wheel'='held') {const now=performance.now();if(qua
   preparing(now);
 }
 function syncRotation(){el<HTMLInputElement>('rotation').value=String(camera.angle);el('rotation-value').textContent=`${Number(camera.angle.toFixed(1))}°`;}
-function setRotation(angle:number,held=true){const previous=camera.revision;camera.setAngle(angle);if(camera.revision===previous)return;
+function setRotation(angle:number,held=true){const before=prepareNavigation(),previous=camera.revision;camera.setAngle(angle);if(camera.revision===previous)return;
+  recordNavigation(before,previous);
   if(held)refinementTime.heldCameraChange();else refinementTime.demand(performance.now());changed();syncRotation();}
 function finishRotation(){rotating=false;controlDown=false;rotationPointerAngle=null;releasePointer();const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);persist();}
 function syncJuliaPreview(){
@@ -358,6 +378,7 @@ async function compute(){
     const result=await engine.render(request());
     if(g===generation && result.completed && engine.isComplete(request())){const numericalWasPending=lastRevision!==camera.revision||completedQuality!==1;
       engine.reproject(request(),stopped||refreshHolding);
+      if(pngImageDisplay.active&&pngAnimationCameraRevision===camera.revision){pngImageDisplay.clear();pngAnimationCameraRevision=null;}
       lastRevision=camera.revision;completedQuality=1;preparingColourData=false;refreshHolding=false;dirty=false;
       provisionalNavigationCap=false;
       if(numericalWasPending)refinementTime.complete(performance.now());
@@ -373,16 +394,25 @@ async function recolorStopped(){
   finally{busy=false;if(stopped)captureStoppedPartial();}
 }
 function resize(resetTimer=true){measurePreview();const dpr=devicePixelRatio||1;const endpointStorage=needsEndpoints(colors)||colors.mode===1||engine?.endpointChannelsRequired();const {width,height}=gpuContext?backingSize(innerWidth,innerHeight,dpr,gpuContext.device.limits,endpointStorage?16:8):{width:Math.round(innerWidth*dpr),height:Math.round(innerHeight*dpr)};if(canvas.width===width&&canvas.height===height)return false;if(resetTimer){stopped=false;refreshPending=false;refreshHolding=false;stoppedAppearancePending=false;retainedRequest=null;}preparingColourData=false;canvas.width=width;canvas.height=height;completedQuality=0;dirty=true;if(resetTimer)refinementTime.demand(performance.now());syncTuningLabels();preparing();return true;}
+function reconcilePngImage(time:number){
+  if(!pngImageDisplay.active){pngAnimationCameraRevision=null;return;}
+  const released=pngAnimationCameraRevision!==null?camera.revision!==pngAnimationCameraRevision&&pngImageDisplay.clear():pngImageDisplay.reconcile(pngRevision());
+  if(released){pngAnimationCameraRevision=null;stopped=false;stoppedAppearancePending=false;dirty=true;refinementTime.demand(time);}
+}
 function tick(time:number){
   const dt=previousTime?time-previousTime:0;previousTime=time;
+  locationHistory.settle(time,moving());
   if(!document.hidden&&!gpuLost){
-    advanceColourMotion(dt);
+    reconcilePngImage(time);
+    if(!pngImageDisplay.active)advanceColourMotion(dt);
     if(controlDown&&rotationKeys.size&&dt){const turn=(rotationKeys.has('ArrowRight')?1:0)-(rotationKeys.has('ArrowLeft')?1:0);if(turn)setRotation(camera.angle+turn*dt*.06);}
     const zoom=direction||(keys.has('+')||keys.has('=')?1:keys.has('-')?-1:0);
-    if(zoom && dt){const revision=camera.revision;camera.zoom(-zoom*speed*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){refinementTime.heldCameraChange();changed();updateDynamicForZoom(time,zoom);}}
+    if(zoom && dt){const before=prepareNavigation(),revision=camera.revision;camera.zoom(-zoom*speed*dt/1000,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){recordNavigation(before,revision,time);refinementTime.heldCameraChange();changed();updateDynamicForZoom(time,zoom);}}
     let dx=0,dy=0;if(keys.has('ArrowLeft'))dx+=dt*.3;if(keys.has('ArrowRight'))dx-=dt*.3;if(keys.has('ArrowUp'))dy+=dt*.3;if(keys.has('ArrowDown'))dy-=dt*.3;
-    if(dx||dy){camera.pan(dx,dy,innerHeight);refinementTime.heldCameraChange();changed();}
-    if(engine){
+    if(dx||dy){const before=prepareNavigation(),revision=camera.revision;camera.pan(dx,dy,innerHeight);recordNavigation(before,revision,time);refinementTime.heldCameraChange();changed();}
+    reconcilePngImage(time);
+    if(engine&&pngImageDisplay.active&&pngAnimationCameraRevision===null&&!previewBusy&&previewPending)void computeJuliaPreview();
+    if(engine&&(!pngImageDisplay.active||pngAnimationCameraRevision!==null)){
       if(refreshPending&&!busy)void refreshCalculation();
       engine.reproject(request(),stopped||refreshHolding);
       if(!busy&&!dirty&&!stopped&&!refreshPending&&completedQuality===1&&!engine.isComplete(request())){
@@ -413,11 +443,11 @@ canvas.addEventListener('pointerdown',e=>{if(e.button>2)return;canvas.focus();st
 canvas.addEventListener('pointermove',e=>{if(rotating){if(!e.ctrlKey){finishRotation();return;}const dx=e.clientX-innerWidth/2,dy=e.clientY-innerHeight/2;
     if(Math.hypot(dx,dy)>8){const angle=Math.atan2(dy,dx);if(rotationPointerAngle!==null){const delta=angle-rotationPointerAngle;setRotation(camera.angle+Math.atan2(Math.sin(delta),Math.cos(delta))*180/Math.PI);}rotationPointerAngle=angle;}else rotationPointerAngle=null;
     pointer={x:e.clientX,y:e.clientY};return;}
-  if(selecting){pointer={x:e.clientX,y:e.clientY};selectJuliaAtPointer();return;}if(dragging&&(e.clientX!==pointer.x||e.clientY!==pointer.y)){camera.pan(e.clientX-pointer.x,e.clientY-pointer.y,innerHeight);refinementTime.heldCameraChange();changed();}pointer={x:e.clientX,y:e.clientY};});
+  if(selecting){pointer={x:e.clientX,y:e.clientY};selectJuliaAtPointer();return;}if(dragging&&(e.clientX!==pointer.x||e.clientY!==pointer.y)){const before=prepareNavigation(),revision=camera.revision;camera.pan(e.clientX-pointer.x,e.clientY-pointer.y,innerHeight);recordNavigation(before,revision);refinementTime.heldCameraChange();changed();}pointer={x:e.clientX,y:e.clientY};});
 function endPointer(){if(selecting){stop();return;}stop();persist();}
 canvas.addEventListener('pointerup',endPointer);canvas.addEventListener('pointercancel',()=>{stop();persist();});
 canvas.addEventListener('lostpointercapture',()=>{if(activePointer!==null){activePointer=null;stop();persist();}});
-canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);wheelDirection=-Math.sign(delta);const revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){const now=performance.now();refinementTime.wheelCameraChange(now);changed('wheel');updateDynamicForZoom(now,wheelDirection);}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
+canvas.addEventListener('wheel',e=>{e.preventDefault();pointer={x:e.clientX,y:e.clientY};const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?innerHeight:1);if(delta===0)return;wheelDirection=-Math.sign(delta);const before=prepareNavigation(),revision=camera.revision;camera.zoom(Math.max(-1,Math.min(1,delta*.002))*speed,pointer.x,pointer.y,innerWidth,innerHeight);if(camera.revision!==revision){const now=performance.now();recordNavigation(before,revision,now);refinementTime.wheelCameraChange(now);changed('wheel');updateDynamicForZoom(now,wheelDirection);}clearTimeout(wheelSave);wheelSave=setTimeout(()=>persist(),250);},{passive:false});
 canvas.addEventListener('keydown',e=>{if(e.key==='Escape'){stop();persist();return;}
   if((e.key==='ArrowLeft'||e.key==='ArrowRight')&&(e.ctrlKey||rotationKeys.has(e.key)))return;
   if(e.ctrlKey||e.metaKey||e.altKey)return;
@@ -446,7 +476,10 @@ el<HTMLSelectElement>('family').onchange=e=>{
 };
 el('julia-preview-close').onclick=()=>{setPreview(false);canvas.focus();};
 el('julia-promote').onclick=()=>{try{switchJuliaView();}catch(err){message(String(err));}};
-el('stop-refinement').onclick=stopRefinement;
+el('stop-refinement').onclick=()=>{
+  if(!pngImageDisplay.active)stopRefinement();
+  else if(pngAnimationCameraRevision!==null){pngAnimationCameraRevision=null;stopRefinement();pngImageDisplay.retain(pngRevision());preparing();}
+};
 el('reset').onclick=()=>load(homePosition(snapshot()));
 const rotationSlider=el<HTMLInputElement>('rotation');
 const finishSliderRotation=()=>{rotationSliderHeld=false;const now=performance.now();refinementTime.stopHeld(now,currentFieldComplete());refiningStatus.finish(now);persist();};
@@ -481,17 +514,10 @@ for(const [key,id,parse] of tuningInputs){
   control.oninput=()=>changeTuning(key,parse(Number(control.value)));
 }
 el<HTMLInputElement>('tuning-pointer-refinement').onchange=event=>changeTuning('pointerRefinement',(event.currentTarget as HTMLInputElement).checked);
-el('tuning-reset').onclick=()=>{
-  if(!modifiedTuningCount(tuning))return;
-  tuning={...DEFAULT_TUNING};
-
-  if(!saveTuning(tuning))message('This browser could not save tuning settings locally.');
-  syncTuningLabels();refresh();
-};
 const locations=setupLocations(snapshot,next=>load(next),message);
-el('location-back').onclick=()=>{const previous=locationHistory.pop();if(!previous)return;load(previous.view,true,false);locations.restore(previous.identity);juliaReturn=null;syncBack();};
+el('location-back').onclick=()=>{const previous=locationHistory.back();if(!previous)return;load({...snapshot(),...previous.view},true,false);locations.restore(previous.identity);juliaReturn=null;syncBack();};
 syncBack();
-el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);message('Location link copied.');}catch{message(`Copy this exact link: ${url.href}`);}};
+el('share').onclick=async()=>{persist();const url=new URL(location.href);url.hash=encodeView(snapshot());try{await navigator.clipboard.writeText(url.href);clipboardLink.copied();message('Location link copied.');}catch{message(`Copy this exact link: ${url.href}`);}};
 function openLocationLink(record=true){
   if(!location.hash)return false;
   let next:SavedView;
@@ -503,7 +529,20 @@ function openLocationLink(record=true){
   message('Linked location opened.');return true;
 }
 window.addEventListener('hashchange',()=>openLocationLink());
+let pngAppearance:ColorSettings|undefined,pngAppearanceKey='';
+function pngRevision(){
+  if(pngAppearance!==colors){pngAppearance=colors;pngAppearanceKey=JSON.stringify(renderColors(colors));}
+  return [generation,camera.revision,view.iterations,pngAppearanceKey,rotationSeconds,rotatePalette,rotateLight,reverseRotation,tuning.blaPrecisionLog2];
+}
+setupPngSceneImport({open:(next,image)=>{
+  pngAnimationCameraRevision=null;pngImageDisplay.clear();load(next);juliaReturn=null;setPreview(false);
+  pngImageDisplay.show(image,pngRevision());
+  if(rotatePalette||rotateLight)pngAnimationCameraRevision=camera.revision;
+  else refinementTime.halt(performance.now());
+  preparing();
+},revision:pngRevision,message});
 const panelController=setupPanels(savedDefaults?.panels??(defaultsRead.error?normalizePanelSettings(null):undefined));
+const clipboardLink=setupClipboardLink({button:el<HTMLButtonElement>('paste-link'),load:next=>{load(next);juliaReturn=null;},revision:()=>JSON.stringify(pngRevision()),message});
 function applyAppearance(c:ColorSettings,persistLater=true){
   const previous=colors,changed=JSON.stringify(renderColors(previous))!==JSON.stringify(renderColors(c));
   const completedBefore=currentFieldComplete()||preparingColourData;
@@ -539,7 +578,7 @@ setupRangeControls();
 setupSelectControls();
 function syncColourMotion(){
   const control=el<HTMLInputElement>('rotation-speed');control.value=String(rotationSecondsToSlider(rotationSeconds));
-  const label=rotationDurationLabel(rotationSeconds);el('rotation-speed-value').textContent=label;control.setAttribute('aria-valuetext',`${label} per light rotation; ${rotationDurationLabel(rotationSeconds*PALETTE_ROTATION_MULTIPLIER)} per palette cycle`);
+  const label=rotationDurationLabel(rotationSeconds);control.setAttribute('aria-valuetext',`${label} per light rotation; ${rotationDurationLabel(rotationSeconds*PALETTE_ROTATION_MULTIPLIER)} per palette cycle`);
   el<HTMLInputElement>('rotate-palette').checked=rotatePalette;el<HTMLInputElement>('rotate-light').checked=rotateLight;
   el<HTMLInputElement>('rotation-reverse').checked=reverseRotation;
 }
@@ -579,7 +618,7 @@ el('full-reset').onclick=()=>{
   stop();setPreview(false);previewEngine?.abort();selectedJulia=null;juliaReturn=null;
   rotationSeconds=DEFAULT_ROTATION_SECONDS;rotatePalette=false;rotateLight=false;reverseRotation=false;paletteRotationElapsed=lightRotationElapsed=0;colourRotationEditing.clear();syncColourMotion();
   speed=1;el<HTMLInputElement>('speed').value='1';el('speed-value').textContent='1.0×';
-  locations.clear();locationHistory.length=0;syncBack();
+  locations.clear();locationHistory.clear();syncBack();
   tuning={...DEFAULT_TUNING};saveTuning(tuning);syncTuningLabels();
   dynamicEnabled=true;try{localStorage.setItem(DYNAMIC_STORAGE_KEY,'on');}catch{}
   savedDefaults=null;
@@ -589,7 +628,7 @@ el('full-reset').onclick=()=>{
   pngExportPanel.reset();panelController.reset();load({...HOME,appearance:validateColors(DEFAULT_COLORS)},false);paletteController.reset();message(resetStorageFailed?'Factory settings restored for this session, but stored defaults could not be cleared.':'Defaults restored. Saved locations were kept.',!resetStorageFailed);
   el<HTMLButtonElement>('reset').focus();
 };
-const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,viewport:()=>({width:canvas.width,height:canvas.height}),captureQuality:(snapshot,width,height)=>engine?.captureMatchingQuality(snapshot,width,height)??null});
+const pngExportPanel=setupPngExportPanel({context:()=>gpuContext,request,scene:snapshot,viewport:()=>({width:canvas.width,height:canvas.height}),captureQuality:(snapshot,width,height)=>engine?.captureMatchingQuality(snapshot,width,height)??null});
 el('gpu-error-details').onclick=()=>{
   if(!gpuErrorDetails)return;
   const url=URL.createObjectURL(new Blob([gpuErrorDetails+'\n'],{type:'application/json'}));

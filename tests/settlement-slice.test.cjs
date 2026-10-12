@@ -21,9 +21,10 @@ function walk(node){if(ts.isVariableDeclaration(node)&&node.name.getText(source)
 const expr=ts.transpileModule(`return ${declaration.initializer.getText(source)};`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText;
 const choose=new Function('request','family','ordinary','method','Method','MANDATORY_CONTINUATION_ITERATIONS',expr),Method={Direct:0};
 function select(...args){return choose.call(this,...args,context.exports.MANDATORY_CONTINUATION_ITERATIONS);}
-test('larger slices are restricted to live stationary ordinary Mandelbrot navigation',()=>{
+test('larger slices are restricted to live stationary ordinary navigation for either family',()=>{
  const p={moving:false,isInteracting(){return this.moving;}},request={followView:true,interacting:true,maxIterations:1_000_000};
  assert.equal(select.call(p,request,'mandelbrot',true,1,Method),true,'live stationary view overrides captured motion');
+ assert.equal(select.call(p,request,'julia',true,1,Method),true,'Julia shares the stationary bound');
  p.moving=true;assert.equal(select.call(p,request,'mandelbrot',true,1,Method),false);p.moving=false;
- for(const [r,f,o,m] of [[{...request,followView:false},'mandelbrot',true,1],[{...request,maxIterations:999_999},'mandelbrot',true,1],[request,'julia',true,1],[request,'mandelbrot',false,1],[request,'mandelbrot',true,0]])assert.equal(select.call(p,r,f,o,m,Method),false);
+ for(const [r,f,o,m] of [[{...request,followView:false},'mandelbrot',true,1],[{...request,maxIterations:999_999},'mandelbrot',true,1],[request,'mandelbrot',false,1],[request,'mandelbrot',true,0]])assert.equal(select.call(p,r,f,o,m,Method),false);
 });

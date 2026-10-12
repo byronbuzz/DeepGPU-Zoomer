@@ -5,6 +5,7 @@ import { WebGpuRenderer, type RenderRequest } from '../render/webgpu-renderer';
 import { needsEndpoints } from '../logic/colorSettings';
 import { checkedExportDimensions, EXPORT_MEMORY_LIMIT, frameForExport, planExport } from './layout';
 import { createStreamingPng } from './png';
+import type { SavedView } from '../state';
 export interface ExportChoice { width:number; height:number }
 export interface CapturedExport { width:number; height:number; pixels:Uint8Array|Uint8ClampedArray }
 /** A full readback is optional: tiled export remains the bounded fallback. */
@@ -14,11 +15,11 @@ export function canReuseExportPixels(choice:ExportChoice){
   // output texture, padded readback and detached CPU pixels.
   return checked.pixels*32+checked.maxEncodedBytes*2+16*1024*1024<=EXPORT_MEMORY_LIMIT;
 }
-export async function encodeCapturedExport(frame:CapturedExport,signal?:AbortSignal):Promise<Blob>{
+export async function encodeCapturedExport(frame:CapturedExport,signal?:AbortSignal,scene?:SavedView):Promise<Blob>{
   signal?.throwIfAborted();
   const choice=checkedExportDimensions(frame.width,frame.height);
   if(frame.pixels.length!==choice.pixels*4||!canReuseExportPixels(choice))throw Error('The captured image exceeds the export memory limit.');
-  const writer=createStreamingPng(frame.width,frame.height,{maxEncodedBytes:choice.maxEncodedBytes,signal});
+  const writer=createStreamingPng(frame.width,frame.height,{maxEncodedBytes:choice.maxEncodedBytes,signal,scene});
   const bytes=new Uint8Array(frame.pixels.buffer,frame.pixels.byteOffset,frame.pixels.byteLength);
   try{
     for(let y=0;y<frame.height;y+=64){
@@ -44,7 +45,7 @@ export function snapshotExportRequest(request:RenderRequest):RenderRequest {
 }
 
 /** One private renderer, one full-output reference domain, sequential bounded strips. */
-export async function renderPng(ctx:GpuContext,snapshot:RenderRequest,choice:ExportChoice,signal:AbortSignal,progress:(text:string)=>void):Promise<Blob>{
+export async function renderPng(ctx:GpuContext,snapshot:RenderRequest,choice:ExportChoice,signal:AbortSignal,progress:(text:string)=>void,scene?:SavedView):Promise<Blob>{
   snapshot=snapshotExportRequest(snapshot);
   choice={...choice};
   signal.throwIfAborted();
@@ -62,7 +63,7 @@ export async function renderPng(ctx:GpuContext,snapshot:RenderRequest,choice:Exp
   let writer:ReturnType<typeof createStreamingPng>|undefined;
   try{
     progress('Preparing export…');await renderer.init();signal.throwIfAborted();
-    writer=createStreamingPng(choice.width,choice.height,{maxEncodedBytes:plan.maxEncodedBytes,signal});
+    writer=createStreamingPng(choice.width,choice.height,{maxEncodedBytes:plan.maxEncodedBytes,signal,scene});
     let done=0;
     for(const strip of plan.strips()){
       signal.throwIfAborted();

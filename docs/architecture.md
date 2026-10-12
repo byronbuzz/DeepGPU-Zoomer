@@ -31,6 +31,8 @@ A render request includes the camera, family, Julia constant, iteration cap, app
 
 The view's span is its vertical extent. Magnification is measured against the Home span of 2.8. Coordinate validation constrains centres and Julia constants to ±16, positive spans to at most 8, and the supported decimal exponent envelope. The camera chooses working decimal precision from depth with additional guard digits.
 
+[navigation-history.ts](../src/navigation-history.ts) holds up to 1,000 stationary camera departures for Back. Continuous navigation stays one departure until the camera is quiet for 250 ms with no navigation control held; discrete jumps establish their destination immediately. Camera values are serialized only after the first successful change in a gesture. Entries contain geometry, family, Julia constant, effective iteration cap and optional saved-location identity, with no numerical or GPU resources. Restoration keeps current appearance, colour motion and tuning and re-anchors dynamic iterations. This session history is independent of the renderer's retained-image textures.
+
 ## Automatic numerical method
 
 The renderer chooses Direct above **10⁻¹⁴·⁷⁵ units per pixel** and Wide perturbation at smaller scales. The latter uses the internal `Hdr` method label. This boundary is pixel scale, not a single magnification independent of viewport size.
@@ -97,7 +99,7 @@ The user selects one of three navigation throughput policies:
 
 These are internal workload settings, not measured latency promises. The main application uses the selection while interacting, and Detailed while stationary. Pointer priority selects relative service weights of 1, 2 or 4 against the other service classes; Off corresponds to equal weighting. The factory setting is 2× pointer priority, with Smooth navigation and pointer refinement disabled.
 
-Measured GPU cost and completion feedback adapt eligible work sizes. Established inward work can publish aligned stripes. Ordinary Mandelbrot kernels use a **16×4** workgroup specialization where applicable. GPU timing is used when supported.
+Measured GPU cost and completion feedback adapt eligible Mandelbrot and Julia work sizes. Established inward work can publish aligned stripes. Ordinary iteration-only kernels share workgroup specialization, GPU-timed batching and stationary settling. Julia Direct has a pipeline override while retaining its accurate Wide recurrence. GPU timing is used when supported; Julia timing policy also includes its fixed constant.
 
 Analytic cardioid and bulb checks avoid eligible Mandelbrot interior work. Exact numerical-cycle detection can terminate eligible no-skip paths. Shader pipelines are cached or created lazily to avoid repeated setup costs.
 
@@ -105,7 +107,9 @@ Analytic cardioid and bulb checks avoid eligible Mandelbrot interior work. Exact
 
 Eligible expensive cold work retains recurrence state across bounded GPU submissions. Each portion limits loop operations and then yields; its operation limit is not a wall-clock guarantee. Eligible ordinary Mandelbrot BLA work, including rotated views, can switch to ordinary dispatch after measured feedback, including above one million iterations. Other paths retain their existing admission policy. Long GPU submissions can delay fresh detail and cancellation.
 
-Continuation state has its own ownership and compatibility rules. Cross-view carry is narrower than ordinary image reuse: eligible ordinary, unrotated Mandelbrot work can transfer compatible continuation state. [continuation.ts](../src/render/continuation.ts) and [pending-continuation.ts](../src/render/pending-continuation.ts) define its execution and ownership model.
+Continuation state has its own ownership and compatibility rules. Cross-view carry is narrower than ordinary image reuse: eligible ordinary, unrotated Mandelbrot and Julia work can transfer compatible continuation state at identical sample spacing. Julia carry and inward preparation require the same fixed constant. Narrow CPU reference prefetch also supports Julia, accounting for its 80-byte packed and 96-byte decoded samples. [continuation.ts](../src/render/continuation.ts) and [pending-continuation.ts](../src/render/pending-continuation.ts) define its execution and ownership model.
+
+Julia iteration-only BLA skips load and apply only their A coefficient because their parameter delta is zero. They retain the shared table layout, validity bounds and fixed 2⁻⁴⁰ tolerance. Julia remains excluded from measured bulk BLA admission, survivor pooling and fast recurrence multiplication: the first two did not pass performance qualification, and the last has not been qualified.
 
 ## Publication and quality
 
@@ -119,11 +123,11 @@ Pointer refinement is independent: it concentrates additional detail near the po
 
 Iteration colouring is the factory mode. Distance colouring adds a derivative-based distance field and screen-space surface relief, with ambient, diffuse and specular lighting. Highlight colour, light direction and elevation are appearance settings.
 
-Palette and light rotation are optional and independently enabled. [colour-rotation.ts](../src/colour-rotation.ts) maps the shared speed control to a light period of 1–60 seconds, defaulting to 10 seconds. A full palette cycle takes four light periods: 40 seconds at the factory speed. Reverse applies to both. These changes use retained appearance data when compatible; changing the required numerical channels still follows the field-admission rules above. Manual offset or light-angle editing suspends that channel's automatic rotation for the gesture.
+Palette and light rotation are optional and independently enabled. [colour-rotation.ts](../src/colour-rotation.ts) maps the shared speed control logarithmically from a light period of 30 seconds at the left to 0.1 seconds at the right, defaulting to 10 seconds. Saved periods normalize into that range. A full palette cycle takes four light periods: 40 seconds at the factory speed. Reverse applies to both. These changes use retained appearance data when compatible; changing the required numerical channels still follows the field-admission rules above. Manual offset or light-angle editing suspends that channel's automatic rotation for the gesture.
 
 The shared colour picker provides saturation/brightness, hue and validated hex input for palette stops, highlights and panel accent. Image picking reads the renderer's last presented screen texture, including reprojection and partial refinement, rather than recalculating the fractal. A mapped GPU readback supplies the selected pixel and a 15×15 neighbourhood for the magnified loupe. Edge pixels are repeated at image boundaries; the centre marker identifies the selected pixel. Picking intercepts navigation gestures and can be cancelled with Escape.
 
-[panels.ts](../src/panels.ts) owns draggable placement, the controls panel's edge resizing, Julia preview resizing, tabs and menu visibility. Positions remain within the viewport. When export and Julia preview are both open, the newly opened panel goes below the other if it fits, otherwise to the centre in front. Panel opacity defaults to 60%, with control backgrounds at 1.2 times panel opacity, capped at full opacity. The status/title can optionally hide with the menu. These interface settings do not change the numerical field or exported appearance.
+[panels.ts](../src/panels.ts) owns draggable placement, the controls panel's edge resizing, Julia preview resizing, tabs and menu visibility. Selecting a tab resets the shared content scroll to the top. Positions remain within the viewport. When export and Julia preview are both open, the newly opened panel goes below the other if it fits, otherwise to the centre in front. Panel opacity defaults to 70%, with control backgrounds at 1.2 times panel opacity, capped at full opacity; saved opacity values are retained. The status/title can optionally hide with the menu. These interface settings do not change the numerical field or exported appearance.
 
 ## PNG export
 

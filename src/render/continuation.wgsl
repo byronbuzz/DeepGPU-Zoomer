@@ -109,7 +109,7 @@ fn iterateWideContinued(pixel: vec2<f32>, stateIndex: u32) -> Sample {
     if (u.rotationCos.x != 1.0 || u.rotationSin.x != 0.0) {
         pixelDelta = wideMul(pixelDelta, Wide(u.rotationCos,u.rotationSin,0));
     }
-    let direct = JULIA && u.method == 0u;
+    let direct = JULIA && JULIA_DIRECT;
     var injection = wideAdd(pixelDelta, wideNorm(Wide(u.wideOffsetX, u.wideOffsetY, u.offsetExponent)));
     var parameterDelta = injection;
     if (JULIA) { parameterDelta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }

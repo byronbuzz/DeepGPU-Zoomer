@@ -1,6 +1,8 @@
-// Ordinary scalar Mandelbrot variants fix only these appearance-independent
+// Ordinary scalar variants fix only these appearance-independent
 // calculation choices. Existing variants retain the uniform-controlled path.
 override ORDINARY: bool = false;
+// Julia Direct retains Wide arithmetic but excludes reference machinery.
+override JULIA_DIRECT: bool = false;
 fn sampleMode() -> u32 {
     if (ORDINARY) { return 0u; }
     return u.mode;
@@ -166,7 +168,7 @@ fn iterateWide(pixel: vec2<f32>, wantDerivative: bool) -> Sample {
     if (u.rotationCos.x != 1.0 || u.rotationSin.x != 0.0) {
         pixelDelta = wideMul(pixelDelta, Wide(u.rotationCos,u.rotationSin,0));
     }
-    let direct = JULIA && u.method == 0u;
+    let direct = JULIA && JULIA_DIRECT;
     let injection = wideAdd(pixelDelta, wideNorm(Wide(u.wideOffsetX, u.wideOffsetY, u.offsetExponent)));
     var parameterDelta = injection;
     if (JULIA) { parameterDelta = Wide(vec4<f32>(0.0), vec4<f32>(0.0), 0); }

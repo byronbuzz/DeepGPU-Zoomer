@@ -1,9 +1,13 @@
 import { checkedExportDimensions, PNG_IDAT_BYTES } from './layout';
+import { chunk } from './png-chunks';
+import { sceneChunk } from './png-scene';
+import type { SavedView } from '../state';
 
 export interface StreamingPngOptions {
   maxEncodedBytes: number;
   signal?: AbortSignal;
   onProgress?: (rowsWritten: number, totalRows: number) => void;
+  scene?: SavedView;
 }
 export interface StreamingPng {
   /** Append 1–64 complete RGBA rows in top-to-bottom order; await each call. */
@@ -12,22 +16,6 @@ export interface StreamingPng {
   cancel(reason?: unknown): Promise<void>;
 }
 
-const crcTable = new Uint32Array(256);
-for (let n = 0; n < 256; n++) {
-  let c = n;
-  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-  crcTable[n] = c >>> 0;
-}
-function chunk(type: string, data: Uint8Array): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(data.length + 12), view = new DataView(out.buffer);
-  view.setUint32(0, data.length);
-  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
-  out.set(data, 8);
-  let crc = 0xffffffff;
-  for (let i = 4; i < out.length - 4; i++) crc = crcTable[(crc ^ out[i]) & 255] ^ (crc >>> 8);
-  view.setUint32(out.length - 4, (crc ^ 0xffffffff) >>> 0);
-  return out;
-}
 const abortError = () => new DOMException('PNG export cancelled.', 'AbortError');
 
 /** One native zlib stream, partitioned into consecutive bounded IDAT chunks.
@@ -39,11 +27,14 @@ export function createStreamingPng(width: number, height: number, options: Strea
   if (!Number.isSafeInteger(maxEncodedBytes) || maxEncodedBytes < 57) throw new Error('Invalid PNG output budget.');
   if (signal?.aborted) throw signal.reason ?? abortError();
   if (typeof CompressionStream === 'undefined') throw new Error('This browser cannot encode streaming PNG files.');
+  const metadata = options.scene ? sceneChunk(options.scene) : undefined;
+  if (33 + (metadata?.length ?? 0) + 12 > maxEncodedBytes) throw Error('The PNG location exceeds the export output memory budget.');
   const compressor = new CompressionStream('deflate'), writer = compressor.writable.getWriter(), reader = compressor.readable.getReader();
   const header = new Uint8Array(13), view = new DataView(header.buffer);
   view.setUint32(0, width); view.setUint32(4, height); header[8] = 8; header[9] = 6;
   let parts: Uint8Array<ArrayBuffer>[] = [new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header)];
-  let encodedBytes = 33, rowsWritten = 0, writing = false, state: 'open' | 'finishing' | 'done' | 'failed' = 'open';
+  if (metadata) parts.push(metadata);
+  let encodedBytes = 33 + (metadata?.length ?? 0), rowsWritten = 0, writing = false, state: 'open' | 'finishing' | 'done' | 'failed' = 'open';
   let failure: unknown, pending = new Uint8Array(PNG_IDAT_BYTES), pendingLength = 0;
   let cancellation: Promise<void> | undefined;
   const check = () => { if (state === 'failed') throw failure; };

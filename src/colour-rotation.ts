@@ -2,9 +2,10 @@ import type { ColorSettings } from './logic/colorSettings';
 
 export const DEFAULT_ROTATION_SECONDS=10;
 export const PALETTE_ROTATION_MULTIPLIER=4;
-export function normalizeRotationSeconds(value:unknown){return typeof value==='number'&&Number.isFinite(value)?Math.max(1,Math.min(60,value)):DEFAULT_ROTATION_SECONDS;}
-export function rotationSecondsFromSlider(value:number){return 60**(1-Math.max(0,Math.min(1,value)));}
-export function rotationSecondsToSlider(seconds:number){return 1-Math.log(normalizeRotationSeconds(seconds))/Math.log(60);}
+export const MIN_ROTATION_SECONDS=.1,MAX_ROTATION_SECONDS=30;
+export function normalizeRotationSeconds(value:unknown){return typeof value==='number'&&Number.isFinite(value)?Math.max(MIN_ROTATION_SECONDS,Math.min(MAX_ROTATION_SECONDS,value)):DEFAULT_ROTATION_SECONDS;}
+export function rotationSecondsFromSlider(value:number){return MAX_ROTATION_SECONDS/(MAX_ROTATION_SECONDS/MIN_ROTATION_SECONDS)**Math.max(0,Math.min(1,value));}
+export function rotationSecondsToSlider(seconds:number){return Math.log(MAX_ROTATION_SECONDS/normalizeRotationSeconds(seconds))/Math.log(MAX_ROTATION_SECONDS/MIN_ROTATION_SECONDS);}
 export function rotationDurationLabel(seconds:number){
   const rounded=Math.round(seconds*10)/10;
   if(rounded<60)return `${rounded} s`;

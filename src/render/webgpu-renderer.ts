@@ -68,6 +68,8 @@ import { BatchFeedback } from './batch-feedback';
 
 /** Precision profiles, chosen from the zoom depth. */
 const LIMB_PROFILES = [8, 16, 32, 64, 128, 256] as const;
+type CalculationPipelineKind = 'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|
+  'julia'|'juliaApprox'|'juliaDirect'|'ordinaryJulia'|'ordinaryJuliaApprox'|'ordinaryJuliaDirect';
 class LiveDemandChanged extends Error {}
 
 /** A local export tile (including its clipped halo) within the full image. */
@@ -744,16 +746,21 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
   }
 
-  private async ensureComputePipeline(kind:'reuse'|'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|'julia'|'juliaApprox'|'shade'|'decode'|'distance',shape:TuningSettings['workgroupShape']=DEFAULT_TUNING.workgroupShape) {
-    if((kind==='ordinaryPlain'||kind==='ordinaryApprox')&&shape!==DEFAULT_TUNING.workgroupShape){
-      const key=kind+':'+shape;
+  private async ensureComputePipeline(kind:CalculationPipelineKind|'reuse'|'shade'|'decode'|'distance',shape:TuningSettings['workgroupShape']=DEFAULT_TUNING.workgroupShape) {
+    if(kind==='ordinaryJulia'||kind==='ordinaryJuliaApprox'||kind==='ordinaryJuliaDirect'||kind==='juliaDirect'||
+       (kind==='ordinaryPlain'||kind==='ordinaryApprox')&&shape!==DEFAULT_TUNING.workgroupShape){
+      const key=kind==='juliaDirect'?kind:kind+':'+shape;
       await this.oncePipeline(key,()=>this.ordinaryShapePipelines.has(key),async()=>{
-        const {x,y}=deliveryWorkgroup(shape),device=this.ctx.device;
+        const ordinaryKind=kind.startsWith('ordinary');
+        const {x,y}=ordinaryKind?deliveryWorkgroup(shape):{x:8,y:4},device=this.ctx.device;
         if(x>device.limits.maxComputeWorkgroupSizeX||y>device.limits.maxComputeWorkgroupSizeY||x*y>device.limits.maxComputeInvocationsPerWorkgroup)
           throw Error('Selected GPU workgroup exceeds this device’s limits.');
         if(!this.renderModule)throw Error('Shader module is unavailable.');
         const pipeline=await device.createComputePipelineAsync({label:key,layout:this.pipelineLayout!,
-          compute:{module:this.renderModule,entryPoint:'compute',constants:{ORDINARY:1,APPROX:kind==='ordinaryApprox'?1:0,SAMPLE_WORKGROUP_X:x,SAMPLE_WORKGROUP_Y:y}}});
+          compute:{module:this.renderModule,entryPoint:'compute',constants:{ORDINARY:ordinaryKind?1:0,
+            JULIA:kind==='juliaDirect'||kind.startsWith('ordinaryJulia')?1:0,
+            JULIA_DIRECT:kind==='juliaDirect'||kind==='ordinaryJuliaDirect'?1:0,
+            APPROX:kind==='ordinaryApprox'||kind==='ordinaryJuliaApprox'?1:0,SAMPLE_WORKGROUP_X:x,SAMPLE_WORKGROUP_Y:y}}});
         if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
         if(this.disposed)throw new Error('Renderer has been disposed.');
         this.ordinaryShapePipelines.set(key,pipeline);
@@ -777,7 +784,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return this[field]!;
   }
 
-  private async ensureContinuationPipeline(kind:'direct'|'plain'|'approx'|'ordinaryPlain'|'ordinaryApprox'|'julia'|'juliaApprox',pooled=false,coordinates=pooled) {
+  private async ensureContinuationPipeline(kind:CalculationPipelineKind,pooled=false,coordinates=pooled) {
     const key=(pooled?'pooled-':coordinates?'cohort-':'')+kind;
     await this.oncePipeline('continuation-'+key,()=>this.continuationPipelines.has(key),async()=>{
       const device=this.ctx.device;
@@ -787,7 +794,9 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         'continuation');
       this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
         {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
-      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')?1:0,ORDINARY:kind.startsWith('ordinary')?1:0,APPROX:kind==='approx'||kind==='ordinaryApprox'||kind==='juliaApprox'?1:0,POOL_COORDINATES:coordinates?1:0};
+      const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')||kind.startsWith('ordinaryJulia')?1:0,
+        JULIA_DIRECT:kind==='juliaDirect'||kind==='ordinaryJuliaDirect'?1:0,ORDINARY:kind.startsWith('ordinary')?1:0,
+        APPROX:kind==='approx'||kind==='ordinaryApprox'||kind==='juliaApprox'||kind==='ordinaryJuliaApprox'?1:0,POOL_COORDINATES:coordinates?1:0};
       const pipeline=await device.createComputePipelineAsync({label:'continuation-'+key,
         layout:device.createPipelineLayout({bindGroupLayouts:[this.bindLayout!,this.continuationLayout]}),
         compute:{module:this.continuationModule,entryPoint:pooled?'computePooled':'computeContinued',constants}});
@@ -900,14 +909,17 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   /** Speculation owns CPU data only; the normal foreground path admits GPU data. */
   private prefetchCompatible(job:ReferencePrefetch,live:RenderRequest):boolean {
     if(job.claimed)return this.pendingReferenceDemand===job.claimed&&this.referenceDemandCompatible(job.claimed,live);
+    const family=live.family??'mandelbrot';
     if(!live.followView||!live.interacting||!live.heldInwardZoom||(live.zoom??0)<=0||
-       (live.family??'mandelbrot')!=='mandelbrot'||live.angle||live.exportDomain||live.stationaryOversampling||
+       family!==job.demand.input.family||live.angle||live.exportDomain||live.stationaryOversampling||
        live.colors.mode!==0||live.colors.supersample!==1||needsEndpoints(live.colors)||(live.colors.capped??0)!==0||
        !live.useApprox||blaTableEpsilon(live)!==job.epsilonLog2)return false;
+    if(family==='julia'&&(!live.juliaX||!live.juliaY||!job.owner.juliaX||!job.owner.juliaY||
+       !live.juliaX.eq(job.owner.juliaX)||!live.juliaY.eq(job.owner.juliaY)))return false;
     const focus=live.focus??{x:.5,y:.5};
     let limbs:number;try{limbs=limbsForScale(this.workRequest(live).unitsPerPixel,96);}catch{return false;}
     return focus.x===.5&&focus.y===.5&&live.centerX.eq(job.owner.centerX)&&live.centerY.eq(job.owner.centerY)&&
-      this.referenceBudget(live.maxIterations,live.dynamicIterations,'mandelbrot')<=job.demand.input.maxIterations&&
+      this.referenceBudget(live.maxIterations,live.dynamicIterations,family)<=job.demand.input.maxIterations&&
       limbs<=job.demand.input.limbs;
   }
 
@@ -915,8 +927,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if(this.referencePrefetch||this.pendingReferenceDemand||this.referenceWorker.active||this.referencePreparing||
        !this.refValid||this.disposed||this.abortRequested)return;
     const live=this.currentView??request,rate=live.zoomRate??0;
+    const family=live.family??'mandelbrot';
+    if(family==='julia'&&(!live.juliaX||!live.juliaY))return;
     if(!Number.isFinite(rate)||rate<=0||!request.useApprox||!live.followView||!live.interacting||!live.heldInwardZoom||
-       (live.zoom??0)<=0||(live.family??'mandelbrot')!=='mandelbrot'||live.angle||live.exportDomain||live.stationaryOversampling||
+       (live.zoom??0)<=0||live.angle||live.exportDomain||live.stationaryOversampling||
        live.colors.mode!==0||live.colors.supersample!==1||needsEndpoints(live.colors)||(live.colors.capped??0)!==0)return;
     const focus=live.focus??{x:.5,y:.5};if(focus.x!==.5||focus.y!==.5)return;
     const work=this.workRequest(live),factor=Math.exp(-rate*1.5);
@@ -938,8 +952,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     if(cached&&(cached.escaped||cached.terminal.iteration>=demand.input.maxIterations))return;
     // A discarded orbit would be rebuilt in the foreground. A shorter escaped
     // orbit may also leave room for its table, even when the capped pair would not.
-    if((demand.input.maxIterations+1)*40>128*1024*1024)return;
-    const epsilonLog2=blaTableEpsilon(work),maxDelta=approximationDeltaBound('mandelbrot',future,demand.referenceX,demand.referenceY);
+    if((demand.input.maxIterations+1)*(family==='julia'?80:40)>128*1024*1024)return;
+    const epsilonLog2=blaTableEpsilon(work),maxDelta=approximationDeltaBound(family,future,demand.referenceX,demand.referenceY);
     const job:ReferencePrefetch={demand,epsilonLog2,owner:live,claimed:null,cancelled:false,promise:Promise.resolve()};
     this.referencePrefetch=job;
     const checkCurrent=()=>{
@@ -950,7 +964,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     job.promise=this.trackOperation(async()=>{
       try{
         const limit=Math.min(this.ctx.device.limits.maxStorageBufferBindingSize,this.ctx.device.limits.maxBufferSize);
-        const capacity=Math.floor(limit/48)-1;
+        const capacity=Math.floor(limit/(family==='julia'?96:48))-1;
         const orbit=await prepareReference(demand.input,(input,resume)=>{
           const budget=Math.min(REFERENCE_CHUNK_ITERATIONS,capacity-(resume?.iteration??0));
           if(budget<1)throw Error('Prefetched trajectory exceeds reference capacity');
@@ -2203,10 +2217,13 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
    * committed-reference reuse still uses its strict quarter-span bound. */
   private inwardPreparationContinues(prepared:RenderRequest,live:RenderRequest):boolean {
     const ordinary=(r:RenderRequest)=>!!r.followView&&!!r.interacting&&!!r.heldInwardZoom&&(r.zoom??0)>0&&
-      (r.family??'mandelbrot')==='mandelbrot'&&!r.angle&&!r.exportDomain&&!r.stationaryOversampling&&
+      !r.angle&&!r.exportDomain&&!r.stationaryOversampling&&
       r.publishPartial!==false&&r.colors.mode===0&&r.colors.supersample===1&&
       !needsEndpoints(r.colors)&&(r.colors.capped??0)===0;
-    return !!prepared&&ordinary(prepared)&&ordinary(live)&&containsNumericalView(prepared,live);
+    return !!prepared&&(prepared.family??'mandelbrot')===(live.family??'mandelbrot')&&
+      (live.family!=='julia'||!!prepared.juliaX&&!!prepared.juliaY&&!!live.juliaX&&!!live.juliaY&&
+        prepared.juliaX.eq(live.juliaX)&&prepared.juliaY.eq(live.juliaY))&&
+      ordinary(prepared)&&ordinary(live)&&containsNumericalView(prepared,live);
   }
   private referenceNeedsPreparation(request:RenderRequest,limbs:number):boolean {
     const family=request.family??'mandelbrot';
@@ -2262,7 +2279,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
    * retarget follows a finer live grid. Other geometry changes still retry. */
   private requirePreparedInwardView(request:RenderRequest){
     const live=request.followView?this.currentView:null;
-    if((request.family??'mandelbrot')==='mandelbrot'&&live?.interacting&&(live.zoom??0)>0&&
+    if(live?.interacting&&(live.zoom??0)>0&&
         !this.sameView(request,this.workRequest(live))&&!this.inwardPreparationContinues(request,live))throw new LiveDemandChanged();
   }
   /** Plan numerical sampling independently of the visible camera and output. */
@@ -2514,14 +2531,17 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       request.useApprox !== true || method === Method.Direct || !approximationEligible(family, request.colors.mode) ||
       !this.laHasUsableMultiStep || this.tableEpsilonLog2!==blaTableEpsilon(request) ||
       requiredDelta.gt(this.tableMaxDelta.times(1 + 1e-12)) ? 0 : this.laLevels;
-    const pipelineKind=family==='julia'?approximationLevels>0?'juliaApprox':'julia':method===Method.Direct?'direct':approximationLevels>0?'approx':'plain';
+    const pipelineKind=family==='julia'?method===Method.Direct?'juliaDirect':approximationLevels>0?'juliaApprox':'julia':method===Method.Direct?'direct':approximationLevels>0?'approx':'plain';
     // Table viability now fixes the exact variant. Prepare only that variant
     // while target/field resources are validated, then await residual work.
-    const ordinarySpecialized=(pipelineKind==='plain'||pipelineKind==='approx')&&
+    const ordinarySpecialized=pipelineKind!=='direct'&&
       request.colors.mode===0&&initialGrid===1&&(request.colors.capped??0)===0&&!needsEndpoints(request.colors);
+    const calculationKind:CalculationPipelineKind=ordinarySpecialized
+      ? family==='julia'?method===Method.Direct?'ordinaryJuliaDirect':approximationLevels>0?'ordinaryJuliaApprox':'ordinaryJulia'
+        :approximationLevels>0?'ordinaryApprox':'ordinaryPlain'
+      :pipelineKind;
     let ordinaryShape=tuning.workgroupShape;
-    const calculationPreparation=this.ensureComputePipeline(ordinarySpecialized?
-      pipelineKind==='approx'?'ordinaryApprox':'ordinaryPlain':pipelineKind,ordinaryShape);
+    const calculationPreparation=this.ensureComputePipeline(calculationKind,ordinaryShape);
     const initialWorkgroup=deliveryWorkgroup(ordinaryShape);
     let calculateWorkgroupX=ordinarySpecialized?initialWorkgroup.x:8;
     let calculateWorkgroupY=ordinarySpecialized?initialWorkgroup.y:4;
@@ -2698,8 +2718,12 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     const progressive = grid === 1 && request.publishPartial!==false&&!holdCompletedAppearance;
     // Measured ordinary dispatch does not transfer recurrence state between
     // views. Rotated fields keep the incumbent cold cohort and carry guards.
-    const measuredBlaEligible=!!request.followView&&ordinary&&family==='mandelbrot'&&pipelineKind==='approx'&&
+    const ordinaryBlaEligible=!!request.followView&&ordinary&&
+      (family==='mandelbrot'&&pipelineKind==='approx'||family==='julia'&&pipelineKind==='juliaApprox')&&
       !request.exportDomain&&!request.stationaryOversampling;
+    // A cheap Julia probe can conceal a few million-iteration survivors. Keep
+    // its mandatory slices even when the average measured cost is small.
+    const measuredBlaEligible=ordinaryBlaEligible&&family==='mandelbrot';
     const cohortEligible=measuredBlaEligible&&!request.angle;
     const continuationCapacity=Math.min(cohortEligible?32768:4096,
       continuationLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize)));
@@ -2723,8 +2747,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if (progressive && request.isCurrent!()) this.incomingFrame = frame;
     }
     const epsilonPolicy=linearBlaPolicy(request,method);
-    const ordinaryCostKey=[family,method,pipelineKind,request.maxIterations,limbs,colors.mode,grid,epsilonPolicy].join("|");
-    const gpuPolicy=[family,method,pipelineKind,limbs,colors.mode,grid,this.retainEndpoints,epsilonPolicy].join('|');
+    const ordinaryCostKey=[family,constant,method,pipelineKind,request.maxIterations,limbs,colors.mode,grid,epsilonPolicy].join("|");
+    const gpuPolicy=[family,constant,method,pipelineKind,limbs,colors.mode,grid,this.retainEndpoints,epsilonPolicy].join('|');
     if(this.gpuBatchPolicy!==gpuPolicy){this.gpuBatchPolicy=gpuPolicy;this.gpuBatchCost={msPerVisit:0};}
     // Each callback retains the estimate for its numerical policy. Late results
     // cannot train a replacement policy after a mode/precision transition.
@@ -2733,7 +2757,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       this.ordinaryBatchCostKey=ordinaryCostKey;this.batchMsPerSample=0;
     }
     const freshWork=!this.reuseMapping&&!capUpgrade;
-    const feedbackPolicy=[family,method,pipelineKind,limbs,colors.mode,grid,
+    const feedbackPolicy=[family,constant,method,pipelineKind,limbs,colors.mode,grid,
       this.retainEndpoints,request.useApprox===true,freshWork,epsilonPolicy].join("|");
     const syncFeedbackPolicy=(hardBudget:number)=>{
       if(hardBudget<=0){
@@ -2746,7 +2770,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if(this.batchCostKey!==key||explicitCapChange){this.batchCostKey=key;this.batchFeedback.enterTarget(true);}
       this.batchFeedbackCap=request.maxIterations;
     };
-    const settledPreviewEligible=progressive&&ordinary&&family==='mandelbrot'&&!!request.followView;
+    const settledPreviewEligible=progressive&&ordinary&&!!request.followView;
     let singlePreview=settledPreviewEligible&&!this.isInteracting(request);
     if (!fieldStale||capFieldResolved) this.pending.reset(0,0);
     if (fieldStale&&!capFieldResolved) {
@@ -2783,7 +2807,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
     let continuationReadback:GPUBuffer|undefined;
     const continuationOrbit=this.orbitBuffer;
     let continuationProbe:{msPerVisit:number}|undefined;
-    const carryEligible=!!(continuationSupported&&ordinary&&family==='mandelbrot'&&!request.angle&&
+    const carryEligible=!!(continuationSupported&&ordinary&&!request.angle&&
       !request.exportDomain&&!request.stationaryOversampling);
     const continuationIdentity:ContinuationIdentity={epoch,policy:[sampleKey,pipelineKind,this.refLength,u32[20],u32[21]].join('|'),
       reference:this.refSamples,orbit:this.orbitBuffer,table:this.laBuffer,index:this.laIndexBuffer};
@@ -2911,7 +2935,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const batchTuning=this.currentView?.tuning??tuning;
       if(ordinarySpecialized&&ordinaryShape!==batchTuning.workgroupShape){
         ordinaryShape=batchTuning.workgroupShape;
-        calculatePipeline=await this.ensureComputePipeline(pipelineKind==='approx'?'ordinaryApprox':'ordinaryPlain',ordinaryShape);
+        calculatePipeline=await this.ensureComputePipeline(calculationKind,ordinaryShape);
         if(epoch!==this.publicationEpoch||!request.isCurrent!()||this.abortRequested){completed=false;this.aborted=true;break;}
         this.requireLiveMethod(request);
         const shape=deliveryWorkgroup(ordinaryShape);
@@ -2933,7 +2957,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const directionScale=request.followView?(!interacting?2:zoom<0?.5:1):1;
       // Apply the tested larger stationary floor only to this ordinary
       // perturbation path. Direct and expensive-pixel continuation stay unchanged.
-      const stationaryEligible=!!request.followView&&!interacting&&family==='mandelbrot'&&
+      const stationaryEligible=!!request.followView&&!interacting&&
         method!==Method.Direct&&colors.mode===0&&grid===1;
       const stationaryFactor=stationaryEligible?2:1;
       const minimum=startingBatchVisits(request.maxIterations,multiplier*directionScale*stationaryFactor);
@@ -2958,7 +2982,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       const spatialBudget=costly?Math.min(cohortEligible?continuationCapacity:continuedBudget,Math.floor(continuationCapacity/(grid*grid))):ordinaryBudget;
       // A direct-iteration wave can exceed the allowance even at minimum size;
       // shrinking it further loses occupancy without making it finish sooner.
-      const gpuControlled=!!request.followView&&family==='mandelbrot'&&ordinary&&
+      const gpuControlled=!!request.followView&&ordinary&&
         method!==Method.Direct&&!costly;
       // Soften an expensive floor only after perturbation is established and
       // while zooming. Preserve the allowance, estimator and stationary policy.
@@ -3012,7 +3036,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       let regionPipeline=calculatePipeline;
       if(shape){
         const preparing=performance.now();
-        const kind=ordinarySpecialized ? pipelineKind==='approx'?'ordinaryApprox':'ordinaryPlain' : pipelineKind as 'direct'|'plain'|'approx'|'julia'|'juliaApprox';
+        const kind=calculationKind;
         regionPipeline=await this.ensureContinuationPipeline(kind,false,poolEligible&&!carry);
         if(poolEligible&&!carry){pooledPipeline=await this.ensureContinuationPipeline(kind,true);collectorPipeline=await this.ensureSurvivorCollector();}
         this.pipelineWaitMs+=performance.now()-preparing;
@@ -3069,7 +3093,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
           u32[40]=region.y;u32[42]=region.x;u32[43]=region.x+width;
           device.queue.writeBuffer(this.uniformBuffer,0,uniforms);
           const control=new Uint32Array(resume?4:CONTINUATION_HEADER_BYTES/4);
-          const stationarySlice=!!request.followView&&request.maxIterations>=MANDATORY_CONTINUATION_ITERATIONS&&family==='mandelbrot'&&ordinary&&
+          const stationarySlice=!!request.followView&&request.maxIterations>=MANDATORY_CONTINUATION_ITERATIONS&&ordinary&&
             method!==Method.Direct&&!this.isInteracting(request);
           const operations=cohortEligible&&!resume?coldCohortOperations(shape.lanes,stationarySlice):
             resumedContinuationOperations(sliceOperations,resume?unfinished:shape.lanes,stationarySlice);

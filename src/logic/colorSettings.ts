@@ -1,7 +1,7 @@
 import { FRACTALS_PALETTES } from './importedPalettes';
 
-/** Maximum custom stops — must match MAX_STOPS in the shaders. */
-export const MAX_STOPS = 8;
+/** Shared limit for validation, editor and runtime-sized GPU palette storage. */
+export const MAX_STOPS = 10;
 
 export const PALETTE_CUSTOM = 5;
 
@@ -129,7 +129,7 @@ export function cycleFromSlider(value:number){return CYCLE_MIN*Math.pow(CYCLE_MA
 export function cycleToSlider(value:number){return Math.log(Math.max(CYCLE_MIN,Math.min(CYCLE_MAX,value))/CYCLE_MIN)/Math.log(CYCLE_MAX/CYCLE_MIN);}
 export function validateColors(value:unknown):ColorSettings {
   const v=value as ColorSettings;
-  if(!v||!Array.isArray(v.stops)||v.stops.length<2||v.stops.length>8||v.stops.some(s=>typeof s!=='string'||!/^#[0-9a-f]{6}$/i.test(s)))throw Error('Palette needs 2–8 RGB colours');
+  if(!v||!Array.isArray(v.stops)||v.stops.length<2||v.stops.length>MAX_STOPS||v.stops.some(s=>typeof s!=='string'||!/^#[0-9a-f]{6}$/i.test(s)))throw Error(`Palette needs 2–${MAX_STOPS} RGB colours`);
   const c={...DEFAULT_COLORS};
   for(const key of Object.keys(DEFAULT_COLORS) as (keyof ColorSettings)[]){
     if(key==='stops')continue;
@@ -150,6 +150,11 @@ export function validateColors(value:unknown):ColorSettings {
 }
 
 const HEX = /^#[0-9a-f]{6}$/i;
+
+/** Near-black means every RGB channel is strictly below 17 (0x11). */
+export function isBlackStop(hex:string):boolean{
+  return HEX.test(hex)&&[1,3,5].every(i=>parseInt(hex.slice(i,i+2),16)<17);
+}
 
 export function hexToRgb(hex: string): [number, number, number] {
   const value = HEX.test(hex) ? hex : "#000000";
@@ -172,38 +177,34 @@ export interface Preset {
 }
 
 export const PRESETS: Preset[] = [
-  { name: "Ultra", stops: ["#08103a", "#2f6bcb", "#f2ffff", "#ffaa00", "#3a1400"] },
+  { name: "Ultra", stops: ["#08103a","#2f6bcb","#f2ffff","#ffaa00","#3a1400","#000000"] },
   { name: "Midnight", stops: ["#01030f", "#10265c", "#4f8ff7", "#dbe9ff", "#0a1230"] },
-  { name: "Ember", stops: ["#120200", "#7a1f05", "#ff7b18", "#ffe6b0", "#2b0a00"] },
-  { name: "Viridis", stops: ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"] },
-  { name: "Plasma", stops: ["#0d0887", "#7e03a8", "#cc4778", "#f89540", "#f0f921"] },
-  { name: "Toxic", stops: ["#03120a", "#0b6b32", "#5df08a", "#f0ffe0", "#0a2a12"] },
+  { name: "Ember", stops: ["#120200","#7a1f05","#ff7b18","#ffe6b0","#2b0a00","#000000"] },
+  { name: "Viridis", stops: ["#440154","#3b528b","#21918c","#5ec962","#fde725","#000000"] },
+  { name: "Toxic", stops: ["#03120a","#0b6b32","#5df08a","#f0ffe0","#0a2a12","#000000"] },
   { name: "Inferno", stops: ["#000004", "#57106e", "#bc3754", "#f98e09", "#fcffa4"] },
   { name: "Nebula", stops: ["#05010f", "#3a1178", "#8b3fd4", "#f0a6ff", "#1a0533"] },
-  { name: "Copper", stops: ["#0d0603", "#5c2b12", "#c9743a", "#ffd9a8", "#2a1408"] },
   { name: "Magma", stops: ["#000004", "#51127c", "#b73779", "#fc8961", "#fcfdbf"] },
-  { name: "Cividis", stops: ["#00224e", "#434e6c", "#7d7c78", "#bcae6c", "#fee838"] },
   { name: "Mono", stops: ["#000000", "#3a3a3a", "#ffffff", "#4a4a4a", "#0d0d0d"] },
-  { name: "Sunset", stops: ["#0b0221", "#5c1a5e", "#e0563f", "#ffc46b", "#fff4d6"] },
-  { name: "Turbo", stops: ["#30123b", "#28bbec", "#a4fc3c", "#fb7e21", "#7a0403"] },
-  { name: "Twilight", stops: ["#e2d9e2", "#7790b4", "#3e356b", "#60203f", "#bd5a56"] },
-  { name: "Spectral", stops: ["#9e0142", "#f46d43", "#ffffbf", "#66c2a5", "#5e4fa2"] },
-  { name: "Coolwarm", stops: ["#3b4cc0", "#8db0fe", "#dddcdc", "#f4987a", "#b40426"] },
+  { name: "Sunset", stops: ["#0b0221","#5c1a5e","#e0563f","#ffc46b","#fff4d6","#000000"] },
+  { name: "Turbo", stops: ["#30123b","#28bbec","#a4fc3c","#fb7e21","#7a0403","#000000"] },
+  { name: "Twilight", stops: ["#e2d9e2","#7790b4","#3e356b","#60203f","#bd5a56","#000000"] },
+  { name: "Spectral", stops: ["#9e0142","#f46d43","#ffffbf","#66c2a5","#5e4fa2","#000000"] },
+  { name: "Coolwarm", stops: ["#3b4cc0","#8db0fe","#dddcdc","#f4987a","#b40426","#000000"] },
   { name: "Cubehelix", stops: ["#000000", "#1a354c", "#a07949", "#d3c1d9", "#ffffff"] },
-  { name: "Prismatica", stops: ["#210638", "#7133c8", "#bda5ff", "#f5f0ff", "#ad8be9", "#6421a3", "#230638"] },
-  { name: "Forest Brass", stops: ["#030d08", "#205b42", "#81b49b", "#eee8be", "#bf9a27", "#745d09", "#090d05"] },
-  { name: "Rosewood Ribbon", stops: ["#ffe2e5", "#ee6875", "#af263a", "#3e252a", "#702e39", "#f37789", "#ffdee6"] },
-  { name: "Harbour Mist", stops: ["#1b0c30", "#283f6c", "#3f788f", "#72a6a8", "#adcbbd", "#e8f2e9"] },
-  { name: "Copper Current", stops: ["#6ce5ee", "#167da4", "#4b2637", "#c8694b", "#ffe5b7", "#ba5649", "#244a70", "#6de5ef"] },
-  { name: "Lime Frost", stops: ["#142006", "#658211", "#c1d84e", "#f4ffe0", "#87c4d7", "#274d78", "#060d25"] },
-  { name: "Plum Porcelain", stops: ["#e3eaf6", "#f0edf2", "#a475a5", "#441046", "#180921", "#7c417d", "#e9ddeb"] },
-  { name: "Patina Gold", stops: ["#f1ffff", "#8dd5dc", "#3c707d", "#163e43", "#337c6d", "#abc8b5", "#e3b474", "#f6f1dc"] },
+  { name: "Prismatica", stops: ["#210638","#7133c8","#bda5ff","#f5f0ff","#ad8be9","#6421a3","#230638","#000000"] },
+  { name: "Rosewood Ribbon", stops: ["#ffe2e5","#ee6875","#af263a","#3e252a","#702e39","#f37789","#ffdee6","#000000"] },
+  { name: "Harbour Mist", stops: ["#1b0c30","#283f6c","#3f788f","#72a6a8","#adcbbd","#e8f2e9","#000000"] },
+  { name: "Copper Current", stops: ["#6ce5ee","#167da4","#000000","#4b2637","#c8694b","#ffe5b7","#ba5649","#244a70","#6de5ef"] },
+  { name: "Lime Frost", stops: ["#142006","#658211","#c1d84e","#f4ffe0","#87c4d7","#274d78","#060d25","#000000"] },
+  { name: "Plum Porcelain", stops: ["#e3eaf6","#f0edf2","#a475a5","#441046","#180921","#7c417d","#e9ddeb","#000000"] },
+  { name: "Patina Gold", stops: ["#f1ffff","#8dd5dc","#3c707d","#163e43","#000000","#337c6d","#abc8b5","#e3b474","#f6f1dc"] },
   { name: "Blush Fire", stops: ["#10070a", "#822039", "#ed7197", "#fff0db", "#f5a570", "#b64336", "#350a1b", "#0c0508"] },
-  { name: "Arctic Glass", stops: ["#e2fcff", "#64d5e3", "#237f97", "#071632", "#155474", "#51c8dd", "#e3fbff"] },
+  { name: "Arctic Glass", stops: ["#e2fcff","#64d5e3","#237f97","#071632","#155474","#51c8dd","#e3fbff","#000000"] },
   { name: "Signal Flare", stops: ["#06152c", "#16687a", "#d3e65c", "#f59b2a", "#611505", "#0d0504", "#ffc34a", "#30638a"] },
-  { name: "Sea Fern", stops: ["#efffff", "#d4efeb", "#a0d3bf", "#69b18d", "#328246", "#174b1e"] },
-  { name: "Rose Glacier", stops: ["#ffe5ef", "#dd80ad", "#952353", "#220b24", "#173969", "#7ea8d9", "#e6dce8"] },
-  { name: "Lagoon Satin", stops: ["#fff8d2", "#efd574", "#a78c55", "#605769", "#165653", "#36b9a4", "#b5fff0"] },
+  { name: "Sea Fern", stops: ["#efffff","#d4efeb","#a0d3bf","#69b18d","#328246","#174b1e","#000000"] },
+  { name: "Rose Glacier", stops: ["#ffe5ef","#dd80ad","#952353","#220b24","#173969","#7ea8d9","#e6dce8","#000000"] },
+  { name: "Lagoon Satin", stops: ["#fff8d2","#efd574","#a78c55","#605769","#165653","#36b9a4","#b5fff0","#000000"] },
   { name: "Mint Eclipse", stops: ["#050b0b", "#123a32", "#236e60", "#5dc4a4", "#baffdf", "#edf9f0", "#050a09"] },
   ...FRACTALS_PALETTES,
 ];

@@ -17,7 +17,7 @@ export function normalizePanelSettings(value:unknown):PanelSettings{
   for(const id of PANEL_IDS){const p=input.positions?.[id];if(!p||!Number.isFinite(p.x)||!Number.isFinite(p.y))continue;
     positions[id]={x:p.x,y:p.y};
     if(RESIZABLE_IDS.includes(id)){const width=panelDimension(p.width),height=id==='controls'?undefined:panelDimension(p.height);if(width!==undefined)positions[id].width=width;if(height!==undefined)positions[id].height=height;}}
-  return {positions,opacity:typeof input.opacity==='number'&&Number.isFinite(input.opacity)?Math.max(.15,Math.min(1,input.opacity)):.6,
+  return {positions,opacity:typeof input.opacity==='number'&&Number.isFinite(input.opacity)?Math.max(.15,Math.min(1,input.opacity)):.7,
     accent:typeof input.accent==='string'&&/^#[0-9a-fA-F]{6}$/.test(input.accent)?input.accent:FACTORY_ACCENT,
     activeTab:TAB_IDS.includes(input.activeTab??'')?input.activeTab!:'tab-main',
     details:Object.fromEntries(DETAILS_IDS.map(id=>[id,input.details?.[id]===true])),controlsHidden:input.controlsHidden===true,hideStatusWithMenu:input.hideStatusWithMenu===true};
@@ -151,7 +151,7 @@ export function setupPanels(initial?:PanelSettings):PanelController{
   window.addEventListener('resize',()=>closeAccent());
   const resetLayout=(save=true)=>{saved={};panels.forEach(p=>{p.style.left='';p.style.top='';p.style.right='';p.style.bottom='';if(RESIZABLE_IDS.includes(p.id)){p.style.width='';p.style.height='';}});restore();if(save)persist();};
   const tabs=Array.from(document.querySelectorAll<HTMLButtonElement>('[role=tab]'));
-  const selectTab=(tab:HTMLButtonElement,focus=false)=>{closeAccent();for(const item of tabs){const selected=item===tab;item.setAttribute('aria-selected',String(selected));item.tabIndex=selected?0:-1;const panel=document.getElementById(item.getAttribute('aria-controls')!);if(panel)panel.hidden=!selected;}if(focus)tab.focus();};
+  const selectTab=(tab:HTMLButtonElement,focus=false)=>{closeAccent();for(const item of tabs){const selected=item===tab;item.setAttribute('aria-selected',String(selected));item.tabIndex=selected?0:-1;const panel=document.getElementById(item.getAttribute('aria-controls')!);if(panel)panel.hidden=!selected;}if(focus)tab.focus();const scroll=controls.querySelector<HTMLElement>('.controls-scroll');if(scroll)scroll.scrollTop=0;};
   tabs.forEach((tab,index)=>{tab.onclick=event=>{if(draggedTabs.delete(tab)&&event.detail>0)return;selectTab(tab);};tab.onkeydown=e=>{let next=index;if(e.key==='ArrowRight')next=(index+1)%tabs.length;else if(e.key==='ArrowLeft')next=(index+tabs.length-1)%tabs.length;else if(e.key==='Home')next=0;else if(e.key==='End')next=tabs.length-1;else return;e.preventDefault();selectTab(tabs[next],true);};});
   const toggle=document.getElementById('toggle')!;
   const syncToggle=(hidden:boolean)=>{const label=hidden?'Show controls':'Hide controls';toggle.setAttribute('aria-label',label);toggle.title=label;toggle.setAttribute('aria-expanded',String(!hidden));};
@@ -185,7 +185,7 @@ export function setupPanels(initial?:PanelSettings):PanelController{
       details:Object.fromEntries(Array.from(document.querySelectorAll<HTMLDetailsElement>('#controls details')).map(details=>[details.id,details.open])),
       controlsHidden:document.body.classList.contains('controls-hidden'),hideStatusWithMenu});
   },reset(){
-    opacity=.6;accent=defaultAccent;hideStatusWithMenu=false;syncStatus();setOpacity();setAccent();resetLayout(false);document.body.classList.remove('controls-hidden');syncToggle(false);
+    opacity=.7;accent=defaultAccent;hideStatusWithMenu=false;syncStatus();setOpacity();setAccent();resetLayout(false);document.body.classList.remove('controls-hidden');syncToggle(false);
     selectTab(tabs[0]);document.querySelectorAll<HTMLDetailsElement>('#controls details').forEach(details=>details.open=false);
   }};
 }

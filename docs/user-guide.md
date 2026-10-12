@@ -56,17 +56,21 @@ A higher limit gives difficult orbits more time to escape. It also increases wor
 
 **Home** restores the whole-view position and span for the current family and resets iterations to 1,000. It retains the current family, Julia constant, rotation and appearance.
 
-**Full Reset**, at the bottom of Advanced beside Reset tuning, returns to factory Mandelbrot Home, clears saved defaults and remembered layout/view settings, closes auxiliary panels and removes a linked view from the address. Saved locations remain available.
+**Full Reset**, in Advanced beside Save Defaults, returns to factory Mandelbrot Home, clears saved defaults and remembered layout/view settings, closes auxiliary panels and removes a linked view from the address. Saved locations remain available.
 
 ### Locations and exact links
 
 Location is both a searchable chooser and a name field. Click to browse, or type to filter saved locations, including the 12 editable defaults. Use the dropdown arrow to browse. Arrow keys select a result; Enter opens it. Escape or clicking outside closes the list. Saving works with the list open.
 
-To save your view, enter a name and select **Save location**. A saved view contains the family, exact decimal centre and span, Julia constant, camera rotation, iteration limit, appearance, colour rotation checkbox states, Reverse direction and Rotation speed. Saving the selected saved name updates that entry. Reusing another saved name asks before replacement. Editing the name clears the selection. Select a saved location and choose **Delete location** to remove it after confirmation; the current camera view stays in place. Default locations are added to the saved collection once and can also be deleted; deleted entries stay deleted after reloading.
+To save your view, enter a name and select **Save location**. A saved view contains the family, exact decimal centre and span, Julia constant, camera rotation, iteration limit, appearance, colour rotation checkbox states, Reverse and Rotation speed. Saving the selected saved name updates that entry. Reusing another saved name asks before replacement. Editing the name clears the selection. Select a saved location and choose **Delete location** to remove it after confirmation; the current camera view stays in place. Default locations are added to the saved collection once and can also be deleted; deleted entries stay deleted after reloading.
 
-**Back**, beside Save PNG, restores the exact view before a location jump, Home, opening a linked location or changing family. It preserves the camera, family, rotation, iteration limit, appearance and colour rotation settings. Repeated Back steps through up to 32 previous jumps in this session; reload and Full Reset clear that history.
+**Back**, beside Home and Stop, returns through up to 1,000 previous stationary camera locations in this session. Zooming, panning and camera rotation each record their departure point once per gesture or wheel burst. About 250 ms without camera navigation makes the current view a new stationary point, even if refinement or colour animation continues. Location jumps, Home, links, PNG loads and family changes also participate. Back during movement returns to the last stationary point; repeated Back steps further into history without recording its own return trips.
+
+Back restores exact coordinates, span, camera angle, family, Julia constant and the effective iteration limit. Your current colouring, colour rotation flags/speed and tuning stay in effect. Dynamic iterations re-anchor at the restored depth and cap. Colour edits and calculation progress add no entries. History stores settings only, with no images, numerical fields or reference orbits; reload and Full Reset clear it.
 
 **Copy Link** places those same view fields in a URL fragment. It does not change the current address bar. Paste the link into the browser address bar and press Enter to open the shared view immediately. This works on a fresh page or in the running explorer, without a reload or a second confirmation. After opening, the fragment is removed from the address bar so the same link can be pasted again; use Copy Link to share the current view. Zoom speed, Dynamic preference, navigation tuning and panel layout are local preferences and are not carried in that link.
+
+**Paste Link**, after Copy Link, opens a valid DeepGPU link or scene text from the clipboard. When clipboard access is already granted, returning to the app checks the contents and greys out the button if no valid scene is present. Until the contents can be read, the button stays available and may request permission on click. Ctrl+V while focused on the fractal also works without granting clipboard-read permission; pasting into an input remains ordinary text editing. Invalid contents and a clipboard read that finishes after navigation leave the current view unchanged. URLs are decoded locally rather than opened or fetched.
 
 Saved locations belong to this browser profile and origin. A different hostname or port has separate browser storage. Copy links for views you want to keep outside that storage.
 
@@ -74,7 +78,7 @@ Saved locations belong to this browser profile and origin. A different hostname 
 
 ### Save defaults
 
-**Save defaults**, below Backup/Restore locations in Advanced, captures appearance, colour rotation settings, zoom speed, base iterations, Dynamic preference, tuning and panel settings. Panel settings include positions, sizes, opacity, accent colour, active tab, open sections, visibility and status-line preference.
+**Save Defaults**, beside Full Reset in Advanced, captures appearance, colour rotation settings, zoom speed, base iterations, Dynamic preference, tuning and panel settings. Panel settings include positions, sizes, opacity, accent colour, active tab, open sections, visibility and status-line preference.
 
 It deliberately excludes the camera position, fractal family, Julia constant and saved-location collection. Each page load begins at Mandelbrot Home using your saved preferences and iteration base. Without saved defaults, ordinary remembered appearance and local preferences may still apply; Full Reset returns to factory settings.
 
@@ -92,11 +96,13 @@ Expand **Edit Palette** to select one of 18 presets or edit a custom palette.
 | Sample the image | Use the eyedropper in any colour picker, move over the image to inspect the magnifying loupe, then click to select its centre pixel; Escape cancels |
 | Delete a stop | Use Delete in the picker, or the Delete key on a focused stop |
 | Preserve a stop during Randomise | Select it and enable Lock stop |
-| Reverse the palette | Reverse stops |
+| Reverse the palette | Reverse |
 | Equalise stop positions | Space evenly |
 | Revisit edits | Undo / Redo |
 
-Palettes contain **2–8 stops**. New palette editing uses a repeating gradient so the end wraps into the beginning. Lock stop protects that stop's colour and position during Randomise; manual editing, deletion and reversal remain available. Randomise may change the number and positions of unlocked stops.
+Palettes contain **2–10 stops**. New palette editing uses a repeating gradient so the end wraps into the beginning. Lock stop protects that stop's colour and position during Randomise; manual editing, deletion and reversal remain available. Randomise generates 6–10 stops, leaving at least 5% of the strip between neighbours, including the wraparound seam. Neighbouring colours differ by at least 10% of the full RGB distance. It chooses one black stop 50% of the time, two 25%, and none 25%; two black stops are never neighbours, including across the seam. Locked stops take precedence where their existing colours or positions make these constraints impossible.
+
+A black stop means every RGB channel is below 17: #101010 qualifies, while #111111 and #00ffff do not. Each preset has at least one such stop. When a preset previously lacked one, a black stop was appended for palettes with fewer than eight stops, or inserted at a randomly chosen, saved position for longer palettes. Reloading keeps those preset positions stable. Existing saved views retain their stored colours.
 
 ### Formulas, effects and capped points
 
@@ -114,7 +120,7 @@ Distance lighting is an explicit option with additional computation cost. Its co
 
 ## Advanced
 
-**Rotation speed** sets the time for one full light-direction turn, from **1 second to 1 minute**, with a factory default of **10 seconds**. The left end is slowest and the right end is fastest. Palette Offset rotates four times slower: a full palette cycle takes **4 seconds to 4 minutes** (40 seconds at the default setting). **Reverse direction**, beneath the slider, reverses both rotations. Save Defaults remembers the speed and checkbox settings; Full Reset restores 10 seconds, normal direction and both rotations off.
+**Rotation speed** sets the time for one full light-direction turn, from **30 seconds at the left to 0.1 seconds at the right**, with a factory default of **10 seconds**. Palette Offset rotates four times slower: a full palette cycle takes **120 seconds to 0.4 seconds** (40 seconds at the default setting). **Reverse**, beside the speed label, reverses both rotations. The numeric speed remains available to assistive technology. Save Defaults remembers the speed and checkbox settings; Full Reset restores 10 seconds, normal direction and both rotations off.
 
 ### Throughput
 
@@ -158,6 +164,10 @@ The export snapshots the view when Save PNG is pressed. You may continue navigat
 
 Use **Cancel export** or close the export panel to cancel. Large images are generated in tiles. Limits are 80 million total pixels and 32,768 pixels per dimension, plus device and memory checks. Lower dimensions if the requested size cannot fit.
 
+New exports embed the exact location, iteration limit, appearance, both palette/light rotation flags and rotation speed from the same Save action as the rendered image. Choose **Main → Load PNG**, or drop the original PNG onto the explorer, to restore the view and show the original image immediately. The image scales to viewport height: wider images crop at the sides; narrower images leave side margins. When both saved rotation flags are off, the image stays displayed without numerical calculation until navigation or an image-setting change needs rendering. If either rotation is on, the original image stays visible while the numerical field is prepared; live animation then starts automatically at the restored speed and direction. Deep locations may take time to prepare. Stop cancels preparation while retaining the original image. Panel settings and stop locks leave it displayed. PNGs contain final colours rather than escape/distance data, so changing colouring needs a numerical render; compatible recolouring of ordinary completed numerical fields still reuses their data. Loading preserves saved locations and adds the preceding view to **Back**, beside Home and Stop. Pending loading is cancelled if the view changes before the image is ready.
+
+Older PNGs have no embedded location, and editing or re-encoding an image can remove its metadata. Loading accepts files up to 512 MB with the same 80-million-pixel and 32,768-pixel-per-side limits as export. Metadata is read in bounded slices, then the image is decoded before the current view changes. Navigation starts rendering for the full current viewport, including any previously missing side margins.
+
 ## Factory settings at a glance
 
 | Setting | Value |
@@ -166,9 +176,9 @@ Use **Cancel export** or close the export panel to cancel. Large images are gene
 | Vertical span / rotation | 2.8 / 0° |
 | Iteration base / Dynamic | 1,000 / On |
 | Zoom speed | 1× |
-| Panel opacity | 60% |
+| Panel opacity | 70% |
 | Panel accent / Menu hides title and status line | #e5a14e / Off |
-| Light rotation / Palette rotation / Reverse direction | Off / Off / Off |
+| Light rotation / Palette rotation / Reverse | Off / Off / Off |
 | Rotation speed / Palette cycle at that speed | 10 seconds / 40 seconds |
 | Default locations | 12 editable, deletable saved views |
 | Throughput / stationary refinement | Smooth / Detailed |
