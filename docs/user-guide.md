@@ -60,7 +60,7 @@ A higher limit gives difficult orbits more time to escape. It also increases wor
 
 ### Locations and exact links
 
-Location is both a searchable chooser and a name field. Click to browse, or type to filter saved locations, including the 12 editable defaults. Use the dropdown arrow to browse. Arrow keys select a result; Enter opens it. Escape or clicking outside closes the list. Saving works with the list open.
+Location is both a searchable chooser and a name field. Click to browse, or type to filter saved locations, including the 15 editable defaults. Use the dropdown arrow to browse. Arrow keys select a result; Enter opens it. Escape or clicking outside closes the list. Saving works with the list open.
 
 To save your view, enter a name and select **Save location**. A saved view contains the family, exact decimal centre and span, Julia constant, camera rotation, iteration limit, appearance, colour rotation checkbox states, Reverse and Rotation speed. Saving the selected saved name updates that entry. Reusing another saved name asks before replacement. Editing the name clears the selection. Select a saved location and choose **Delete location** to remove it after confirmation; the current camera view stays in place. Default locations are added to the saved collection once and can also be deleted; deleted entries stay deleted after reloading.
 
@@ -180,7 +180,7 @@ Older PNGs have no embedded location, and editing or re-encoding an image can re
 | Panel accent / Menu hides title and status line | #e5a14e / Off |
 | Light rotation / Palette rotation / Reverse | Off / Off / Off |
 | Rotation speed / Palette cycle at that speed | 10 seconds / 40 seconds |
-| Default locations | 12 editable, deletable saved views |
+| Default locations | 15 editable, deletable saved views |
 | Throughput / stationary refinement | Smooth / Detailed |
 | Pointer priority / 2× Pointer refinement | 2× / Off |
 | 2× oversampling / Distance lighting | Off / Off |
@@ -204,4 +204,4 @@ Older PNGs have no embedded location, and editing or re-encoding an image can re
 
 The application computes and exports locally, with no automatic upload of saved locations or PNGs and no remote rendering service. The GitHub Pages site loads a Google Analytics visit tag; its configuration omits queries and fragments from reported page and referrer URLs. The tag is disabled on other origins, including localhost. Loading the application and its worker assets still uses the serving origin.
 
-Before moving to a new candidate, port or version, use **Advanced → Backup locations** and keep the downloaded JSON file. Use **Restore locations** in the new version and verify the names before retiring the old version. Restoring merges locations without overwriting name conflicts. The 12 default locations come from the owner's 3 October 2026 backup and are added once, preserving existing saved entries.
+Before moving to a new candidate, port or version, use **Advanced → Backup locations** and keep the downloaded JSON file. Use **Restore locations** in the new version and verify the names and count before retiring the old version. Restoring merges locations without overwriting name conflicts. The checked-in collection contains 15 views: the 12 original defaults and three additional deep views, **Inferno 10^800**, **Inferno 10^900** and **Eon 10^1000**. A fresh browser origin receives all 15. An origin that already received the original defaults gets only the three additions once, preserving existing entries and leaving deleted original defaults deleted. After each group has been added, deleting one of its entries does not recreate it on reload.

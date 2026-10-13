@@ -11,7 +11,7 @@ Bug reports, focused improvements, documentation corrections and performance inv
 
 ## Development
 
-Use Node.js and npm:
+Use **Node.js 24 and npm**, matching the GitHub workflows. The pinned Vite version supports Node.js 20.19+ on the 20.x line, or 22.12+ on newer lines; see [Vite's setup requirements](https://vite.dev/guide/).
 
 ```sh
 npm ci

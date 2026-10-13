@@ -37,7 +37,7 @@ Open **[DeepGPU Zoomer](https://byronbuzz.github.io/DeepGPU-Zoomer/)** in a brow
 
 Browser, GPU, operating-system and driver support all matter. See [WebGPU availability](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API).
 
-To run the source locally, you need Node.js and npm. Use a secure page origin: the local development address below works; hosted installations should use HTTPS.
+To run the source locally, use **Node.js 24 and npm**, matching the project's GitHub workflows. The pinned Vite version requires Node.js 20.19+ on the 20.x line, or 22.12+ on newer lines; see [Vite's setup requirements](https://vite.dev/guide/). Use a secure page origin: the local development address below works; hosted installations should use HTTPS.
 
 ```sh
 git clone https://github.com/byronbuzz/DeepGPU-Zoomer.git
@@ -86,7 +86,7 @@ Keyboard navigation applies when you are interacting with the canvas rather than
 - **Iteration limit** sets the current calculation limit, from **1 to 10,000,000**. Higher limits can reveal more detail around difficult boundaries, at a greater computation cost.
 - **Base iterations** sets the starting limit for Dynamic adjustment. **Dynamic** raises or lowers the effective limit during zooming according to depth. Turn it off to keep a fixed limit.
 - **Home** returns to the whole view of the current family. **Full Reset** in Advanced restores factory preferences and Mandelbrot Home, while retaining saved locations.
-- **Location** searches your saved views, including 12 defaults added once from the supplied collection. All entries are editable and deletable; deleted defaults stay deleted after reload. Enter a name and choose **Save location**. Saving the selected location updates it; a collision with another saved name asks before replacement. **Delete location** asks “Delete saved location?” and keeps the current view. **Back** returns through up to 1,000 previous stationary camera locations in this session, including zooming, panning, rotation and location jumps. It restores exact camera coordinates, family, Julia constant and iteration limit while keeping your current colouring, colour animation and tuning. Reload and Full Reset clear this history.
+- **Location** searches your saved views, including 15 defaults in the supplied collection. Fresh browser origins receive all 15; existing origins receive the three additional deep views once, without recreating deleted original defaults. All entries are editable and deletable; deleted seeded entries stay deleted after reload. Enter a name and choose **Save location**. Saving the selected location updates it; a collision with another saved name asks before replacement. **Delete location** asks “Delete saved location?” and keeps the current view. **Back** returns through up to 1,000 previous stationary camera locations in this session, including zooming, panning, rotation and location jumps. It restores exact camera coordinates, family, Julia constant and iteration limit while keeping your current colouring, colour animation and tuning. Reload and Full Reset clear this history.
 - **Copy Link** includes the camera, Julia constant, camera rotation, iteration limit, appearance, colour rotation checkbox states, reverse direction and speed. Saved locations preserve the same settings. **Paste Link**, beside Copy Link, opens a valid link or scene from the clipboard. It is disabled when readable clipboard contents contain no valid scene; until access is available, clicking it may request browser permission. Ctrl+V while focused on the fractal also opens a copied scene. Pasted URLs supply metadata only and are never fetched.
 - **Backup locations** and **Restore locations** in Advanced export and import JSON. Restore preserves existing entries, skips duplicates, and renames conflicting incoming names to keep both versions. Keep a backup before moving to another hostname, port or browser profile; browser storage is separate for each origin.
 - **Save Defaults**, beside Full Reset in Advanced, stores your preferred appearance, controls, iteration settings and panel settings. Startup uses the Home camera unless an exact link is opened.
@@ -147,9 +147,9 @@ The interface uses TypeScript, HTML and CSS without a UI framework. Vite bundles
 | `src/palette-editor.ts`, `src/panels.ts`, `src/tuning.ts` | Appearance editing, movable panels and navigation policies |
 | `src/colour-picker.ts`, `src/colour-rotation.ts` | Shared colour pickers, image-sampling loupe and timed palette/light rotation |
 | `src/locations.ts`, `src/default-locations.json`, `src/defaults.ts` | Location backup/restore, the default collection and saved startup preferences |
-| `src/export/` | Export snapshots, tile planning, readback and PNG encoding |
+| `src/export/` | Export snapshots, tile planning, readback, PNG encoding, scene metadata and loaded-image display |
 
-The current dependency versions are decimal.js **10.6.0**, TypeScript **5.9.3**, Vite **5.4.21** and WebGPU type definitions **0.1.71**. The [lockfile](package-lock.json) records the complete dependency resolution.
+The current dependency versions are decimal.js **10.6.0**, TypeScript **5.9.3**, Vite **8.3.4** and WebGPU type definitions **0.1.74**. The [lockfile](package-lock.json) records the complete dependency resolution.
 
 ```mermaid
 flowchart TD
@@ -165,6 +165,11 @@ flowchart TD
     I --> J[Canvas presentation]
     K[Palette and appearance] --> I
     B --> L[Independent PNG export snapshot]
+    L --> N[PNG with exact scene metadata]
+    N --> O[Validated PNG loading]
+    O --> B
+    O --> P[Original image display]
+    P --> J
 ```
 
 See the **[Architecture reference](docs/architecture.md)** for the active data flow, source map and implementation boundaries.
@@ -255,7 +260,7 @@ Rendering and PNG encoding run locally, with no automatic upload of saved locati
 
 - **[WebGPU specification](https://www.w3.org/TR/webgpu/), [WGSL specification](https://www.w3.org/TR/WGSL/) and [MDN WebGPU guide](https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API)** — GPU computation, shading and browser requirements.
 - **[Web Workers](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API)** — background reference computation.
-- **[decimal.js](https://mikemcl.github.io/decimal.js/), [TypeScript](https://www.typescriptlang.org/), [Vite 5 documentation](https://v5.vite.dev/guide/) and [WebGPU types](https://github.com/gpuweb/types)** — application dependencies and build tooling.
+- **[decimal.js](https://mikemcl.github.io/decimal.js/), [TypeScript](https://www.typescriptlang.org/), [Vite documentation](https://vite.dev/guide/) and [WebGPU types](https://github.com/gpuweb/types)** — application dependencies and build tooling.
 - **[Matplotlib 3.10.6 colormaps](https://matplotlib.org/3.10.6/users/explain/colors/colormaps.html)** — the source of the sampled scientific colour presets.
 - **[PNG specification](https://www.w3.org/TR/png-3/) and [Compression Streams](https://developer.mozilla.org/en-US/docs/Web/API/Compression_Streams_API)** — the image format and browser compression used for export.
 
