@@ -70,6 +70,8 @@ Active acceleration uses **linear BLA**, built cooperatively on the main thread.
 
 The hierarchy omits unusable single-step storage and uses alignment-aware skip lookup. When a multi-step entry is unavailable or its radius does not admit the current delta, recurrence continues without that skip.
 
+Completed CPU BLA tables use a two-entry LRU cache with a 128 MiB limit. Retained orbit and coefficient backing buffers are counted once even when entries share them; each entry's copied level metadata is counted separately. This lets compatible precision or radius variants share an orbit without prematurely evicting one another. Cache keys, validation and read-only ownership still determine reuse.
+
 The radius criterion is local. It is not a bound on accumulated image error, and accelerated completion does not imply exact equality with an unaccelerated calculation. Reaching the selected iteration cap is also distinct from proving mathematical interior membership.
 
 ## Fields, channels and reuse
@@ -110,7 +112,9 @@ Eligible expensive cold work retains recurrence state across bounded GPU submiss
 
 Continuation state has its own ownership and compatibility rules. Cross-view carry is narrower than ordinary image reuse: eligible ordinary, unrotated Mandelbrot and Julia work can transfer compatible continuation state at identical sample spacing. Julia carry and inward preparation require the same fixed constant. Narrow CPU reference prefetch also supports Julia, accounting for its 80-byte packed and 96-byte decoded samples. [continuation.ts](../src/render/continuation.ts) and [pending-continuation.ts](../src/render/pending-continuation.ts) define its execution and ownership model.
 
-Julia iteration-only BLA skips load and apply only their A coefficient because their parameter delta is zero. They retain the shared table layout, validity bounds and fixed 2⁻⁴⁰ tolerance. Julia remains excluded from measured bulk BLA admission, survivor pooling and fast recurrence multiplication: the first two did not pass performance qualification, and the last has not been qualified.
+Julia iteration-only BLA skips load and apply only their A coefficient because their parameter delta is zero. They retain the shared table layout, validity bounds and fixed 2⁻⁴⁰ tolerance. Ordinary scalar Julia perturbation with BLA uses the existing fast recurrence product, including continuation. Direct, distance, endpoint and no-BLA paths retain accurate multiplication, as do coordinates, analytic certificates and reference decoding. Julia remains excluded from measured bulk BLA admission and survivor pooling because those experiments did not pass performance qualification.
+
+Bounded qualification on 13 October 2026 used Codex's in-app browser, complete native fields and two reversed-order pairs against the preceding main revision, `5250c398`. A long-orbit Mandelbrot precision-return case completed in 17–21 ms with shared-buffer cache accounting versus 210–221 ms previously, with byte-identical fields and images. A difficult Julia viewport at c = −2 and a one-million-iteration cap completed about 7% faster with the fast product; tested images and iteration counts matched, and a short held-zoom comparison showed no responsiveness regression. Final squared orbit magnitudes differed for capped samples, so the Julia result establishes the tested output and timing benefit, not mathematical equivalence or whole-family numerical certification. Ordinary short views showed little benefit; these measurements are case-specific.
 
 ## Publication and quality
 

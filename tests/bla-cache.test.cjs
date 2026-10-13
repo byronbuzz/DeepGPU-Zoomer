@@ -84,16 +84,46 @@ test('two-table LRU promotes actual hits and skips oversize entries without evic
   assert.equal(get(small, large), undefined); assert.ok(get(small, fs[0]));
 });
 
-test('byte cap charges orbit storage and both metadata arrays, including shared-orbit variants', async () => {
+test('byte cap retains radius and epsilon variants with one shared orbit charge', async () => {
   const f = fixture(), table = await build(f), amount = charge(f, table);
   const tooSmall = new BlaTableCache(2, amount - 1); remember(tooSmall, f, table);
   assert.equal(get(tooSmall, f), undefined);
-  const cache = new BlaTableCache(2, amount); remember(cache, f, table);
-  const broad = delta.times(2), second = await build(f, broad); remember(cache, f, second, broad);
-  assert.equal(get(cache, f, delta).table.data, second.data,
-    'second radius displaces first under conservative per-entry storage charge');
-  assert.equal(cache.tables.length, 1); assert.equal(cache.bytes, amount);
+  const broad = delta.times(2), secondEpsilon = -14, second = await build(f, broad, secondEpsilon);
+  const combined = amount + second.data.byteLength + 4 * (second.levelOffsets.length + second.levelCounts.length);
+  const cache = new BlaTableCache(2, combined); remember(cache, f, table);
+  remember(cache, f, second, broad, secondEpsilon);
+  assert.equal(get(cache, f).table.data, table.data);
+  assert.equal(get(cache, f, broad, secondEpsilon).table.data, second.data);
+  assert.equal(cache.tables.length, 2); assert.equal(cache.bytes, combined);
+  const tight = new BlaTableCache(2, combined - 1); remember(tight, f, table);
+  remember(tight, f, second, broad, secondEpsilon);
+  assert.equal(get(tight, f), undefined); assert.ok(get(tight, f, broad, secondEpsilon));
+  assert.equal(tight.bytes, charge(f, second));
   cache.clear(); assert.equal(get(cache, f, broad), undefined); assert.equal(cache.bytes, 0);
+});
+
+test('shared backing buffers are charged once while each metadata copy is charged', async () => {
+  const f = fixture('.25', 1), table = await build(f), alias = {...f, samples:new Float32Array(f.samples.buffer)};
+  const amount = charge(f, table) + 4 * (table.levelOffsets.length + table.levelCounts.length);
+  const cache = new BlaTableCache(2, amount);
+  remember(cache, f, table); remember(cache, alias, table);
+  assert.ok(get(cache, f)); assert.ok(get(cache, alias));
+  assert.equal(cache.tables.length, 2); assert.equal(cache.bytes, amount);
+  const replacement = await build(f); remember(cache, f, replacement);
+  assert.equal(cache.bytes, charge(f, replacement)); assert.equal(get(cache, alias), undefined);
+  assert.equal(get(cache, f).table.data, replacement.data);
+  cache.clear(); assert.equal(cache.bytes, 0);
+});
+
+test('shared-orbit LRU eviction releases reference bytes only with its last variant', async () => {
+  const f = fixture(), other = fixture('.26'), a = await build(f), b = await build(f, delta, -14), c = await build(other);
+  const cache = new BlaTableCache(2, 1_000_000);
+  remember(cache, f, a); remember(cache, f, b, delta, -14); get(cache, f);
+  remember(cache, other, c);
+  assert.equal(get(cache, f, delta, -14), undefined); assert.ok(get(cache, f)); assert.ok(get(cache, other));
+  assert.equal(cache.bytes, charge(f, a) + charge(other, c));
+  const last = fixture('.27'), d = await build(last); remember(cache, last, d);
+  assert.equal(get(cache, f), undefined); assert.equal(cache.bytes, charge(other, c) + charge(last, d));
 });
 
 test('exact key replacement does not leak accounting and clear releases completed tables', async () => {

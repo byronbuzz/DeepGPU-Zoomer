@@ -8,7 +8,6 @@ interface CachedTable {
   epsilonLog2: number;
   maxDelta: Decimal;
   table: BlaTable;
-  bytes: number;
 }
 
 /** Completed CPU tables only. Admission transfers read-only ownership of the
@@ -46,6 +45,17 @@ export class BlaTableCache {
     }
   }
 
+  private retainedBytes(): number {
+    const buffers = new Set<ArrayBufferLike>();
+    let bytes = 0;
+    for (const entry of this.tables) {
+      buffers.add(entry.samples.buffer); buffers.add(entry.table.data.buffer);
+      bytes += 4 * (entry.table.levelOffsets.length + entry.table.levelCounts.length);
+    }
+    for (const buffer of buffers) bytes += buffer.byteLength;
+    return bytes;
+  }
+
   remember(samples: Float32Array, length: number, sampleWords: number, epsilonLog2: number,
     maxDelta: Decimal, table: BlaTable): void {
     if (!this.validInput(samples, length, sampleWords, epsilonLog2, maxDelta) ||
@@ -81,13 +91,13 @@ export class BlaTableCache {
     if (this.maxTables === 0 || bytes > this.maxBytes) return;
     const old = this.tables.findIndex(entry => entry.samples === samples && entry.length === length &&
       entry.sampleWords === sampleWords && entry.epsilonLog2 === epsilonLog2 && entry.maxDelta.eq(maxDelta));
-    if (old >= 0) this.bytes -= this.tables.splice(old, 1)[0].bytes;
+    if (old >= 0) this.tables.splice(old, 1);
     const owned = {...table, levelOffsets:[...table.levelOffsets], levelCounts:[...table.levelCounts]};
     Object.freeze(owned.levelOffsets); Object.freeze(owned.levelCounts); Object.freeze(owned);
-    this.tables.push({samples, length, sampleWords, epsilonLog2, maxDelta:new Decimal(maxDelta), table:owned, bytes});
-    this.bytes += bytes;
+    this.tables.push({samples, length, sampleWords, epsilonLog2, maxDelta:new Decimal(maxDelta), table:owned});
+    this.bytes = this.retainedBytes();
     while (this.tables.length > this.maxTables || this.bytes > this.maxBytes) {
-      this.bytes -= this.tables.shift()!.bytes;
+      this.tables.shift(); this.bytes = this.retainedBytes();
     }
   }
 

@@ -55,10 +55,10 @@ fn wideMul(a: Wide, b: Wide) -> Wide {
                          qAdd(qMul(a.x, b.y), qMul(a.y, b.x)), a.e + b.e));
 }
 
-// Only ordinary scalar Mandelbrot with BLA admits the cheaper product.
+// Only ordinary scalar perturbation with BLA admits the cheaper product.
 // Coordinates, analytic certificates and reference decoding retain qMul.
 fn wideRecurrenceMul(a: Wide, b: Wide) -> Wide {
-    if (!ORDINARY || !APPROX || JULIA || DIRECT) { return wideMul(a,b); }
+    if (!ORDINARY || !APPROX || DIRECT) { return wideMul(a,b); }
     return wideNorm(Wide(qAdd(qMulFast(a.x,b.x),-qMulFast(a.y,b.y)),
                          qAdd(qMulFast(a.x,b.y),qMulFast(a.y,b.x)),a.e+b.e));
 }
