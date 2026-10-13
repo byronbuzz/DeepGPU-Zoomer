@@ -421,6 +421,7 @@ export class WebGpuRenderer {
   private lastPresentedCoverage: WebGpuRenderer['coverageFrame'] = null;
   private pipelineLayout: GPUPipelineLayout | null = null;
   private pendingPipelines = new Map<string, Promise<void>>();
+  private navigationPipelineWarmups = new Set<string>();
   private spareHistory: GPUTexture | null = null;
   private deviceLost=false;
   private disposed=false;
@@ -789,9 +790,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     await this.oncePipeline('continuation-'+key,()=>this.continuationPipelines.has(key),async()=>{
       const device=this.ctx.device;
       if(device.limits.maxStorageBuffersPerShaderStage<8)throw Error('Continuation requires eight storage bindings');
-      this.continuationModule??=await compileShader(device,
-        [compensatedSource,quadSource,quadFastSource,perturbationSource,wideSource,continuationSource].join('\n'),
-        'continuation');
+      // Different variants may prepare concurrently. Share module compilation
+      // as well as the individual pipeline promises.
+      await this.oncePipeline('continuation-module',()=>!!this.continuationModule,async()=>{
+        const module=await compileShader(device,
+          [compensatedSource,quadSource,quadFastSource,perturbationSource,wideSource,continuationSource].join('\n'),
+          'continuation');
+        if(this.disposed)throw new Error('Renderer has been disposed.');
+        if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+        this.continuationModule=module;
+      });
+      if(this.disposed)throw new Error('Renderer has been disposed.');
+      if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
       this.continuationLayout??=device.createBindGroupLayout({label:'continuation-state',entries:[
         {binding:0,visibility:GPUShaderStage.COMPUTE,buffer:{type:'storage'}}]});
       const constants={DIRECT:kind==='direct'?1:0,JULIA:kind.startsWith('julia')||kind.startsWith('ordinaryJulia')?1:0,
@@ -799,11 +809,36 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         APPROX:kind==='approx'||kind==='ordinaryApprox'||kind==='juliaApprox'||kind==='ordinaryJuliaApprox'?1:0,POOL_COORDINATES:coordinates?1:0};
       const pipeline=await device.createComputePipelineAsync({label:'continuation-'+key,
         layout:device.createPipelineLayout({bindGroupLayouts:[this.bindLayout!,this.continuationLayout]}),
-        compute:{module:this.continuationModule,entryPoint:pooled?'computePooled':'computeContinued',constants}});
+        compute:{module:this.continuationModule!,entryPoint:pooled?'computePooled':'computeContinued',constants}});
       if(this.deviceLost)throw Error('GPU connection lost. Reload to reconnect.');
+      if(this.disposed)throw new Error('Renderer has been disposed.');
       this.continuationPipelines.set(key,pipeline);
     });
     return this.continuationPipelines.get(key)!;
+  }
+
+  private warmNavigationPipelines(request:RenderRequest) {
+    // Only the ordinary live Mandelbrot viewport predicts this crossover.
+    // Preview, export and other appearances retain demand-driven preparation.
+    if(this.disposed||this.deviceLost||!request.followView||request.family==='julia'||
+      request.exportDomain||request.stationaryOversampling||request.publishPartial===false||
+      request.colors.mode!==0||request.colors.supersample!==1||(request.colors.capped??0)!==0||
+      needsEndpoints(request.colors))return;
+    const shape=request.tuning?.workgroupShape??DEFAULT_TUNING.workgroupShape;
+    const kind:CalculationPipelineKind=request.useApprox===true?'ordinaryApprox':'ordinaryPlain';
+    const continuation=request.dynamicIterations||request.maxIterations>COLD_CONTINUATION_OPERATIONS;
+    const key=[kind,shape,!!continuation].join('|');
+    if(this.navigationPipelineWarmups.has(key))return;
+    this.navigationPipelineWarmups.add(key);
+    // Start after the initial image, without holding up rendering. Speculative
+    // failures are retried/reported by the existing foreground ensure calls.
+    void this.trackOperation(async()=>{
+      const jobs:Promise<unknown>[]=[this.ensureComputePipeline(kind,shape)];
+      if(continuation&&this.ctx.device.limits.maxStorageBuffersPerShaderStage>=8){
+        jobs.push(this.ensureContinuationPipeline('direct'),this.ensureContinuationPipeline(kind));
+      }
+      await Promise.all(jobs);
+    }).catch(()=>{});
   }
 
   private async ensureSurvivorCollector() {
@@ -2409,6 +2444,7 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
         if(!(error instanceof DOMException&&error.name==='AbortError')){this.incomingFrame=null;this.sampleKey='';this.admittedSamples=null;this.fieldView=null;this.aborted=true;this.exactCompletedSamples=0;}
         throw error;
       }finally{if(this.batchCostKey)this.batchFeedback.enterTarget();}
+      if(result.completed&&result.method===Method.Direct)this.warmNavigationPipelines(request);
       // Counter readback also yields. Demand arriving during that last fence
       // must be serviced before reporting the stream complete.
       if (request.followView && result.completed && this.currentView && !this.isComplete(this.currentView)) this.retarget=true;
@@ -2542,10 +2578,22 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       :pipelineKind;
     let ordinaryShape=tuning.workgroupShape;
     const calculationPreparation=this.ensureComputePipeline(calculationKind,ordinaryShape);
+    // On a cold deep link (or a BLA fallback), prepare the required ordinary
+    // continuation alongside calculation instead of discovering it afterward.
+    // Million-iteration cohort variants remain selected by their actual region.
+    const continuationPreparation=request.followView&&family==='mandelbrot'&&
+      request.colors.mode===0&&initialGrid===1&&request.colors.supersample===1&&
+      (request.colors.capped??0)===0&&!needsEndpoints(request.colors)&&
+      !request.exportDomain&&!request.stationaryOversampling&&
+      request.maxIterations>COLD_CONTINUATION_OPERATIONS&&request.maxIterations<MANDATORY_CONTINUATION_ITERATIONS&&
+      device.limits.maxStorageBuffersPerShaderStage>=8&&
+      continuationLaneLimit(Math.min(device.limits.maxStorageBufferBindingSize,device.limits.maxBufferSize))>=1
+      ?this.ensureContinuationPipeline(calculationKind):null;
     const initialWorkgroup=deliveryWorkgroup(ordinaryShape);
     let calculateWorkgroupX=ordinarySpecialized?initialWorkgroup.x:8;
     let calculateWorkgroupY=ordinarySpecialized?initialWorkgroup.y:4;
     void calculationPreparation.catch(()=>{});
+    void continuationPreparation?.catch(()=>{});
     // Every buffer in the bind group must exist even when this method does not
     // read it: the direct path builds neither an orbit nor a skip table.
     this.ensureOrbitCapacity(1);
@@ -3037,7 +3085,8 @@ struct Output { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32>
       if(shape){
         const preparing=performance.now();
         const kind=calculationKind;
-        regionPipeline=await this.ensureContinuationPipeline(kind,false,poolEligible&&!carry);
+        regionPipeline=continuationPreparation?await continuationPreparation:
+          await this.ensureContinuationPipeline(kind,false,poolEligible&&!carry);
         if(poolEligible&&!carry){pooledPipeline=await this.ensureContinuationPipeline(kind,true);collectorPipeline=await this.ensureSurvivorCollector();}
         this.pipelineWaitMs+=performance.now()-preparing;
         if(this.abortRequested||!request.isCurrent!()||continuationOrbit!==this.orbitBuffer)throw new DOMException('Superseded continuation','AbortError');

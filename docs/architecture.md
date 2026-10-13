@@ -104,7 +104,9 @@ These are internal workload settings, not measured latency promises. The main ap
 
 Measured GPU cost and completion feedback adapt eligible Mandelbrot and Julia work sizes. Established inward work can publish aligned stripes. Ordinary iteration-only kernels share workgroup specialization, GPU-timed batching and stationary settling. Julia Direct has a pipeline override while retaining its accurate Wide recurrence. GPU timing is used when supported; Julia timing policy also includes its fixed constant.
 
-Analytic cardioid and bulb checks avoid eligible Mandelbrot interior work. Exact numerical-cycle detection can terminate eligible no-skip paths. Shader pipelines are cached or created lazily to avoid repeated setup costs.
+Analytic cardioid and bulb checks avoid eligible Mandelbrot interior work. Exact numerical-cycle detection can terminate eligible no-skip paths. Shader pipelines share cached preparation promises. After a completed Direct image, the ordinary live Mandelbrot viewport prepares its likely perturbation variant in the background; Dynamic or a cap above 4096 also prepares Direct and perturbation continuation. Initialization and the initial image do not await this warmup. Preview, export and other appearances retain demand-driven preparation.
+
+For ordinary live Mandelbrot requests between 4097 and 999999 iterations, the exact calculation and continuation variants begin preparation together once BLA viability is known. Continuation variants share one shader-module compilation. Speculative failures do not retry on every image; actual demand retries and reports errors through the normal preparation path. These scheduling changes address the recorded cold pipeline waits. The owner reported the repair working and accepted it on 14 October 2026; post-repair cold-start timings have not been measured.
 
 ## Bounded continuation
 
